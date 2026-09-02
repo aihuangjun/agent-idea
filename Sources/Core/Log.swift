@@ -1,7 +1,6 @@
 import Foundation
 
 public enum LogLevel: String, Sendable {
-    case debug = "DEBUG"
     case info = "INFO "
     case warn = "WARN "
     case error = "ERROR"
@@ -97,14 +96,13 @@ public final class LogFile: @unchecked Sendable {
     }
 }
 
-/// 全应用共用的日志入口。测试里默认不落盘。
+/// 全应用共用的日志入口。没调过 `start` 时（测试进程）什么都不写。
 public enum Log {
     private static let state = State()
 
     private final class State: @unchecked Sendable {
         let lock = NSLock()
         var file: LogFile?
-        var mirrorToConsole = false
     }
 
     private static let formatter: DateFormatter = {
@@ -121,22 +119,13 @@ public enum Log {
     }
 
     /// 启动时调用一次。`banner` 是第一行，通常写版本号与配置目录。
-    public static func start(directory: URL = AppPaths.logDirectory, banner: String, mirrorToConsole: Bool = false) {
+    public static func start(banner: String) {
         state.lock.lock()
-        state.file = LogFile(directory: directory)
-        state.mirrorToConsole = mirrorToConsole
+        state.file = LogFile(directory: AppPaths.logDirectory)
         state.lock.unlock()
         write(.info, "app", "========== \(banner)")
     }
 
-    /// 测试用：把输出改道到指定文件（或 nil 关闭）。
-    public static func redirect(to file: LogFile?) {
-        state.lock.lock()
-        state.file = file
-        state.lock.unlock()
-    }
-
-    public static func debug(_ category: String, _ message: String) { write(.debug, category, message) }
     public static func info(_ category: String, _ message: String) { write(.info, category, message) }
     public static func warn(_ category: String, _ message: String) { write(.warn, category, message) }
     public static func error(_ category: String, _ message: String) { write(.error, category, message) }
@@ -144,11 +133,7 @@ public enum Log {
     private static func write(_ level: LogLevel, _ category: String, _ message: String) {
         state.lock.lock()
         let file = state.file
-        let mirror = state.mirrorToConsole
         state.lock.unlock()
-        guard file != nil || mirror else { return }
-        let line = "\(formatter.string(from: Date())) \(level.rawValue) [\(category)] \(message)"
-        file?.append(line)
-        if mirror { print(line) }
+        file?.append("\(formatter.string(from: Date())) \(level.rawValue) [\(category)] \(message)")
     }
 }

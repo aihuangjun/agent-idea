@@ -154,7 +154,7 @@ private struct ProjectTab: View {
         .help(session.project.root.path)
         .contextMenu {
             Button("关闭项目") { workbench.closeProject(session.id) }
-            Button("在访达中显示") { session.revealInFinder(session.project.root) }
+            Button("在访达中显示") { Desktop.revealInFinder(session.project.root) }
         }
     }
 }

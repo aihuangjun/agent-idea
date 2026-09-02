@@ -11,6 +11,7 @@ for window in list {
   guard let owner = window[kCGWindowOwnerName as String] as? String, (owner == "AgentIDEA" || owner == "Agent IDEA"),
         let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
         let id = window[kCGWindowNumber as String] as? Int,
+        let onScreen = window[kCGWindowIsOnscreen as String] as? Bool, onScreen,
         let bounds = window[kCGWindowBounds as String] as? [String: Any], (bounds["Height"] as? Double ?? 0) > 200 else { continue }
   print(id)
   break

@@ -8,7 +8,7 @@ import Testing
 /// 真起一个 WKWebView 验 render.js：这是「验 WebKit 自己那一层」的用例，模型层的用例一律用替身。
 /// 每条约几百毫秒。顺手把渲染结果截成图放到 AGENTIDEA_SNAPSHOT_DIR（若设了），给人眼看。
 @MainActor
-private func renderAndInspect(_ payload: [String: Any], size: CGSize = CGSize(width: 900, height: 600), snapshotName: String? = nil, inspect: String) async throws -> Any? {
+private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(width: 900, height: 600), snapshotName: String? = nil, inspect: String) async throws -> Any? {
     let renderer = ContentRenderer()
     let webView = renderer.webView
     webView.frame = CGRect(origin: .zero, size: size)
@@ -48,13 +48,13 @@ private func renderAndInspect(_ payload: [String: Any], size: CGSize = CGSize(wi
     }
     """
     let count = try await renderAndInspect(
-        ["kind": "code", "path": "/x/Greeter.swift", "text": source, "language": "swift"],
+        RenderPayload(.code(path: "/x/Greeter.swift", text: source, language: "swift")),
         snapshotName: "code",
         inspect: "document.querySelectorAll('table.code tr').length"
     )
     #expect((count as? NSNumber)?.intValue == 8)
     let keywords = try await renderAndInspect(
-        ["kind": "code", "path": "/x/Greeter.swift", "text": source, "language": "swift"],
+        RenderPayload(.code(path: "/x/Greeter.swift", text: source, language: "swift")),
         inspect: "document.querySelectorAll('table.code .hljs-keyword').length"
     )
     #expect(((keywords as? NSNumber)?.intValue ?? 0) >= 3)
@@ -63,7 +63,7 @@ private func renderAndInspect(_ payload: [String: Any], size: CGSize = CGSize(wi
 @Test @MainActor func singleLineJSONIsPrettyPrinted() async throws {
     let json = "{\"a\":1,\"b\":[1,2,3],\"c\":{\"d\":\"e\"},\"long\":\"" + String(repeating: "x", count: 150) + "\"}"
     let rows = try await renderAndInspect(
-        ["kind": "code", "path": "/x/a.json", "text": json, "language": "json"],
+        RenderPayload(.code(path: "/x/a.json", text: json, language: "json")),
         inspect: "document.querySelectorAll('table.code tr').length"
     )
     #expect(((rows as? NSNumber)?.intValue ?? 0) > 5)
@@ -85,7 +85,7 @@ private func renderAndInspect(_ payload: [String: Any], size: CGSize = CGSize(wi
     ```
     """
     let summary = try await renderAndInspect(
-        ["kind": "markdown", "path": "/x/a.md", "markdown": markdown, "docDir": "file:///x/", "view": "preview"],
+        RenderPayload(.markdown(path: "/x/a.md", markdown: markdown, documentDirectory: URL(fileURLWithPath: "/x/"), showsSource: false)),
         snapshotName: "markdown",
         inspect: "[document.querySelectorAll('article.md h1').length, document.querySelectorAll('input[type=checkbox]').length, document.querySelectorAll('pre.hljs .hljs-keyword').length, document.querySelectorAll('.mermaid').length].join(',')"
     )
@@ -105,11 +105,7 @@ private func renderAndInspect(_ payload: [String: Any], size: CGSize = CGSize(wi
     +let extra = true
      func main() {}
     """)
-    let rows = try JSONSerialization.jsonObject(with: JSONEncoder().encode(DiffLayout.sideBySide(diff))) as! [Any]
-    let payload: [String: Any] = [
-        "kind": "diff", "path": "App.swift", "language": "swift", "mode": "side",
-        "rows": rows, "binary": false, "empty": false, "added": diff.addedCount, "removed": diff.removedCount,
-    ]
+    let payload = RenderPayload(.diff(path: "App.swift", language: "swift", diff: diff, mode: .sideBySide, emptyReason: nil))
     let summary = try await renderAndInspect(
         payload, snapshotName: "diff-side",
         inspect: "[document.querySelectorAll('table.diff.side tr').length, document.querySelectorAll('td.src.del').length, document.querySelectorAll('td.src.add').length, document.querySelectorAll('td.src.empty').length, document.querySelectorAll('.wd').length > 0 ? 1 : 0].join(',')"
@@ -127,8 +123,7 @@ private func renderAndInspect(_ payload: [String: Any], size: CGSize = CGSize(wi
     +new
      same
     """)
-    let rows = try JSONSerialization.jsonObject(with: JSONEncoder().encode(DiffLayout.unified(diff))) as! [Any]
-    let payload: [String: Any] = ["kind": "diff", "path": "a.txt", "mode": "unified", "rows": rows, "binary": false, "empty": false, "added": 1, "removed": 1]
+    let payload = RenderPayload(.diff(path: "a.txt", language: nil, diff: diff, mode: .unified, emptyReason: nil))
     let summary = try await renderAndInspect(
         payload, snapshotName: "diff-unified",
         inspect: "document.querySelector('.message') ? document.querySelector('.message').innerText : [document.querySelectorAll('table.diff.unified tr').length, document.querySelectorAll('td.src.del .marker').length, document.querySelectorAll('td.src.add .marker').length].join(',')"

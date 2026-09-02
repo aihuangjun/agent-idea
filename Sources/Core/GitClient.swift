@@ -1,6 +1,9 @@
 import Foundation
 
-/// 用系统 git 命令读仓库。**只读**：这个阅读器不提交、不暂存、不改任何东西。
+/// 用系统 git 命令操作仓库。
+///
+/// 读：仓库根、status、diff。写只有三类，都是用户在界面上明确点出来的：
+/// 提交（`add` + `commit --only`）、推送、回滚（`restore` / `rm`）。除此之外不碰仓库。
 public struct GitClient: Sendable {
     public static let searchPaths = ["/usr/local/bin/git", "/opt/homebrew/bin/git", "/usr/bin/git"]
 
@@ -16,8 +19,8 @@ public struct GitClient: Sendable {
     }
 
     /// 找本机的 git。找不到时返回 nil——没有 git 也要能当纯文件浏览器用。
-    public static func locate(fileManager: FileManager = .default) -> GitClient? {
-        ExecutableLocator.locate(searchPaths, fileManager: fileManager).map { GitClient(executable: $0) }
+    public static func locate() -> GitClient? {
+        ExecutableLocator.locate(searchPaths).map { GitClient(executable: $0) }
     }
 
     /// 传给 git 的环境。

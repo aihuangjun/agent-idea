@@ -1,3 +1,4 @@
+import AppKit
 import Core
 import DesignSystem
 import SwiftUI
@@ -59,13 +60,14 @@ private struct EmptyEditorView: View {
 
 private struct TabBar: View {
     @ObservedObject var session: ProjectSession
+    @State private var clicks = DoubleClickDetector(interval: NSEvent.doubleClickInterval)
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
                     ForEach(session.tabs) { tab in
-                        TabItem(session: session, tab: tab, isActive: tab.id == session.activeTabID).id(tab.id)
+                        TabItem(session: session, clicks: clicks, tab: tab, isActive: tab.id == session.activeTabID).id(tab.id)
                     }
                 }
             }
@@ -80,7 +82,8 @@ private struct TabBar: View {
 }
 
 private struct TabItem: View {
-    @ObservedObject var session: ProjectSession
+    let session: ProjectSession
+    let clicks: DoubleClickDetector
     let tab: EditorTab
     let isActive: Bool
     @State private var isHovering = false
@@ -123,7 +126,7 @@ private struct TabItem: View {
         .onHover { isHovering = $0 }
         .onTapGesture {
             session.activate(tab.id)
-            if session.registerClick(on: "tab:" + tab.id) { session.pin(tab.id) }
+            if clicks.registerClick(on: tab.id) { session.pin(tab.id) }
         }
         .contextMenu {
             Button("关闭") { session.closeTab(tab.id) }
@@ -133,8 +136,8 @@ private struct TabItem: View {
             if tab.isPreview { Button("固定标签") { session.pin(tab.id) } }
             if let url = tab.fileURL ?? tab.change.flatMap({ session.url(for: $0) }) {
                 Button("在项目视图中显示") { session.reveal(url) }
-                Button("在访达中显示") { session.revealInFinder(url) }
-                Button("用默认应用打开") { session.openWithDefaultApp(url) }
+                Button("在访达中显示") { Desktop.revealInFinder(url) }
+                Button("用默认应用打开") { Desktop.openWithDefaultApp(url) }
             }
         }
     }
@@ -143,7 +146,7 @@ private struct TabItem: View {
 // MARK: - 面包屑与工具条
 
 private struct EditorHeader: View {
-    @EnvironmentObject private var workbench: WorkbenchModel
+    @EnvironmentObject private var preferences: ReadingPreferences
     @ObservedObject var session: ProjectSession
 
     var body: some View {
@@ -163,8 +166,8 @@ private struct EditorHeader: View {
     @ViewBuilder
     private func controls(for tab: EditorTab) -> some View {
         if tab.isDiff {
-            Picker("", selection: $workbench.diffMode) {
-                ForEach(DiffMode.allCases, id: \.self) { Text($0.label).tag($0) }
+            Picker("", selection: $preferences.diffMode) {
+                ForEach(DiffViewMode.allCases, id: \.self) { Text($0.label).tag($0) }
             }
             .pickerStyle(.segmented)
             .controlSize(.small)
@@ -184,7 +187,7 @@ private struct EditorHeader: View {
             .controlSize(.small)
             .frame(width: 110)
         } else if case .code = session.activeContent {
-            Toggle("自动换行", isOn: $workbench.wordWrap)
+            Toggle("自动换行", isOn: $preferences.wordWrap)
                 .toggleStyle(.checkbox).controlSize(.small).font(Theme.smallFont)
             if let url = tab.fileURL, let change = session.change(for: url) {
                 Button {

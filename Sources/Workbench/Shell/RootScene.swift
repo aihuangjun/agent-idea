@@ -9,15 +9,7 @@ public struct AgentIDEARootScene: Scene {
     @StateObject private var updater = Updater()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
-    public init() {
-        let build = BuildIdentity.current
-        Log.start(banner: "Agent IDEA \(build.display) 启动，配置目录 \(AppPaths.configurationDirectory.path)")
-        // 整个应用固定深色：标题栏、菜单、弹窗跟着走，不然窗口内容是深的、系统控件是浅的。
-        NSApp.appearance = NSAppearance(named: .darkAqua)
-        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 800])
-        // 抓一份登录 shell 的环境给 git 用（push 要靠 SSH_AUTH_SOCK 和 PATH 里的凭据助手）
-        Task.detached(priority: .utility) { await LoginShellEnvironment.load() }
-    }
+    public init() {}
 
     private static var defaultWindowSize: CGSize {
         let available = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1440, height: 900)
@@ -35,6 +27,7 @@ public struct AgentIDEARootScene: Scene {
                 // 必须排在 UpdateDialog 之后（包在它外面）：修饰符由内往外套，写在前面的 environmentObject 喂不到外层。
                 .environmentObject(updater)
                 .environmentObject(workbench)
+                .environmentObject(workbench.preferences)
                 .onAppear {
                     updater.checkInBackgroundIfDue()
                     workbench.restoreOpenProjects()
@@ -86,9 +79,9 @@ public struct AgentIDEARootScene: Scene {
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(workbench.active == nil)
                 Divider()
-                Button("放大") { workbench.zoomIn() }.keyboardShortcut("=", modifiers: .command)
-                Button("缩小") { workbench.zoomOut() }.keyboardShortcut("-", modifiers: .command)
-                Button("实际大小") { workbench.resetZoom() }.keyboardShortcut("0", modifiers: [.command, .option])
+                Button("放大") { workbench.preferences.zoomIn() }.keyboardShortcut("=", modifiers: .command)
+                Button("缩小") { workbench.preferences.zoomOut() }.keyboardShortcut("-", modifiers: .command)
+                Button("实际大小") { workbench.preferences.resetZoom() }.keyboardShortcut("0", modifiers: [.command, .option])
                 Divider()
                 Button("下一个标签") { workbench.active?.selectNextTab(offset: 1) }
                     .keyboardShortcut("]", modifiers: [.command, .shift])
@@ -98,8 +91,8 @@ public struct AgentIDEARootScene: Scene {
                     .keyboardShortcut("`", modifiers: .command)
                     .disabled(workbench.sessions.count < 2)
                 Divider()
-                Button(workbench.diffMode == .sideBySide ? "diff：切到单列视图" : "diff：切到并排视图") {
-                    workbench.diffMode = workbench.diffMode == .sideBySide ? .unified : .sideBySide
+                Button(workbench.preferences.diffMode == .sideBySide ? "diff：切到单列视图" : "diff：切到并排视图") {
+                    workbench.preferences.diffMode = workbench.preferences.diffMode == .sideBySide ? .unified : .sideBySide
                 }
                 Button("Markdown：预览 / 源码") { workbench.active?.toggleMarkdownSource() }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
@@ -108,9 +101,9 @@ public struct AgentIDEARootScene: Scene {
                 Button("提交…") { workbench.toolWindow = .commit }
                     .keyboardShortcut("k", modifiers: .command)
                     .disabled(!(workbench.active?.hasGit ?? false))
-                Button("推送") { workbench.active?.pushCurrentBranch() }
+                Button("推送") { workbench.active?.commit?.pushCurrentBranch() }
                     .keyboardShortcut("k", modifiers: [.command, .shift])
-                    .disabled(!(workbench.active?.canPush ?? false))
+                    .disabled(!(workbench.active?.commit?.canPush ?? false))
                 Divider()
                 Button("刷新 git 状态") { workbench.active?.refreshGit() }
                     .disabled(!(workbench.active?.hasGit ?? false))
@@ -134,11 +127,23 @@ extension Notification.Name {
     static let agentIDEAOpenProject = Notification.Name("agentidea.openProject")
 }
 
-/// 接系统递过来的「打开」：访达「打开方式」、拖到 Dock 图标、`open -a AgentIDEA <目录>`。
+/// 应用生命周期：启动时的一次性准备，以及接系统递过来的「打开」
+/// （访达「打开方式」、拖到 Dock 图标、`open -a AgentIDEA <目录>`）。
 final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor var workbench: WorkbenchModel?
     /// 窗口还没建好之前到达的打开请求。
     @MainActor private var pending: [URL] = []
+
+    /// 启动副作用放这里而不是 Scene 的 init：SwiftUI 不承诺 Scene 值只构造一次。
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let build = BuildIdentity.current
+        Log.start(banner: "Agent IDEA \(build.display) 启动，配置目录 \(AppPaths.configurationDirectory.path)")
+        // 整个应用固定深色：标题栏、菜单、弹窗跟着走，不然窗口内容是深的、系统控件是浅的。
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 800])
+        // 抓一份登录 shell 的环境给 git 用（push 要靠 SSH_AUTH_SOCK 和 PATH 里的凭据助手）
+        Task.detached(priority: .utility) { await LoginShellEnvironment.load() }
+    }
 
     func application(_ application: NSApplication, open urls: [URL]) {
         MainActor.assumeIsolated {

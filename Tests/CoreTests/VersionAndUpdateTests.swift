@@ -25,7 +25,7 @@ import Testing
 }
 
 @Test func updatePolicy() {
-    let manifest = UpdateManifest(version: "0.2.0", fileName: "AgentIDEA-0.2.0.dmg", sizeBytes: 1_048_576, sha256: "x", publishedAt: "")
+    let manifest = UpdateManifest(version: "0.2.0", fileName: "AgentIDEA-0.2.0.dmg", sizeBytes: 1_048_576, sha256: "x")
     #expect(UpdatePolicy.hasUpdate(manifest: manifest, currentVersion: "0.1.0"))
     #expect(!UpdatePolicy.hasUpdate(manifest: manifest, currentVersion: "0.2.0"))
     #expect(!UpdatePolicy.hasUpdate(manifest: manifest, currentVersion: "garbage"))

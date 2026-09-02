@@ -3,73 +3,62 @@ import Core
 import DesignSystem
 import Foundation
 
-/// 整个窗口的状态：打开着的几个项目（`ProjectSession`）、当前是哪个、最近项目、阅读偏好。
-///
-/// 正文 WebView 只有一个，所有项目共用；切项目时把当前项目的活动标签重新送进去。
+/// 阅读偏好，所有项目共用。改了就落到 UserDefaults。
 @MainActor
-public final class WorkbenchModel: ObservableObject {
-    @Published public private(set) var sessions: [ProjectSession] = []
-    @Published public private(set) var activeSessionID: String?
-    @Published public private(set) var recentProjects: [RecentProject] = []
+final class ReadingPreferences: ObservableObject {
+    @Published var diffMode: DiffViewMode { didSet { defaults.set(diffMode.rawValue, forKey: "diff.mode") } }
+    @Published var wordWrap: Bool { didSet { defaults.set(wordWrap, forKey: "editor.wrap") } }
+    @Published private(set) var zoom: Double { didSet { defaults.set(zoom, forKey: "editor.zoom") } }
 
-    // MARK: - 阅读偏好（全局）
+    private let defaults: UserDefaults
 
-    @Published public var diffMode: DiffMode {
-        didSet {
-            defaults.set(diffMode.rawValue, forKey: "diff.mode")
-            active?.renderActiveTab()
-        }
+    init(defaults: UserDefaults) {
+        self.defaults = defaults
+        diffMode = DiffViewMode(rawValue: defaults.string(forKey: "diff.mode") ?? "") ?? .sideBySide
+        wordWrap = defaults.bool(forKey: "editor.wrap")
+        let saved = defaults.double(forKey: "editor.zoom")
+        zoom = saved > 0 ? saved : 1
     }
-    @Published public var ignoreWhitespace = false {
-        didSet { active?.reloadActiveDiff() }
-    }
-    @Published public var wordWrap: Bool {
-        didSet {
-            defaults.set(wordWrap, forKey: "editor.wrap")
-            renderer.setWrap(wordWrap)
-        }
-    }
-    @Published public private(set) var zoom: Double {
-        didSet {
-            defaults.set(zoom, forKey: "editor.zoom")
-            renderer.setZoom(zoom)
-        }
-    }
-    @Published public var toolWindow: ToolWindow? = .project {
+
+    func zoomIn() { zoom = min(3, (zoom * 10).rounded() / 10 + 0.1) }
+    func zoomOut() { zoom = max(0.5, (zoom * 10).rounded() / 10 - 0.1) }
+    func resetZoom() { zoom = 1 }
+}
+
+/// 整个窗口的状态：打开着的几个项目、当前是哪个、最近项目、工具窗口。
+///
+/// 正文 WebView 只有一个，所有项目共用；切项目时告诉新旧会话各自 `setActive`。
+@MainActor
+final class WorkbenchModel: ObservableObject {
+    @Published private(set) var sessions: [ProjectSession] = []
+    @Published private(set) var activeSessionID: String?
+    @Published private(set) var recentProjects: [RecentProject] = []
+    @Published var toolWindow: ToolWindow? = .project {
         didSet { defaults.set(toolWindow?.rawValue ?? "", forKey: "toolWindow") }
     }
-    @Published public var toolWindowWidth: CGFloat {
+    @Published var toolWindowWidth: CGFloat {
         didSet { defaults.set(Double(toolWindowWidth), forKey: "toolWindow.width") }
     }
 
-    public let renderer: ContentRenderer
-    let git: GitClient?
-    let fileManager: FileManager
-    let defaults: UserDefaults
+    let preferences: ReadingPreferences
+    let renderer = ContentRenderer()
+    private let git: GitClient?
+    private let fileManager = FileManager.default
+    private let defaults: UserDefaults
     private let recentStore: JSONFileStore<[RecentProject]>
+    private var preferenceObservation: Task<Void, Never>?
 
-    public var active: ProjectSession? {
+    var active: ProjectSession? {
         guard let activeSessionID else { return nil }
         return sessions.first { $0.id == activeSessionID }
     }
 
-    public init(
-        git: GitClient? = GitClient.locate(),
-        renderer: ContentRenderer? = nil,
-        fileManager: FileManager = .default,
-        defaults: UserDefaults = .standard,
-        recentFile: URL = AppPaths.recentProjectsFile
-    ) {
+    init(git: GitClient? = GitClient.locate(), defaults: UserDefaults = .standard, recentFile: URL = AppPaths.recentProjectsFile) {
         self.git = git
-        self.fileManager = fileManager
         self.defaults = defaults
         self.recentStore = JSONFileStore(url: recentFile)
-        self.renderer = renderer ?? ContentRenderer()
+        self.preferences = ReadingPreferences(defaults: defaults)
 
-        diffMode = DiffMode(rawValue: defaults.string(forKey: "diff.mode") ?? "") ?? .sideBySide
-        wordWrap = defaults.bool(forKey: "editor.wrap")
-        let savedZoom = defaults.double(forKey: "editor.zoom")
-        zoom = savedZoom > 0 ? savedZoom : 1
         let savedWidth = defaults.double(forKey: "toolWindow.width")
         toolWindowWidth = savedWidth > 0 ? CGFloat(savedWidth) : 280
         if let saved = defaults.string(forKey: "toolWindow") {
@@ -77,21 +66,47 @@ public final class WorkbenchModel: ObservableObject {
         }
         recentProjects = RecentProjects.pruningMissing(recentStore.load() ?? [], fileManager: fileManager)
 
-        self.renderer.setZoom(zoom)
-        self.renderer.setWrap(wordWrap)
+        self.renderer.setZoom(preferences.zoom)
+        self.renderer.setWrap(preferences.wordWrap)
         self.renderer.onOpenExternal = { url in NSWorkspace.shared.open(url) }
         self.renderer.onOpenPath = { [weak self] path in
             self?.active?.openFile(URL(fileURLWithPath: path), pinned: false)
+        }
+        observePreferences()
+    }
+
+    /// 偏好一变就同步到 WebView / 重画当前标签。
+    private func observePreferences() {
+        preferenceObservation = Task { [weak self] in
+            guard let self else { return }
+            var lastDiffMode = preferences.diffMode
+            var lastWrap = preferences.wordWrap
+            var lastZoom = preferences.zoom
+            for await _ in preferences.objectWillChange.values {
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                if preferences.diffMode != lastDiffMode {
+                    lastDiffMode = preferences.diffMode
+                    active?.renderActiveTab()
+                }
+                if preferences.wordWrap != lastWrap {
+                    lastWrap = preferences.wordWrap
+                    renderer.setWrap(lastWrap)
+                }
+                if preferences.zoom != lastZoom {
+                    lastZoom = preferences.zoom
+                    renderer.setZoom(lastZoom)
+                }
+            }
         }
     }
 
     // MARK: - 项目
 
     /// 打开一个目录。已经开着的直接切过去。传进来的是文件的话，打开所在目录并顺手打开那个文件。
-    public func openProject(_ url: URL) {
+    func openProject(_ url: URL) {
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
-            active?.banner = "目录不存在：\(url.path)"
             recentProjects = RecentProjects.removing(url.path, from: recentProjects)
             saveRecent()
             return
@@ -107,7 +122,8 @@ public final class WorkbenchModel: ObservableObject {
         if let existing = sessions.first(where: { $0.project.root == root }) {
             activate(existing.id)
         } else {
-            let session = ProjectSession(root: chosen, workbench: self)
+            let session = ProjectSession(root: chosen, git: git, renderer: renderer, preferences: preferences)
+            session.onRequestToolWindow = { [weak self] window in self?.toolWindow = window }
             sessions.append(session)
             activate(session.id)
             recentProjects = RecentProjects.adding(root, to: recentProjects)
@@ -118,32 +134,36 @@ public final class WorkbenchModel: ObservableObject {
         saveOpenProjects()
     }
 
-    public func activate(_ sessionID: String) {
-        guard sessionID != activeSessionID, sessions.contains(where: { $0.id == sessionID }) else { return }
-        active?.rememberScrollOfActiveTab()
+    func activate(_ sessionID: String) {
+        guard sessionID != activeSessionID, let next = sessions.first(where: { $0.id == sessionID }) else { return }
+        active?.setActive(false)
         activeSessionID = sessionID
-        active?.renderActiveTab()
+        next.setActive(true)
         saveOpenProjects()
     }
 
-    public func closeProject(_ sessionID: String? = nil) {
+    func closeProject(_ sessionID: String? = nil) {
         guard let id = sessionID ?? activeSessionID, let index = sessions.firstIndex(where: { $0.id == id }) else { return }
         let session = sessions.remove(at: index)
         session.tearDown()
         if activeSessionID == id {
-            let next = sessions.indices.contains(index) ? sessions[index] : sessions.last
-            activeSessionID = next?.id
-            active?.renderActiveTab()
+            session.setActive(false)
+            activeSessionID = nil
+            if let next = sessions.indices.contains(index) ? sessions[index] : sessions.last {
+                activate(next.id)
+            } else {
+                renderer.render(.message("", ""))
+            }
         }
         saveOpenProjects()
     }
 
-    public func selectNextProject(offset: Int) {
+    func selectNextProject(offset: Int) {
         guard sessions.count > 1, let index = sessions.firstIndex(where: { $0.id == activeSessionID }) else { return }
         activate(sessions[(index + offset + sessions.count) % sessions.count].id)
     }
 
-    public func removeRecent(_ recent: RecentProject) {
+    func removeRecent(_ recent: RecentProject) {
         recentProjects = RecentProjects.removing(recent.path, from: recentProjects)
         saveRecent()
     }
@@ -163,7 +183,7 @@ public final class WorkbenchModel: ObservableObject {
     }
 
     /// 启动时把上次开着的项目都开回来（IDEA 也这么做）。
-    public func restoreOpenProjects() {
+    func restoreOpenProjects() {
         let paths = defaults.stringArray(forKey: Self.openProjectsKey) ?? []
         let activePath = defaults.string(forKey: Self.activeProjectKey)
         for path in paths where fileManager.fileExists(atPath: path) {
@@ -173,10 +193,4 @@ public final class WorkbenchModel: ObservableObject {
             activate(session.id)
         }
     }
-
-    // MARK: - 缩放
-
-    public func zoomIn() { zoom = min(3, (zoom * 10).rounded() / 10 + 0.1) }
-    public func zoomOut() { zoom = max(0.5, (zoom * 10).rounded() / 10 - 0.1) }
-    public func resetZoom() { zoom = 1 }
 }

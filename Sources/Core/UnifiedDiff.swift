@@ -2,10 +2,11 @@ import Foundation
 
 /// unified diff 里的一行。
 public struct DiffLine: Equatable, Hashable, Sendable {
+    /// rawValue 就是 render.js 认的 class 名。
     public enum Kind: String, Sendable {
-        case context
-        case added
-        case removed
+        case context = "ctx"
+        case added = "add"
+        case removed = "del"
     }
 
     public let kind: Kind

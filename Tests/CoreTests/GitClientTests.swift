@@ -3,33 +3,8 @@ import Foundation
 import Testing
 import TestSupport
 
-/// 记录被调用的参数并按顺序吐回预设输出。
-final class FakeRunner: CommandRunning, @unchecked Sendable {
-    struct Call: Equatable { let arguments: [String]; let directory: String? }
-    private let lock = NSLock()
-    private(set) var calls: [Call] = []
-    var responses: [ShellOutput]
-
-    init(responses: [ShellOutput]) { self.responses = responses }
-
-    func run(executable: URL, arguments: [String], currentDirectory: URL?, environment: [String: String]?) async throws -> ShellOutput {
-        record(Call(arguments: arguments, directory: currentDirectory?.path))
-    }
-
-    private func record(_ call: Call) -> ShellOutput {
-        lock.lock(); defer { lock.unlock() }
-        calls.append(call)
-        guard !responses.isEmpty else { return ShellOutput(status: 0, standardOutput: Data(), standardError: "") }
-        return responses.removeFirst()
-    }
-}
-
-private func output(_ text: String, status: Int32 = 0) -> ShellOutput {
-    ShellOutput(status: status, standardOutput: Data(text.utf8), standardError: "")
-}
-
 @Test func repositoryRootTrimsOutputAndFailsGracefully() async {
-    let runner = FakeRunner(responses: [output("/repo\n"), output("fatal: not a git repository", status: 128)])
+    let runner = FakeCommandRunner(responses: [shellOutput("/repo\n"), shellOutput("fatal: not a git repository", status: 128)])
     let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
     #expect(await git.repositoryRoot(containing: URL(fileURLWithPath: "/repo/sub"))?.path == "/repo")
     #expect(await git.repositoryRoot(containing: URL(fileURLWithPath: "/elsewhere")) == nil)
@@ -39,27 +14,27 @@ private func output(_ text: String, status: Int32 = 0) -> ShellOutput {
 
 @Test func diffArgumentsPerChangeKind() async throws {
     let repo = URL(fileURLWithPath: "/repo")
-    let git = { (runner: FakeRunner) in GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner) }
+    let git = { (runner: FakeCommandRunner) in GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner) }
 
     // 未跟踪：跟 /dev/null 比，退出码 1 也算成功
-    let untracked = FakeRunner(responses: [output("diff", status: 1)])
+    let untracked = FakeCommandRunner(responses: [shellOutput("diff", status: 1)])
     _ = try await git(untracked).diff(change: GitChange(path: "new.txt", kind: .untracked), repositoryRoot: repo)
     #expect(untracked.calls[0].arguments == ["diff", "--no-color", "--no-ext-diff", "-U3", "--find-renames", "--no-index", "--", "/dev/null", "/repo/new.txt"])
 
     // 已跟踪、有 HEAD：对比 HEAD，忽略空白加 -w
-    let modified = FakeRunner(responses: [output("head"), output("diff")])
+    let modified = FakeCommandRunner(responses: [shellOutput("head"), shellOutput("diff")])
     _ = try await git(modified).diff(change: GitChange(path: "a.swift", kind: .modified), repositoryRoot: repo, ignoreWhitespace: true)
     #expect(modified.calls[0].arguments == ["rev-parse", "--verify", "-q", "HEAD"])
     #expect(modified.calls[1].arguments == ["diff", "--no-color", "--no-ext-diff", "-U3", "--find-renames", "-w", "HEAD", "--", "a.swift"])
 
     // 没有提交的仓库：对比空树；重命名带上原路径
-    let unborn = FakeRunner(responses: [output("", status: 1), output("diff")])
+    let unborn = FakeCommandRunner(responses: [shellOutput("", status: 1), shellOutput("diff")])
     _ = try await git(unborn).diff(change: GitChange(path: "b.swift", originalPath: "a.swift", kind: .renamed), repositoryRoot: repo)
     #expect(unborn.calls[1].arguments.suffix(4) == [GitClient.emptyTree, "--", "b.swift", "a.swift"])
 }
 
 @Test func snapshotUsesPorcelainV2() async throws {
-    let runner = FakeRunner(responses: [output("# branch.head dev\u{0}? x.txt\u{0}")])
+    let runner = FakeCommandRunner(responses: [shellOutput("# branch.head dev\u{0}? x.txt\u{0}")])
     let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
     let snapshot = try await git.snapshot(repositoryRoot: URL(fileURLWithPath: "/repo"))
     #expect(snapshot.branch.name == "dev")
@@ -68,7 +43,7 @@ private func output(_ text: String, status: Int32 = 0) -> ShellOutput {
 }
 
 @Test func runCheckedThrowsWithStderr() async {
-    let runner = FakeRunner(responses: [ShellOutput(status: 128, standardOutput: Data(), standardError: "fatal: bad")])
+    let runner = FakeCommandRunner(responses: [ShellOutput(status: 128, standardOutput: Data(), standardError: "fatal: bad")])
     let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
     do {
         _ = try await git.snapshot(repositoryRoot: URL(fileURLWithPath: "/repo"))
@@ -120,7 +95,7 @@ private func output(_ text: String, status: Int32 = 0) -> ShellOutput {
 
 @Test func commitAndPushArguments() async throws {
     let repo = URL(fileURLWithPath: "/repo")
-    let runner = FakeRunner(responses: [output(""), output(""), output("abc1234\n"), output("ok")])
+    let runner = FakeCommandRunner(responses: [shellOutput(""), shellOutput(""), shellOutput("abc1234\n"), shellOutput("ok")])
     let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
     let result = try await git.commit(paths: ["b.txt", "a.txt", "a.txt"], message: "msg", repositoryRoot: repo)
     #expect(result == GitClient.CommitResult(shortHash: "abc1234", fileCount: 2))
@@ -148,10 +123,40 @@ private func output(_ text: String, status: Int32 = 0) -> ShellOutput {
 
 @Test func rollbackArguments() async throws {
     let repo = URL(fileURLWithPath: "/repo")
-    let runner = FakeRunner(responses: [output(""), output("")])
+    let runner = FakeCommandRunner(responses: [shellOutput(""), shellOutput("")])
     let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
     try await git.restoreToHead(paths: ["new.swift", "old.swift", "new.swift"], repositoryRoot: repo)
     #expect(runner.calls[0].arguments == ["restore", "--source=HEAD", "--staged", "--worktree", "--", "new.swift", "old.swift"])
     try await git.removeAdded(path: "a.txt", repositoryRoot: repo)
     #expect(runner.calls[1].arguments == ["rm", "-f", "-q", "--", "a.txt"])
+}
+
+@Test func cancelledCommandThrowsCancellationError() async throws {
+    // 真起一个会睡很久的进程，取消它：要抛 CancellationError 而不是「退出码 15」
+    let task = Task {
+        try await ShellCommand().run(executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"])
+    }
+    try await Task.sleep(nanoseconds: 100_000_000)
+    task.cancel()
+    do {
+        _ = try await task.value
+        Issue.record("应抛错")
+    } catch is CancellationError {
+    } catch {
+        Issue.record("错误类型不对：\(error)")
+    }
+}
+
+@Test func doubleClickDetectorUsesIntervalAndTarget() {
+    var clock: TimeInterval = 0
+    let detector = DoubleClickDetector(interval: 0.5, now: { clock })
+    #expect(!detector.registerClick(on: "a"))
+    clock = 0.3
+    #expect(detector.registerClick(on: "a"), "间隔内的第二下是双击")
+    clock = 0.4
+    #expect(!detector.registerClick(on: "a"), "双击之后从头算")
+    clock = 1.5
+    #expect(!detector.registerClick(on: "a"), "超过间隔不算")
+    clock = 1.6
+    #expect(!detector.registerClick(on: "b"), "换了目标不算")
 }

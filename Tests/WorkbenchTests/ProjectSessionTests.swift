@@ -1,44 +1,15 @@
 import Core
+import DesignSystem
 import Foundation
 import Testing
 import TestSupport
 @testable import Workbench
 
-/// 按参数匹配返回输出的假 git。
-final class ScriptedRunner: CommandRunning, @unchecked Sendable {
-    typealias Handler = @Sendable ([String], URL?) -> ShellOutput
-    private let handler: Handler
-    private let lock = NSLock()
-    private(set) var calls: [[String]] = []
-
-    init(_ handler: @escaping Handler) { self.handler = handler }
-
-    func run(executable: URL, arguments: [String], currentDirectory: URL?, environment: [String: String]?) async throws -> ShellOutput {
-        record(arguments)
-        return handler(arguments, currentDirectory)
-    }
-
-    private func record(_ arguments: [String]) {
-        lock.lock()
-        calls.append(arguments)
-        lock.unlock()
-    }
-
-    func calls(startingWith command: String) -> [[String]] {
-        lock.lock(); defer { lock.unlock() }
-        return calls.filter { $0.first == command }
-    }
-}
-
-private func text(_ string: String, status: Int32 = 0) -> ShellOutput {
-    ShellOutput(status: status, standardOutput: Data(string.utf8), standardError: "")
-}
-
 @MainActor
-private func makeWorkbench(in directory: URL, git runner: ScriptedRunner?) -> WorkbenchModel {
-    let defaults = UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!
+private func makeWorkbench(in directory: URL, git runner: FakeCommandRunner?, defaults: UserDefaults? = nil) -> WorkbenchModel {
+    let defaults = defaults ?? UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!
     let git = runner.map { GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: $0) }
-    return WorkbenchModel(git: git, fileManager: .default, defaults: defaults, recentFile: directory.appendingPathComponent("recent.json"))
+    return WorkbenchModel(git: git, defaults: defaults, recentFile: directory.appendingPathComponent("recent.json"))
 }
 
 @MainActor
@@ -46,6 +17,20 @@ private func waitUntil(_ timeout: TimeInterval = 3, _ condition: @MainActor () -
     let deadline = Date().addingTimeInterval(timeout)
     while !condition() && Date() < deadline {
         try? await Task.sleep(nanoseconds: 20_000_000)
+    }
+}
+
+/// 一个「有仓库、按脚本回答」的 git，status 输出由闭包给。
+private func gitRunner(root: String, status: @escaping @Sendable () -> String, extra: @escaping @Sendable ([String]) -> ShellOutput? = { _ in nil }) -> FakeCommandRunner {
+    FakeCommandRunner { arguments, _ in
+        if let handled = extra(arguments) { return handled }
+        switch arguments.first {
+        case "rev-parse" where arguments.contains("--show-toplevel"): return shellOutput(root + "\n")
+        case "rev-parse" where arguments.contains("--short"): return shellOutput("abc1234\n")
+        case "rev-parse": return shellOutput("abc")
+        case "status": return shellOutput(status())
+        default: return shellOutput("")
+        }
     }
 }
 
@@ -64,6 +49,7 @@ private func waitUntil(_ timeout: TimeInterval = 3, _ condition: @MainActor () -
         #expect(session.rows.map(\.node.name) == ["src", "README.md"])
         #expect(workbench.recentProjects.first?.path == project.path)
         #expect(session.hasGit == false)
+        #expect(session.isActive)
 
         session.toggleExpanded(project.appendingPathComponent("src").path)
         #expect(session.rows.map(\.node.name) == ["src", "main.py", "README.md"])
@@ -73,19 +59,24 @@ private func waitUntil(_ timeout: TimeInterval = 3, _ condition: @MainActor () -
         // 键盘：向下选中、右键展开、回车打开
         session.moveSelection(by: 1)
         #expect(session.selectedPath == project.appendingPathComponent("src").path)
-        session.activateSelection(expandOnly: true)
+        session.perform(.expand)
         #expect(session.rows.count == 3)
         session.moveSelection(by: 1)
-        session.activateSelection()
+        session.perform(.toggle)
         #expect(session.activeTab?.fileURL?.lastPathComponent == "main.py")
         #expect(session.activeTab?.isPreview == false)
-
-        // 定位当前文件：先折叠，再定位，祖先要重新展开并选中
-        session.collapseAll()
+        // 左键：文件上按左键跳到父目录，再按一次折叠
+        session.perform(.collapseOrAscend)
+        #expect(session.selectedPath == project.appendingPathComponent("src").path)
+        session.perform(.collapseOrAscend)
         #expect(session.rows.count == 2)
+
+        // 定位当前文件：祖先重新展开、选中、并要求切到项目视图
+        workbench.toolWindow = .commit
         session.revealActiveTab()
         #expect(session.rows.count == 3)
         #expect(session.selectedPath == project.appendingPathComponent("src/main.py").path)
+        #expect(session.revealRequests == 1)
         #expect(workbench.toolWindow == .project)
 
         workbench.closeProject()
@@ -101,29 +92,27 @@ private func waitUntil(_ timeout: TimeInterval = 3, _ condition: @MainActor () -
         try "x".write(to: a.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
 
         let defaults = UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!
-        let workbench = WorkbenchModel(git: nil, defaults: defaults, recentFile: directory.appendingPathComponent("recent.json"))
+        let workbench = makeWorkbench(in: directory, git: nil, defaults: defaults)
         workbench.openProject(a)
         workbench.openProject(b)
         #expect(workbench.sessions.map(\.project.name) == ["a", "b"])
         #expect(workbench.active?.project.name == "b")
-        // 再开同一个只是切过去
+        #expect(workbench.sessions[0].isActive == false && workbench.sessions[1].isActive)
         workbench.openProject(a)
         #expect(workbench.sessions.count == 2 && workbench.active?.project.name == "a")
         workbench.selectNextProject(offset: 1)
         #expect(workbench.active?.project.name == "b")
-        // 每个项目各自的标签
         workbench.activate(workbench.sessions[0].id)
         workbench.active?.openFile(a.appendingPathComponent("a.txt"), pinned: true)
         #expect(workbench.sessions[0].tabs.count == 1 && workbench.sessions[1].tabs.isEmpty)
 
-        // 重启：同一份 defaults 恢复
-        let restored = WorkbenchModel(git: nil, defaults: defaults, recentFile: directory.appendingPathComponent("recent.json"))
+        let restored = makeWorkbench(in: directory, git: nil, defaults: defaults)
         restored.restoreOpenProjects()
         #expect(restored.sessions.map(\.project.name) == ["a", "b"])
         #expect(restored.active?.project.name == "a")
 
         workbench.closeProject(workbench.sessions[0].id)
-        #expect(workbench.active?.project.name == "b")
+        #expect(workbench.active?.project.name == "b" && workbench.active?.isActive == true)
     }
 }
 
@@ -144,15 +133,13 @@ private func waitUntil(_ timeout: TimeInterval = 3, _ condition: @MainActor () -
         session.pin(session.tabs[0].id)
         session.openFile(directory.appendingPathComponent("c.txt"), pinned: false)
         #expect(session.tabs.map(\.title) == ["b.txt", "c.txt"])
-        #expect(session.activeTab?.title == "c.txt")
-
         session.openFile(directory.appendingPathComponent("c.txt"), pinned: true)
         #expect(session.tabs[1].isPreview == false)
         session.openFile(directory.appendingPathComponent("a.txt"), pinned: false)
         #expect(session.tabs.map(\.title) == ["b.txt", "c.txt", "a.txt"])
 
         await waitUntil { session.contents.values.allSatisfy { $0 != .loading } && session.contents.count == 3 }
-        if case .code(let content, let language, let encoding, let lines, _) = session.contents["file:" + session.project.root.appendingPathComponent("a.txt").path] {
+        if case .code(let content, let language, let encoding, let lines, _) = session.contents[EditorTab.id(forFile: session.project.root.appendingPathComponent("a.txt"))] {
             #expect(content == "a.txt" && language == .plainText && encoding == "UTF-8" && lines == 1)
         } else { Issue.record("a.txt 应加载为代码") }
 
@@ -171,15 +158,11 @@ private func waitUntil(_ timeout: TimeInterval = 3, _ condition: @MainActor () -
     try await withTemporaryDirectory { directory in
         try "x".write(to: directory.appendingPathComponent("a.swift"), atomically: true, encoding: .utf8)
         let root = directory.resolvingSymlinksInPath().path
-        let runner = ScriptedRunner { arguments, _ in
-            switch arguments.first {
-            case "rev-parse" where arguments.contains("--show-toplevel"): return text(root + "\n")
-            case "rev-parse": return text("abc")
-            case "status": return text("# branch.oid abc\u{0}# branch.head main\u{0}1 .M N... 100644 100644 100644 a b a.swift\u{0}? new.md\u{0}! .build/\u{0}")
-            case "diff": return text("--- a/a.swift\n+++ b/a.swift\n@@ -1 +1 @@\n-x\n+y\n")
-            default: return text("")
-            }
-        }
+        let runner = gitRunner(
+            root: root,
+            status: { "# branch.oid abc\u{0}# branch.head main\u{0}1 .M N... 100644 100644 100644 a b a.swift\u{0}? new.md\u{0}! .build/\u{0}" },
+            extra: { $0.first == "diff" ? shellOutput("--- a/a.swift\n+++ b/a.swift\n@@ -1 +1 @@\n-x\n+y\n") : nil }
+        )
         let workbench = makeWorkbench(in: directory, git: runner)
         workbench.openProject(directory)
         let session = try #require(workbench.active)
@@ -188,24 +171,57 @@ private func waitUntil(_ timeout: TimeInterval = 3, _ condition: @MainActor () -
         #expect(session.gitSnapshot.branch.name == "main")
         #expect(session.changeGroups.tracked.map(\.path) == ["a.swift"])
         #expect(session.changeGroups.untracked.map(\.path) == ["new.md"])
+        #expect(session.isRefreshingGit == false)
 
         let node = FileNode(url: directory.appendingPathComponent("a.swift"), name: "a.swift", isDirectory: false)
         #expect(session.gitStatus(for: node) == .change(.modified))
         let build = FileNode(url: directory.appendingPathComponent(".build"), name: ".build", isDirectory: true)
         #expect(session.gitStatus(for: build) == .ignored)
 
-        let change = session.changeGroups.tracked[0]
-        session.openDiff(change)
+        session.openDiff(session.changeGroups.tracked[0])
         await waitUntil { session.activeContent != .loading && session.activeContent != nil }
         guard case .diff(let diff, let language) = session.activeContent else { Issue.record("应是 diff 内容"); return }
         #expect(diff.addedCount == 1 && diff.removedCount == 1)
         #expect(language.highlightID == "swift")
         #expect(session.change(for: directory.appendingPathComponent("a.swift"))?.kind == .modified)
+    }
+}
 
-        let before = runner.calls(startingWith: "diff").count
-        workbench.ignoreWhitespace = true
-        await waitUntil { runner.calls(startingWith: "diff").count > before }
-        #expect(runner.calls(startingWith: "diff").last?.contains("-w") == true)
+@Test @MainActor func cancelledRefreshIsNotAnError() async throws {
+    try await withTemporaryDirectory { directory in
+        // 第一次 status 很慢，被第二次顶掉：不能变成「git 出错」
+        let session = ProjectSession(
+            root: directory,
+            git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: SlowRunner()),
+            renderer: ContentRenderer(),
+            preferences: ReadingPreferences(defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!)
+        )
+        await waitUntil { session.hasGit }
+        session.refreshGit()
+        session.refreshGit()
+        await waitUntil(5) { !session.isRefreshingGit }
+        #expect(session.gitError == nil)
+        #expect(session.gitSnapshot.branch.name == "main")
+    }
+}
+
+/// 第一次 status 慢，之后的立刻返回。
+private final class SlowRunner: CommandRunning, @unchecked Sendable {
+    private let lock = NSLock()
+    private var statusCalls = 0
+
+    func run(executable: URL, arguments: [String], currentDirectory: URL?, environment: [String: String]?) async throws -> ShellOutput {
+        if arguments.first == "rev-parse" { return shellOutput(currentDirectory!.path + "\n") }
+        if isFirstStatusCall() {
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        }
+        return shellOutput("# branch.head main\u{0}")
+    }
+
+    private func isFirstStatusCall() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        statusCalls += 1
+        return statusCalls == 1
     }
 }
 
@@ -213,74 +229,63 @@ private func waitUntil(_ timeout: TimeInterval = 3, _ condition: @MainActor () -
     try await withTemporaryDirectory { directory in
         let root = directory.resolvingSymlinksInPath().path
         let committed = Locked(false)
-        let runner = ScriptedRunner { arguments, _ in
+        let runner = gitRunner(root: root, status: {
+            committed.value
+                ? "# branch.head main\u{0}# branch.upstream origin/main\u{0}# branch.ab +1 -0\u{0}? c.txt\u{0}"
+                : "# branch.oid x\u{0}# branch.head main\u{0}# branch.upstream origin/main\u{0}# branch.ab +0 -0\u{0}1 .M N... 100644 100644 100644 a b a.txt\u{0}? b.txt\u{0}? c.txt\u{0}"
+        }, extra: { arguments in
             switch arguments.first {
-            case "rev-parse" where arguments.contains("--show-toplevel"): return text(root + "\n")
-            case "rev-parse" where arguments.contains("--short"): return text("abc1234\n")
-            case "status":
-                return committed.value
-                    ? text("# branch.head main\u{0}# branch.upstream origin/main\u{0}# branch.ab +1 -0\u{0}? c.txt\u{0}")
-                    : text("# branch.oid x\u{0}# branch.head main\u{0}# branch.upstream origin/main\u{0}# branch.ab +0 -0\u{0}1 .M N... 100644 100644 100644 a b a.txt\u{0}? b.txt\u{0}? c.txt\u{0}")
-            case "commit": committed.value = true; return text("")
+            case "commit": committed.value = true; return shellOutput("")
             case "push": return ShellOutput(status: 0, standardOutput: Data(), standardError: "To github.com:x/y.git\n   abc..def  main -> main")
-            default: return text("")
+            default: return nil
             }
-        }
+        })
         let workbench = makeWorkbench(in: directory, git: runner)
         workbench.openProject(directory)
         let session = try #require(workbench.active)
         await waitUntil { session.changeGroups.total == 3 }
+        let commit = try #require(session.commit)
 
-        // 空信息不能提交
-        #expect(!session.canCommit)
-        session.commitMessage = "  "
-        #expect(!session.canCommit)
-        session.commitMessage = "feat: x"
-        #expect(session.canCommit)
+        #expect(!commit.canCommit)
+        commit.message = "  "
+        #expect(!commit.canCommit)
+        commit.message = "feat: x"
+        #expect(commit.canCommit)
 
-        // 去掉 c.txt
         let c = try #require(session.gitSnapshot.changes.first { $0.path == "c.txt" })
-        session.setIncluded(false, for: c)
-        #expect(!session.isIncludedInCommit(c))
-        #expect(session.includedChanges.map(\.path).sorted() == ["a.txt", "b.txt"])
+        commit.setIncluded(false, for: c)
+        #expect(!commit.isIncluded(c))
+        #expect(commit.includedChanges.map(\.path).sorted() == ["a.txt", "b.txt"])
 
-        session.commit(push: true)
-        await waitUntil { !session.isCommitting && !session.isPushing && session.commitStatus != nil && runner.calls(startingWith: "push").count == 1 }
+        commit.commit(push: true)
+        await waitUntil { !commit.isCommitting && !commit.isPushing && commit.status != nil && runner.calls(startingWith: "push").count == 1 }
 
-        let add = try #require(runner.calls(startingWith: "add").first)
-        #expect(add == ["add", "-A", "--", "a.txt", "b.txt"])
-        let commit = try #require(runner.calls(startingWith: "commit").first)
-        #expect(commit == ["commit", "--quiet", "--only", "-m", "feat: x", "--", "a.txt", "b.txt"])
+        #expect(runner.calls(startingWith: "add").first == ["add", "-A", "--", "a.txt", "b.txt"])
+        #expect(runner.calls(startingWith: "commit").first == ["commit", "--quiet", "--only", "-m", "feat: x", "--", "a.txt", "b.txt"])
         #expect(runner.calls(startingWith: "push").first == ["push", "--porcelain"])
-        #expect(session.commitMessage.isEmpty)
-        if case .success(let message) = session.commitStatus { #expect(message.contains("main -> main")) } else { Issue.record("应是成功状态：\(String(describing: session.commitStatus))") }
+        #expect(commit.message.isEmpty)
+        if case .success(let message) = commit.status { #expect(message.contains("main -> main")) } else { Issue.record("应是成功状态：\(String(describing: commit.status))") }
         await waitUntil { session.changeGroups.total == 1 }
-        // 提交过的路径从「不勾选」集合里清掉了；剩下的 c.txt 仍然是不勾选
-        #expect(session.excludedFromCommit == ["c.txt"])
+        #expect(commit.excludedPaths == ["c.txt"])
     }
 }
 
 @Test @MainActor func commitFailureSurfacesStderr() async throws {
     try await withTemporaryDirectory { directory in
         let root = directory.resolvingSymlinksInPath().path
-        let runner = ScriptedRunner { arguments, _ in
-            switch arguments.first {
-            case "rev-parse" where arguments.contains("--show-toplevel"): return text(root + "\n")
-            case "status": return text("# branch.head main\u{0}? a.txt\u{0}")
-            case "add": return text("")
-            case "commit": return ShellOutput(status: 128, standardOutput: Data(), standardError: "fatal: unable to auto-detect email address")
-            default: return text("")
-            }
-        }
+        let runner = gitRunner(root: root, status: { "# branch.head main\u{0}? a.txt\u{0}" }, extra: { arguments in
+            arguments.first == "commit" ? ShellOutput(status: 128, standardOutput: Data(), standardError: "fatal: unable to auto-detect email address") : nil
+        })
         let workbench = makeWorkbench(in: directory, git: runner)
         workbench.openProject(directory)
         let session = try #require(workbench.active)
         await waitUntil { session.changeGroups.total == 1 }
-        session.commitMessage = "x"
-        session.commit(push: false)
-        await waitUntil { session.commitStatus != nil }
-        if case .failure(let message) = session.commitStatus { #expect(message.contains("auto-detect email")) } else { Issue.record("应是失败状态") }
-        #expect(session.commitMessage == "x", "失败时保留用户写的信息")
+        let commit = try #require(session.commit)
+        commit.message = "x"
+        commit.commit(push: false)
+        await waitUntil { commit.status != nil }
+        if case .failure(let message) = commit.status { #expect(message.contains("auto-detect email")) } else { Issue.record("应是失败状态") }
+        #expect(commit.message == "x", "失败时保留用户写的信息")
         #expect(runner.calls(startingWith: "push").isEmpty)
     }
 }
@@ -289,14 +294,7 @@ private func waitUntil(_ timeout: TimeInterval = 3, _ condition: @MainActor () -
     try await withTemporaryDirectory { directory in
         let root = directory.resolvingSymlinksInPath().path
         let clean = Locked(false)
-        let runner = ScriptedRunner { arguments, _ in
-            switch arguments.first {
-            case "rev-parse" where arguments.contains("--show-toplevel"): return text(root + "\n")
-            case "status":
-                return clean.value ? text("# branch.head main\u{0}") : text("# branch.head main\u{0}? new.md\u{0}")
-            default: return text("")
-            }
-        }
+        let runner = gitRunner(root: root, status: { clean.value ? "# branch.head main\u{0}" : "# branch.head main\u{0}? new.md\u{0}" })
         let workbench = makeWorkbench(in: directory, git: runner)
         workbench.openProject(directory)
         let session = try #require(workbench.active)
@@ -311,13 +309,36 @@ private func waitUntil(_ timeout: TimeInterval = 3, _ condition: @MainActor () -
     }
 }
 
-final class Locked<T>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stored: T
-    init(_ value: T) { stored = value }
-    var value: T {
-        get { lock.lock(); defer { lock.unlock() }; return stored }
-        set { lock.lock(); stored = newValue; lock.unlock() }
+@Test @MainActor func rollbackRoutesByChangeKind() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        try "x".write(to: directory.appendingPathComponent("junk.txt"), atomically: true, encoding: .utf8)
+        let runner = gitRunner(root: root, status: {
+            "# branch.head main\u{0}1 .M N... 100644 100644 100644 a b m.txt\u{0}1 A. N... 000000 100644 100644 0 b a.txt\u{0}2 R. N... 100644 100644 100644 a a R100 new.txt\u{0}old.txt\u{0}? junk.txt\u{0}"
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.changeGroups.total == 4 }
+        let commit = try #require(session.commit)
+        let byPath = Dictionary(uniqueKeysWithValues: session.gitSnapshot.changes.map { ($0.path, $0) })
+
+        // 开着 m.txt 的 diff 标签，回滚后应被关掉
+        session.openDiff(byPath["m.txt"]!, pinned: true)
+        commit.rollback(byPath["m.txt"]!)
+        await waitUntil { !runner.calls(startingWith: "restore").isEmpty && session.tabs.isEmpty }
+        #expect(runner.calls(startingWith: "restore").last == ["restore", "--source=HEAD", "--staged", "--worktree", "--", "m.txt"])
+
+        commit.rollback(byPath["new.txt"]!)
+        await waitUntil { runner.calls(startingWith: "restore").count == 2 }
+        #expect(runner.calls(startingWith: "restore").last == ["restore", "--source=HEAD", "--staged", "--worktree", "--", "new.txt", "old.txt"])
+
+        commit.rollback(byPath["a.txt"]!)
+        await waitUntil { !runner.calls(startingWith: "rm").isEmpty }
+        #expect(runner.calls(startingWith: "rm").last == ["rm", "-f", "-q", "--", "a.txt"])
+
+        commit.deleteUntracked(byPath["junk.txt"]!)
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("junk.txt").path))
     }
 }
 
@@ -335,10 +356,39 @@ final class Locked<T>: @unchecked Sendable {
     let file = EditorTab(kind: .file(URL(fileURLWithPath: "/p/a.md")), isPreview: true)
     let diff = EditorTab(kind: .diff(GitChange(path: "a.md", kind: .modified)), isPreview: false)
     #expect(file.id != diff.id)
-    #expect(file.title == "a.md" && diff.title == "a.md")
+    #expect(file.id == EditorTab.id(forFile: URL(fileURLWithPath: "/p/a.md")))
+    #expect(diff.id == EditorTab.id(forDiff: GitChange(path: "a.md", kind: .added)), "id 只看路径，不看种类")
     #expect(diff.isDiff && !file.isDiff)
     let content = TabContent.code(text: "", language: .json, encoding: "UTF-8", lineCount: 3, modified: nil)
     #expect(content.statusSummary == ["3 行", "UTF-8", "JSON"])
+}
+
+@Test func staleDetection() {
+    let date = Date(timeIntervalSince1970: 100)
+    let code = TabContent.code(text: "", language: .plainText, encoding: "UTF-8", lineCount: 0, modified: date)
+    #expect(!FileContentLoader.isStale(code, modifiedOnDisk: date, exists: true))
+    #expect(FileContentLoader.isStale(code, modifiedOnDisk: date.addingTimeInterval(1), exists: true))
+    #expect(FileContentLoader.isStale(code, modifiedOnDisk: nil, exists: false))
+    #expect(!FileContentLoader.isStale(.loading, modifiedOnDisk: nil, exists: true))
+    #expect(FileContentLoader.isStale(.message(title: "文件不存在", detail: ""), modifiedOnDisk: date, exists: true))
+    #expect(!FileContentLoader.isStale(.message(title: "文件不存在", detail: ""), modifiedOnDisk: nil, exists: false))
+}
+
+@Test func tabContentMapsToRenderPayload() {
+    let url = URL(fileURLWithPath: "/p/docs/a.md")
+    var tab = EditorTab(kind: .file(url), isPreview: false)
+    tab.markdownShowsSource = true
+    let markdown = TabContent.markdown(text: "# x", encoding: "UTF-8", lineCount: 1, modified: nil)
+    #expect(markdown.renderContent(for: tab, diffMode: .unified)
+        == .markdown(path: "/p/docs/a.md", markdown: "# x", documentDirectory: URL(fileURLWithPath: "/p/docs/"), showsSource: true))
+
+    let change = GitChange(path: "new.txt", kind: .untracked)
+    let diffTab = EditorTab(kind: .diff(change), isPreview: true)
+    let empty = FileDiff(oldPath: nil, newPath: "new.txt", isBinary: false, hunks: [])
+    #expect(TabContent.diff(empty, language: .plainText).renderContent(for: diffTab, diffMode: .sideBySide)
+        == .diff(path: "new.txt", language: nil, diff: empty, mode: .sideBySide, emptyReason: "这是一个空文件。"))
+    #expect(TabContent.binary(sizeBytes: 10).renderContent(for: tab, diffMode: .unified)
+        == .message(title: "二进制文件", detail: "a.md · \(TabContent.byteCount(10))\n这个阅读器只显示文本。"))
 }
 
 @Test @MainActor func updaterDescribesAuthFailures() {
@@ -347,52 +397,4 @@ final class Locked<T>: @unchecked Sendable {
     #expect(Updater.describe(Updater.UpdateError.http(404, hadToken: true)).contains("还没有发布记录"))
     #expect(Updater.describe(Updater.UpdateError.checksumMismatch).contains("校验"))
     #expect(Updater.shellQuoted("/Applications/It's.app") == "'/Applications/It'\\''s.app'")
-}
-
-@Test @MainActor func doubleClickIsDetectedByIntervalOnSameRow() async throws {
-    try await withTemporaryDirectory { directory in
-        let workbench = makeWorkbench(in: directory, git: nil)
-        workbench.openProject(directory)
-        let session = try #require(workbench.active)
-        #expect(!session.registerClick(on: "a"))
-        #expect(session.registerClick(on: "a"), "紧接着的第二下是双击")
-        #expect(!session.registerClick(on: "a"), "双击之后再点从头算")
-        #expect(!session.registerClick(on: "b"))
-        #expect(!session.registerClick(on: "c"), "换了一行不算双击")
-    }
-}
-
-@Test @MainActor func rollbackRoutesByChangeKind() async throws {
-    try await withTemporaryDirectory { directory in
-        let root = directory.resolvingSymlinksInPath().path
-        try "x".write(to: directory.appendingPathComponent("junk.txt"), atomically: true, encoding: .utf8)
-        let runner = ScriptedRunner { arguments, _ in
-            switch arguments.first {
-            case "rev-parse" where arguments.contains("--show-toplevel"): return text(root + "\n")
-            case "status": return text("# branch.head main\u{0}1 .M N... 100644 100644 100644 a b m.txt\u{0}1 A. N... 000000 100644 100644 0 b a.txt\u{0}2 R. N... 100644 100644 100644 a a R100 new.txt\u{0}old.txt\u{0}? junk.txt\u{0}")
-            default: return text("")
-            }
-        }
-        let workbench = makeWorkbench(in: directory, git: runner)
-        workbench.openProject(directory)
-        let session = try #require(workbench.active)
-        await waitUntil { session.changeGroups.total == 4 }
-        let byPath = Dictionary(uniqueKeysWithValues: session.gitSnapshot.changes.map { ($0.path, $0) })
-
-        session.rollback(byPath["m.txt"]!)
-        await waitUntil { !runner.calls(startingWith: "restore").isEmpty }
-        #expect(runner.calls(startingWith: "restore").last == ["restore", "--source=HEAD", "--staged", "--worktree", "--", "m.txt"])
-
-        session.rollback(byPath["new.txt"]!)
-        await waitUntil { runner.calls(startingWith: "restore").count == 2 }
-        #expect(runner.calls(startingWith: "restore").last == ["restore", "--source=HEAD", "--staged", "--worktree", "--", "new.txt", "old.txt"])
-
-        session.rollback(byPath["a.txt"]!)
-        await waitUntil { !runner.calls(startingWith: "rm").isEmpty }
-        #expect(runner.calls(startingWith: "rm").last == ["rm", "-f", "-q", "--", "a.txt"])
-
-        // 未跟踪：不走 git，文件进废纸篓
-        session.deleteUntracked(byPath["junk.txt"]!)
-        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("junk.txt").path))
-    }
 }

@@ -44,10 +44,7 @@ private func porcelain(_ records: [String]) -> String {
     ]))
     let byPath = Dictionary(uniqueKeysWithValues: snapshot.changes.map { ($0.path, $0) })
     #expect(byPath["Sources/App.swift"]?.kind == .modified)
-    #expect(byPath["Sources/App.swift"]?.isStaged == false)
-    #expect(byPath["Sources/App.swift"]?.isUnstaged == true)
     #expect(byPath["Sources/New file.swift"]?.kind == .added)
-    #expect(byPath["Sources/New file.swift"]?.isStaged == true)
     #expect(byPath["gone.txt"]?.kind == .deleted)
     #expect(byPath["new/name.swift"]?.kind == .renamed)
     #expect(byPath["new/name.swift"]?.originalPath == "old/name.swift")
@@ -80,7 +77,6 @@ private func porcelain(_ records: [String]) -> String {
     #expect(index.status(of: ".build/debug/x.o", isDirectory: false) == .ignored)
     #expect(index.status(of: ".build/debug", isDirectory: true) == .ignored)
     #expect(index.status(of: "Sources/Core/junk.o", isDirectory: false) == .ignored)
-    #expect(index.changedFileCount == 3)
 }
 
 @Test func changeGroupsSplitTrackedAndUntracked() {

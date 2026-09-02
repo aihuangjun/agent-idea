@@ -68,7 +68,7 @@ public struct ShellCommand: CommandRunning {
 
         try process.run()
 
-        return await withTaskCancellationHandler {
+        return try await withTaskCancellationHandler {
             // 两根管子必须同时读：只读一根的话另一根 64KB 缓冲写满后子进程就阻塞，表现是「一直在转」。
             async let outData = Self.readToEnd(outPipe.fileHandleForReading)
             async let errData = Self.readToEnd(errPipe.fileHandleForReading)
@@ -77,6 +77,9 @@ public struct ShellCommand: CommandRunning {
                 process.waitUntilExit()
                 return process.terminationStatus
             }.value
+            // 被取消而死的进程退出码是 15（SIGTERM）。这不是「命令失败」，调用方要能用 CancellationError 区分：
+            // 否则一次被新刷新顶掉的 git status 会被当成 git 出错显示在界面上。
+            try Task.checkCancellation()
             return ShellOutput(
                 status: status,
                 standardOutput: out,
@@ -135,9 +138,9 @@ public extension CommandRunning {
 /// GUI 应用不继承 shell 的 PATH（只有 `/usr/bin:/bin:/usr/sbin:/sbin`），
 /// 在终端里跑得好好的命令，到了双击启动的应用里会变成「找不到」。所以显式列出候选路径。
 public enum ExecutableLocator {
-    public static func locate(_ candidates: [String], fileManager: FileManager = .default) -> URL? {
+    public static func locate(_ candidates: [String]) -> URL? {
         candidates
-            .first { fileManager.isExecutableFile(atPath: $0) }
+            .first { FileManager.default.isExecutableFile(atPath: $0) }
             .map { URL(fileURLWithPath: $0) }
     }
 }

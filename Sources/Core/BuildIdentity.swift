@@ -41,8 +41,9 @@ public struct BuildIdentity: Equatable, Sendable {
         self.init(version: version, timestamp: timestamp, channel: channel)
     }
 
+    /// 括号里那段：`202609012310-debug`。系统「关于」面板会自己给它加括号。
+    public var buildSuffix: String { "\(timestamp ?? "未知构建")-\(channel.rawValue)" }
+
     /// 给人看的完整标识，如 `0.1.0(202609012310-debug)`。
-    public var display: String {
-        "\(version)(\(timestamp ?? "未知构建")-\(channel.rawValue))"
-    }
+    public var display: String { "\(version)(\(buildSuffix))" }
 }

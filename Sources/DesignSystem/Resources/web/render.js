@@ -1,11 +1,13 @@
 /* Agent IDEA 正文渲染。
  *
- * Swift 侧只做一件事：window.ide.render(payload)。payload.kind 决定画什么：
- *   code     { path, text, language, scrollTop }
- *   markdown { path, markdown, docDir, view: "preview" | "source", scrollTop }
+ * Swift 侧只做一件事：window.ide.render(payload)。Swift 那边的事实源是 DesignSystem/RenderPayload.swift，
+ * 改一边必须改另一边。每个 payload 都带 scrollTop（渲染完滚到哪）和 wrap（代码是否自动换行），kind 决定画什么：
+ *   code     { path, text, language }
+ *   markdown { path, markdown, docDir, view: "preview" | "source" }
  *   image    { path, url, sizeText }
- *   diff     { path, language, mode: "side" | "unified", rows, binary, empty, added, removed, scrollTop }
+ *   diff     { path, language, mode: "side" | "unified", rows, binary, empty, added, removed, emptyReason }
  *   message  { title, detail }
+ * path 目前只有 diff 用来显示（summary 那一行），code/markdown 的带着是为了排查问题时能看出画的是谁。
  * 往 Swift 发消息一律 post({type, ...})。自有代码不写内联事件处理器（CSP 不给 unsafe-inline）。
  */
 (function () {
@@ -15,7 +17,8 @@
   const HIGHLIGHT_LIMIT = 600 * 1024;   // 超过这个体积不做语法高亮，纯文本也照样能看
   const AUTO_DETECT_LIMIT = 64 * 1024;  // 语言未知时只对小文件做自动识别，大文件太慢
   const WORD_DIFF_LIMIT = 2000;         // 单行超过这个长度不做词级对比
-  let current = null;                   // 最近一次 payload，Web 进程重启后靠它恢复
+  const LINE_HIGHLIGHT_LIMIT = 2000;    // diff 里单行超过这个长度不做语法高亮
+  let current = null;                   // 最近一次 payload：Markdown 相对链接要用它的 docDir，setWrap 要改它的 wrap
 
   function post(message) {
     try { window.webkit.messageHandlers.ide.postMessage(message); } catch (_) { /* 测试页里没有宿主 */ }
@@ -76,7 +79,7 @@
   }
 
   function highlightOne(text, language) {
-    if (!language || text.length > WORD_DIFF_LIMIT) return escapeHTML(text);
+    if (!language || text.length > LINE_HIGHLIGHT_LIMIT) return escapeHTML(text);
     try { return hljs.highlight(text, { language, ignoreIllegals: true }).value; } catch (_) { return escapeHTML(text); }
   }
 
@@ -186,7 +189,7 @@
       if (target) target.scrollIntoView({ block: "start" });
       return;
     }
-    if (/^(https?|mailto):/i.test(href)) { post({ type: "openExternal", href }); return; }
+    // 带协议的（http、mailto……）都交给系统
     if (/^[a-z][a-z0-9+.-]*:/i.test(href)) { post({ type: "openExternal", href }); return; }
     if (current && current.kind === "markdown") {
       const base = current.docDir || "";
@@ -371,11 +374,6 @@
     getScrollTop() { return window.scrollY || document.documentElement.scrollTop || 0; },
     setZoom(zoom) { document.documentElement.style.setProperty("--zoom", String(zoom)); },
     setWrap(wrap) { document.body.classList.toggle("wrap", !!wrap); if (current) current.wrap = !!wrap; },
-    scrollToLine(line) {
-      const rows = root.querySelectorAll("table.code tr");
-      const target = rows[Math.max(0, line - 1)];
-      if (target) target.scrollIntoView({ block: "center" });
-    },
   };
 
   post({ type: "ready" });

@@ -16,7 +16,6 @@ public struct Language: Equatable, Hashable, Sendable {
     public static let plainText = Language(name: "Text", highlightID: nil)
     public static let markdown = Language(name: "Markdown", highlightID: "markdown")
     public static let json = Language(name: "JSON", highlightID: "json")
-    public static let xml = Language(name: "XML", highlightID: "xml")
 
     // MARK: - 识别
 

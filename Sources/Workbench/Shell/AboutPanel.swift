@@ -13,14 +13,9 @@ enum AboutPanel {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: applicationName,
             .applicationVersion: build.version,
-            .version: buildSuffix(of: build),
+            .version: build.buildSuffix,
             .credits: credits(),
         ])
-    }
-
-    /// `202609012310-debug`，系统面板会自己加括号。
-    static func buildSuffix(of build: BuildIdentity) -> String {
-        "\(build.timestamp ?? "未知构建")-\(build.channel.rawValue)"
     }
 
     private static func credits() -> NSAttributedString {

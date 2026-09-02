@@ -63,7 +63,7 @@ private struct RecentRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "folder.fill").foregroundStyle(Color(hex: 0x8C9CB8)).font(.system(size: 14))
+            Image(systemName: "folder.fill").foregroundStyle(Theme.folderIcon).font(.system(size: 14))
             VStack(alignment: .leading, spacing: 1) {
                 Text(recent.name).font(Theme.uiFont).foregroundStyle(Theme.text)
                 Text(recent.displayPath).font(Theme.smallFont).foregroundStyle(Theme.mutedText).lineLimit(1).truncationMode(.middle)

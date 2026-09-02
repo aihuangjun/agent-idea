@@ -1,3 +1,4 @@
+import AppKit
 import Core
 import DesignSystem
 import SwiftUI
@@ -7,6 +8,7 @@ struct ChangesView: View {
     @ObservedObject var session: ProjectSession
     @State private var trackedCollapsed = false
     @State private var untrackedCollapsed = false
+    @State private var clicks = DoubleClickDetector(interval: NSEvent.doubleClickInterval)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,35 +18,39 @@ struct ChangesView: View {
                 }
                 IconButton("arrow.clockwise", help: "刷新（⌘R）", size: 22) { session.refreshGit() }
             }
-            if !session.hasGit {
-                emptyState(title: "没有 git 仓库", detail: "这个目录不在 git 仓库里，或者本机没有安装 git。")
-            } else if let error = session.gitError {
-                emptyState(title: "git 出错了", detail: error)
-            } else {
-                if session.changeGroups.total == 0 {
+            if let commit = session.commit {
+                if let error = session.gitError {
+                    emptyState(title: "git 出错了", detail: error)
+                } else if session.changeGroups.total == 0 {
                     emptyState(title: "没有变更", detail: "工作区与 HEAD 一致。Agent 改了东西之后这里会自动出现。")
                 } else {
-                    changeList
+                    changeList(commit: commit)
                 }
-                CommitPanel(session: session)
+                CommitPanel(commit: commit, branch: session.gitSnapshot.branch)
+            } else {
+                emptyState(title: "没有 git 仓库", detail: "这个目录不在 git 仓库里，或者本机没有安装 git。")
             }
         }
         .background(Theme.panel)
     }
 
-    private var changeList: some View {
+    private func changeList(commit: CommitController) -> some View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 if !session.changeGroups.tracked.isEmpty {
-                    GroupHeader(title: "变更", changes: session.changeGroups.tracked, session: session, isCollapsed: $trackedCollapsed)
+                    GroupHeader(title: "变更", changes: session.changeGroups.tracked, commit: commit, isCollapsed: $trackedCollapsed)
                     if !trackedCollapsed {
-                        ForEach(session.changeGroups.tracked) { change in ChangeRow(session: session, change: change) }
+                        ForEach(session.changeGroups.tracked) { change in
+                            ChangeRow(session: session, commit: commit, clicks: clicks, change: change)
+                        }
                     }
                 }
                 if !session.changeGroups.untracked.isEmpty {
-                    GroupHeader(title: "未跟踪文件", changes: session.changeGroups.untracked, session: session, isCollapsed: $untrackedCollapsed)
+                    GroupHeader(title: "未跟踪文件", changes: session.changeGroups.untracked, commit: commit, isCollapsed: $untrackedCollapsed)
                     if !untrackedCollapsed {
-                        ForEach(session.changeGroups.untracked) { change in ChangeRow(session: session, change: change) }
+                        ForEach(session.changeGroups.untracked) { change in
+                            ChangeRow(session: session, commit: commit, clicks: clicks, change: change)
+                        }
                     }
                 }
             }
@@ -68,10 +74,10 @@ struct ChangesView: View {
 private struct GroupHeader: View {
     let title: String
     let changes: [GitChange]
-    @ObservedObject var session: ProjectSession
+    @ObservedObject var commit: CommitController
     @Binding var isCollapsed: Bool
 
-    private var includedCount: Int { changes.filter { session.isIncludedInCommit($0) }.count }
+    private var includedCount: Int { changes.filter { commit.isIncluded($0) }.count }
 
     var body: some View {
         HStack(spacing: 6) {
@@ -81,7 +87,7 @@ private struct GroupHeader: View {
                 .onTapGesture { isCollapsed.toggle() }
             Toggle("", isOn: Binding(
                 get: { includedCount == changes.count },
-                set: { on in for change in changes { session.setIncluded(on, for: change) } }
+                set: { on in for change in changes { commit.setIncluded(on, for: change) } }
             ))
             .toggleStyle(.checkbox).controlSize(.small).labelsHidden()
             // 点标题折叠/展开；勾选框在外面，免得一点全选就把分组收起来
@@ -100,7 +106,9 @@ private struct GroupHeader: View {
 }
 
 private struct ChangeRow: View {
-    @ObservedObject var session: ProjectSession
+    let session: ProjectSession
+    @ObservedObject var commit: CommitController
+    let clicks: DoubleClickDetector
     let change: GitChange
     @State private var isHovering = false
     @State private var pendingAction: PendingAction?
@@ -132,8 +140,8 @@ private struct ChangeRow: View {
             // 缩进到分组标题的文字下面：它们是分组的子级
             Spacer().frame(width: 40)
             Toggle("", isOn: Binding(
-                get: { session.isIncludedInCommit(change) },
-                set: { session.setIncluded($0, for: change) }
+                get: { commit.isIncluded(change) },
+                set: { commit.setIncluded($0, for: change) }
             ))
             .toggleStyle(.checkbox).controlSize(.small).labelsHidden()
             Image(systemName: icon.systemName).font(.system(size: 12)).foregroundStyle(icon.color).frame(width: 16)
@@ -159,7 +167,7 @@ private struct ChangeRow: View {
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         // 单击立刻出预览 diff，双击间隔内的第二下把它固定
-        .onTapGesture { session.openDiff(change, pinned: session.registerClick(on: "change:" + change.path)) }
+        .onTapGesture { session.openDiff(change, pinned: clicks.registerClick(on: change.path)) }
         .contextMenu {
             Button("显示 diff") { session.openDiff(change, pinned: true) }
             if change.kind != .deleted, let url = session.url(for: change) {
@@ -181,14 +189,14 @@ private struct ChangeRow: View {
                     message: Text(change.kind == .added
                         ? "这是一个新增的文件，回滚会把它从 git 和磁盘上一起删掉。"
                         : "会把它恢复到 HEAD 的样子，本地改动会丢失。"),
-                    primaryButton: .destructive(Text("回滚")) { session.rollback(change) },
+                    primaryButton: .destructive(Text("回滚")) { commit.rollback(change) },
                     secondaryButton: .cancel(Text("取消"))
                 )
             case .delete(let change):
                 return Alert(
                     title: Text("删除 \(change.fileName)？"),
                     message: Text("文件会移到废纸篓。"),
-                    primaryButton: .destructive(Text("删除")) { session.deleteUntracked(change) },
+                    primaryButton: .destructive(Text("删除")) { commit.deleteUntracked(change) },
                     secondaryButton: .cancel(Text("取消"))
                 )
             }
@@ -211,17 +219,18 @@ private enum PendingAction: Identifiable {
 
 /// 底部：提交信息 + 提交 / 提交并推送。
 private struct CommitPanel: View {
-    @ObservedObject var session: ProjectSession
+    @ObservedObject var commit: CommitController
+    let branch: GitBranch
     @FocusState private var messageFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .topLeading) {
-                if session.commitMessage.isEmpty {
+                if commit.message.isEmpty {
                     Text("提交信息").foregroundStyle(Theme.mutedText).padding(.horizontal, 6).padding(.vertical, 6)
                         .allowsHitTesting(false)
                 }
-                TextEditor(text: $session.commitMessage)
+                TextEditor(text: $commit.message)
                     .font(Theme.uiFont)
                     .scrollContentBackground(.hidden)
                     .padding(2)
@@ -232,37 +241,25 @@ private struct CommitPanel: View {
             .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(messageFocused ? Theme.accent : Theme.border, lineWidth: 1))
 
             HStack(spacing: 8) {
-                Button("提交") { session.commit(push: false) }
-                    .disabled(!session.canCommit)
+                Button("提交") { commit.commit(push: false) }
+                    .disabled(!commit.canCommit)
                     .keyboardShortcut(.return, modifiers: .command)
-                Button("提交并推送") { session.commit(push: true) }
-                    .disabled(!session.canCommit)
+                Button("提交并推送") { commit.commit(push: true) }
+                    .disabled(!commit.canCommit)
                 Spacer()
-                if session.isCommitting || session.isPushing {
+                if commit.isCommitting || commit.isPushing {
                     ProgressView().controlSize(.small)
-                    Text(session.isPushing ? "推送中…" : "提交中…").font(Theme.smallFont).foregroundStyle(Theme.secondaryText)
-                } else if session.gitSnapshot.branch.ahead > 0 {
-                    Button {
-                        session.pushCurrentBranch()
-                    } label: {
-                        Label("推送 ↑\(session.gitSnapshot.branch.ahead)", systemImage: "arrow.up.circle").font(Theme.smallFont)
-                    }
-                    .buttonStyle(.plain).foregroundStyle(Theme.accent)
-                    .disabled(!session.canPush)
-                    .help("把本地领先的 \(session.gitSnapshot.branch.ahead) 个提交推到远端")
-                } else if session.gitSnapshot.branch.upstream == nil, !session.gitSnapshot.branch.isUnborn {
-                    Button {
-                        session.pushCurrentBranch()
-                    } label: {
-                        Label("推送（建上游）", systemImage: "arrow.up.circle").font(Theme.smallFont)
-                    }
-                    .buttonStyle(.plain).foregroundStyle(Theme.secondaryText)
-                    .disabled(!session.canPush)
+                    Text(commit.isPushing ? "推送中…" : "提交中…").font(Theme.smallFont).foregroundStyle(Theme.secondaryText)
+                } else if branch.ahead > 0 {
+                    pushButton("推送 ↑\(branch.ahead)", color: Theme.accent)
+                        .help("把本地领先的 \(branch.ahead) 个提交推到远端")
+                } else if branch.upstream == nil, !branch.isUnborn {
+                    pushButton("推送（建上游）", color: Theme.secondaryText)
                 }
             }
             .controlSize(.small)
 
-            if let status = session.commitStatus {
+            if let status = commit.status {
                 HStack(alignment: .top, spacing: 6) {
                     switch status {
                     case .success(let text):
@@ -273,7 +270,7 @@ private struct CommitPanel: View {
                         Text(text).foregroundStyle(Theme.text).textSelection(.enabled)
                     }
                     Spacer()
-                    Button { session.commitStatus = nil } label: { Image(systemName: "xmark").font(.system(size: 9)) }
+                    Button { commit.dismissStatus() } label: { Image(systemName: "xmark").font(.system(size: 9)) }
                         .buttonStyle(.plain).foregroundStyle(Theme.mutedText)
                 }
                 .font(Theme.smallFont)
@@ -283,5 +280,15 @@ private struct CommitPanel: View {
         .padding(10)
         .background(Theme.panel)
         .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
+    }
+
+    private func pushButton(_ title: String, color: Color) -> some View {
+        Button {
+            commit.pushCurrentBranch()
+        } label: {
+            Label(title, systemImage: "arrow.up.circle").font(Theme.smallFont)
+        }
+        .buttonStyle(.plain).foregroundStyle(color)
+        .disabled(!commit.canPush)
     }
 }

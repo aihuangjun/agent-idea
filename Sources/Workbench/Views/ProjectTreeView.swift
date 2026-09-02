@@ -1,3 +1,4 @@
+import AppKit
 import Core
 import DesignSystem
 import SwiftUI
@@ -7,6 +8,8 @@ struct ProjectTreeView: View {
     @ObservedObject var session: ProjectSession
     @FocusState private var isFocused: Bool
     @State private var scrollOnSelection = false
+    /// 双击判定是输入层的事，放在视图里；一棵树共用一个，跨行才能判「同一行点了两下」。
+    @State private var clicks = DoubleClickDetector(interval: NSEvent.doubleClickInterval)
 
     var body: some View {
         VStack(spacing: 0) {
@@ -25,6 +28,7 @@ struct ProjectTreeView: View {
                         ForEach(session.rows) { row in
                             TreeRow(
                                 session: session,
+                                clicks: clicks,
                                 row: row,
                                 status: session.gitStatus(for: row.node),
                                 isSelected: session.selectedPath == row.id,
@@ -50,13 +54,13 @@ struct ProjectTreeView: View {
                 switch direction {
                 case .up: session.moveSelection(by: -1)
                 case .down: session.moveSelection(by: 1)
-                case .right: session.activateSelection(expandOnly: true)
-                case .left: session.activateSelection(expandOnly: false)
+                case .right: session.perform(.expand)
+                case .left: session.perform(.collapseOrAscend)
                 default: break
                 }
             }
             .onKeyPress(.return) {
-                session.activateSelection()
+                session.perform(.toggle)
                 return .handled
             }
             .contentShape(Rectangle())
@@ -76,9 +80,9 @@ private struct RootRow: View {
         HStack(spacing: 6) {
             Image(systemName: "folder.fill.badge.gearshape")
                 .font(.system(size: 12))
-                .foregroundStyle(Color(hex: 0x8C9CB8))
+                .foregroundStyle(Theme.folderIcon)
             Text(name).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
-            Text(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+            Text(path.abbreviatingHomeDirectory)
                 .font(Theme.smallFont).foregroundStyle(Theme.mutedText).lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 0)
         }
@@ -90,12 +94,13 @@ private struct RootRow: View {
 /// 一行。IDEA 习惯：单击只选中；双击文件打开、双击目录展开/折叠；箭头单击也能展开/折叠。
 ///
 /// **性能上两条规矩：**
-/// - 只挂一个 `onTapGesture`，双击靠 `session.registerClick` 按时间间隔判定。
+/// - 只挂一个 `onTapGesture`，双击靠 `DoubleClickDetector` 按时间间隔判定。
 ///   SwiftUI 的 `TapGesture(count: 2)` 在 macOS 上会拖住同一视图的单击，选中要迟几百毫秒才亮。
 /// - 这里**不**用 `@ObservedObject` 观察 session：几百行每一行都订阅整个 session 的话，
 ///   git 刷新、文件加载这些与树无关的变化都会让所有行重算。需要的状态由父视图算好传进来。
 struct TreeRow: View {
     let session: ProjectSession
+    let clicks: DoubleClickDetector
     let row: FlattenedTree.Row
     let status: GitStatusIndex.Status?
     let isSelected: Bool
@@ -119,7 +124,7 @@ struct TreeRow: View {
                     Spacer().frame(width: 12)
                 }
             }
-            let icon = node.isDirectory ? FileIcon.folder(isExpanded: row.isExpanded) : FileIcon.file(named: node.name)
+            let icon = node.isDirectory ? FileIcon.folder : FileIcon.file(named: node.name)
             Image(systemName: icon.systemName)
                 .font(.system(size: 12))
                 .foregroundStyle(status == .ignored ? Theme.vcsIgnored : icon.color)
@@ -142,8 +147,8 @@ struct TreeRow: View {
         .onHover { isHovering = $0 }
         .onTapGesture {
             // 单击立刻选中；同一行在双击间隔内的第二下才算双击
-            session.selectedPath = node.id
-            guard session.registerClick(on: node.id) else { return }
+            session.select(node.id)
+            guard clicks.registerClick(on: node.id) else { return }
             if node.isDirectory {
                 session.toggleExpanded(node.id)
             } else {
@@ -173,8 +178,8 @@ private struct TreeContextMenu: View {
             }
             Divider()
         }
-        Button("在访达中显示") { session.revealInFinder(node.url) }
-        Button("用默认应用打开") { session.openWithDefaultApp(node.url) }
+        Button("在访达中显示") { Desktop.revealInFinder(node.url) }
+        Button("用默认应用打开") { Desktop.openWithDefaultApp(node.url) }
     }
 }
 
@@ -217,4 +222,10 @@ enum VCSColors {
         case .untracked: return Theme.vcsUntracked
         }
     }
+}
+
+/// 交给系统去做的两件事。放在视图层：模型不该 import AppKit 只为了调 NSWorkspace。
+enum Desktop {
+    static func revealInFinder(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+    static func openWithDefaultApp(_ url: URL) { NSWorkspace.shared.open(url) }
 }

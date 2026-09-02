@@ -95,13 +95,13 @@ import TestSupport
 
     tree.collapse("/p/src")
     #expect(tree.rows(root: root).count == 2)
-    // 折叠不丢缓存；作废才丢
+    // 折叠不丢缓存；作废才丢，且展开状态保留
     #expect(tree.hasLoaded("/p/src"))
-    tree.invalidate("/p/src")
-    #expect(!tree.hasLoaded("/p/src"))
-    #expect(tree.hasLoaded(root))
-    tree.invalidate(root)
-    #expect(!tree.hasLoaded(root))
+    tree.expand("/p/src")
+    tree.invalidateAll()
+    #expect(!tree.hasLoaded(root) && !tree.hasLoaded("/p/src"))
+    #expect(tree.isExpanded("/p/src"))
+    #expect(Set(tree.needsLoading(root: root)) == [root, "/p/src"])
 }
 
 @Test func revealExpandsAncestors() {

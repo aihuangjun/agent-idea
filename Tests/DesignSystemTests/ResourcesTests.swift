@@ -1,3 +1,4 @@
+import Core
 import DesignSystem
 import Foundation
 import Testing
@@ -27,5 +28,23 @@ import Testing
     #expect(FileIcon.file(named: "README.md").systemName == "doc.richtext")
     #expect(FileIcon.file(named: ".gitignore").systemName == "arrow.triangle.branch")
     #expect(FileIcon.file(named: "unknown.zzz").systemName == "doc")
-    #expect(FileIcon.folder(isExpanded: true).systemName == "folder.fill")
+    #expect(FileIcon.folder.systemName == "folder.fill")
+}
+
+@Test func renderPayloadEncodesTheContractKeys() throws {
+    let diff = UnifiedDiffParser.parse("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n")
+    let payload = RenderPayload(.diff(path: "x", language: "swift", diff: diff, mode: .sideBySide, emptyReason: nil), scrollTop: 12, wrap: true)
+    let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: Any]
+    #expect(json?["kind"] as? String == "diff")
+    #expect(json?["mode"] as? String == "side")
+    #expect(json?["scrollTop"] as? Double == 12)
+    #expect(json?["wrap"] as? Bool == true)
+    #expect(json?["added"] as? Int == 1 && json?["removed"] as? Int == 1)
+    #expect((json?["rows"] as? [Any])?.count == 2)
+    #expect(json?["emptyReason"] == nil)
+
+    let markdown = RenderPayload(.markdown(path: "/p/a.md", markdown: "# x", documentDirectory: URL(fileURLWithPath: "/p/"), showsSource: false))
+    let markdownJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(markdown)) as? [String: Any]
+    #expect(markdownJSON?["view"] as? String == "preview")
+    #expect(markdownJSON?["docDir"] as? String == "file:///p/")
 }

@@ -57,11 +57,20 @@ public enum Theme {
     /// 忽略：灰 #6F737A（比删除更暗一点，且不带删除线）
     public static let vcsIgnored = Color(hex: 0x6F737A)
 
+    // MARK: - 图标色（只给文件/目录图标用）
+
+    /// #8C9CB8 目录图标的灰蓝。
+    public static let folderIcon = Color(hex: 0x8C9CB8)
+    public static let iconOrange = Color(hex: 0xE8A25E)
+    public static let iconAmber = Color(hex: 0xE8C08D)
+    public static let iconYellow = Color(hex: 0xD5B778)
+    public static let iconPurple = Color(hex: 0xC77DBB)
+    public static let iconBlue = Color(hex: 0x56A8F5)
+
     // MARK: - 字体
 
     public static let uiFont = Font.system(size: 13)
     public static let smallFont = Font.system(size: 11)
-    public static let monoFont = Font.system(size: 12, design: .monospaced)
 
     // MARK: - 尺寸
 
@@ -73,13 +82,12 @@ public enum Theme {
 
 public extension Color {
     /// `Color(hex: 0x1E1F22)`。sRGB。
-    init(hex: UInt32, alpha: Double = 1) {
+    init(hex: UInt32) {
         self.init(
             .sRGB,
             red: Double((hex >> 16) & 0xFF) / 255,
             green: Double((hex >> 8) & 0xFF) / 255,
-            blue: Double(hex & 0xFF) / 255,
-            opacity: alpha
+            blue: Double(hex & 0xFF) / 255
         )
     }
 }

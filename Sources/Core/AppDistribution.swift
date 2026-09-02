@@ -14,10 +14,6 @@ public enum AppDistribution {
     public static let releasesDirectory = "releases"
     public static let manifestName = "latest.json"
 
-    public static var repositoryPage: URL {
-        URL(string: "https://github.com/\(repositoryOwner)/\(repositoryName)")!
-    }
-
     /// Contents API 地址。带上 `Accept: application/vnd.github.raw+json` 就直接返回文件内容，
     /// 二进制也行（上限 100MB，dmg 远小于此）。仓库是私有的，要带 token；改成公开后不带也能用。
     public static func contentsURL(fileName: String) -> URL {
@@ -60,14 +56,9 @@ public enum AppDistribution {
 public enum GitHubToken {
     public static let ghSearchPaths = ["/usr/local/bin/gh", "/opt/homebrew/bin/gh", "/usr/bin/gh"]
 
-    @MainActor
-    public static func resolve(
-        tokenFile: URL = AppPaths.gitHubTokenFile,
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        runner: CommandRunning = ShellCommand(),
-        fileManager: FileManager = .default
-    ) async -> String? {
-        if let fromFile = try? String(contentsOf: tokenFile, encoding: .utf8) {
+    public static func resolve() async -> String? {
+        let environment = ProcessInfo.processInfo.environment
+        if let fromFile = try? String(contentsOf: AppPaths.gitHubTokenFile, encoding: .utf8) {
             let trimmed = fromFile.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty { return trimmed }
         }
@@ -76,8 +67,8 @@ public enum GitHubToken {
                 return value
             }
         }
-        guard let gh = ExecutableLocator.locate(ghSearchPaths, fileManager: fileManager) else { return nil }
-        guard let output = try? await runner.run(executable: gh, arguments: ["auth", "token"], currentDirectory: nil, environment: nil),
+        guard let gh = ExecutableLocator.locate(ghSearchPaths) else { return nil }
+        guard let output = try? await ShellCommand().run(executable: gh, arguments: ["auth", "token"], currentDirectory: nil, environment: nil),
               output.status == 0 else { return nil }
         let token = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
         return token.isEmpty ? nil : token

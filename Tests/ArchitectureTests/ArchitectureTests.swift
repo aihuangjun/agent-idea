@@ -77,12 +77,17 @@ private func imports(in file: URL) throws -> Set<String> {
     }
     let web = try String(contentsOf: packageRoot.appendingPathComponent("Sources/DesignSystem/WebResources.swift"), encoding: .utf8)
     #expect(build.contains("AgentIDEA_DesignSystem.bundle") && web.contains("\"AgentIDEA_DesignSystem.bundle\""))
+    // 签名身份名三处必须一致；更新器换装时找的 app 名要和 release.sh 装进 dmg 的一致
+    let signing = try String(contentsOf: packageRoot.appendingPathComponent("scripts/make_signing_identity.sh"), encoding: .utf8)
+    for text in [build, script, signing] { #expect(text.contains("\"AgentIDEA Local\"")) }
+    let updater = try String(contentsOf: packageRoot.appendingPathComponent("Sources/Workbench/Shell/Updater.swift"), encoding: .utf8)
+    #expect(updater.contains("/AgentIDEA.app\"") && script.contains(".build/AgentIDEA.app \"$STAGE/\""))
 }
 
 @Test func themeAndStylesheetShareColors() throws {
     let theme = try String(contentsOf: packageRoot.appendingPathComponent("Sources/DesignSystem/Theme.swift"), encoding: .utf8)
     let css = try String(contentsOf: packageRoot.appendingPathComponent("Sources/DesignSystem/Resources/web/style.css"), encoding: .utf8)
-    for (swiftHex, cssHex) in [("0x1E1F22", "#1E1F22"), ("0x2B2D30", "#2B2D30"), ("0x393B40", "#393B40"), ("0x3574F0", "#3574F0")] {
+    for (swiftHex, cssHex) in [("0x1E1F22", "#1E1F22"), ("0x2B2D30", "#2B2D30"), ("0x393B40", "#393B40"), ("0x2E436E", "#2E436E"), ("0xDFE1E5", "#DFE1E5")] {
         #expect(theme.contains(swiftHex) && css.contains(cssHex), "主题色 \(cssHex) 两边不一致")
     }
 }

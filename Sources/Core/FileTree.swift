@@ -86,7 +86,6 @@ public struct FlattenedTree: Sendable {
 
     public func isExpanded(_ path: String) -> Bool { expanded.contains(path) }
     public func hasLoaded(_ path: String) -> Bool { children[path] != nil }
-    public func children(of path: String) -> [FileNode]? { children[path] }
 
     public mutating func setChildren(_ nodes: [FileNode], for path: String) {
         children[path] = nodes
@@ -98,18 +97,8 @@ public struct FlattenedTree: Sendable {
         if expanded.contains(path) { expanded.remove(path) } else { expanded.insert(path) }
     }
 
-    /// 把某个目录及其所有后代的缓存作废（目录内容变了之后重列）。展开状态保留。
-    public mutating func invalidate(_ path: String) {
-        let prefix = path.hasSuffix("/") ? path : path + "/"
-        children = children.filter { !($0.key == path || $0.key.hasPrefix(prefix)) }
-    }
-
+    /// 把全部子节点缓存作废（⌘R 手动刷新）。展开状态保留，下一次 `rows(root:)` 前按需重列。
     public mutating func invalidateAll() { children.removeAll() }
-
-    /// 已展开、且缓存还在的目录：刷新时只需要重列这些。
-    public var expandedLoadedPaths: [String] {
-        expanded.filter { children[$0] != nil }.sorted()
-    }
 
     /// 从根开始按深度优先展开成可见行。根本身不出现在行里。
     /// 目录已展开但子节点还没加载时不产生子行——由调用方看到 `needsLoading` 去加载。
@@ -137,7 +126,7 @@ public struct FlattenedTree: Sendable {
         return pending
     }
 
-    /// 让某个文件在树上可见：把它的每一级祖先都展开。返回需要加载的目录。
+    /// 让某个文件在树上可见：把它的每一级祖先都展开。新展开的目录由下一次 `rows(root:)` 前的 `needsLoading` 补加载。
     public mutating func reveal(_ path: String, root: String) {
         var current = (path as NSString).deletingLastPathComponent
         while current.count >= root.count, current.hasPrefix(root) {

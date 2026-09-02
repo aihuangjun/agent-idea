@@ -1,77 +1,79 @@
-import AppKit
 import Core
 import DesignSystem
 import Foundation
 
-/// 一个打开着的项目：目录树、git、标签页、提交草稿。
+/// 一个打开着的项目：目录树、git 状态、标签页，以及把标签内容送进 WebView。
 ///
-/// 阅读偏好（diff 模式、缩放、自动换行）和正文 WebView 归 `WorkbenchModel`，所有项目共用。
+/// 提交/回滚归 `CommitController`，目录监听归 `ChangeWatcher`，阅读偏好归 `ReadingPreferences`；
+/// 依赖全部由 `WorkbenchModel` 在构造时注入，会话不认识自己的父对象。
 @MainActor
-public final class ProjectSession: ObservableObject, Identifiable {
-    public let id: String
-    @Published public private(set) var project: Project
+final class ProjectSession: ObservableObject, Identifiable {
+    let id: String
+    @Published private(set) var project: Project
 
     // MARK: - 目录树
 
-    @Published public private(set) var tree = FlattenedTree()
-    @Published public private(set) var rows: [FlattenedTree.Row] = []
-    @Published public var selectedPath: String?
+    @Published private(set) var tree = FlattenedTree()
+    @Published private(set) var rows: [FlattenedTree.Row] = []
+    @Published private(set) var selectedPath: String?
+    /// 定位的次数。树视图观察它，据此决定「这次选中要滚动到可见」（鼠标点选不滚）。
+    @Published private(set) var revealRequests = 0
 
     // MARK: - Git
 
-    @Published public private(set) var gitSnapshot: GitSnapshot = .empty
-    @Published public private(set) var gitIndex: GitStatusIndex = .empty
-    @Published public private(set) var changeGroups = ChangeGroups(changes: [])
-    @Published public private(set) var isRefreshingGit = false
-    @Published public private(set) var gitError: String?
-    public var hasGit: Bool { project.repositoryRoot != nil && workbench.git != nil }
-
-    // MARK: - 提交草稿
-
-    @Published public var commitMessage = ""
-    /// 不勾选（不提交）的路径。默认全选，新出现的变更自动算勾上。
-    @Published public private(set) var excludedFromCommit: Set<String> = []
-    @Published public private(set) var isCommitting = false
-    @Published public private(set) var isPushing = false
-    /// 最近一次提交/推送的结果或错误，显示在提交面板底部。
-    @Published public var commitStatus: CommitStatus?
-
-    public enum CommitStatus: Equatable {
-        case success(String)
-        case failure(String)
-    }
+    @Published private(set) var gitSnapshot: GitSnapshot = .empty
+    @Published private(set) var gitIndex: GitStatusIndex = .empty
+    @Published private(set) var changeGroups = ChangeGroups(changes: [])
+    @Published private(set) var isRefreshingGit = false
+    @Published private(set) var gitError: String?
+    /// 仓库确定之后才有；没有 git 的项目为 nil。
+    @Published private(set) var commit: CommitController?
+    var hasGit: Bool { commit != nil }
 
     // MARK: - 编辑区
 
-    @Published public private(set) var tabs: [EditorTab] = []
-    @Published public var activeTabID: String?
-    @Published public private(set) var contents: [String: TabContent] = [:]
+    @Published private(set) var tabs: [EditorTab] = []
+    @Published private(set) var activeTabID: String?
+    @Published private(set) var contents: [String: TabContent] = [:]
     /// 顶部一条可关闭的提示。
-    @Published public var banner: String?
+    @Published private(set) var banner: String?
 
-    unowned let workbench: WorkbenchModel
-    private var renderer: ContentRenderer { workbench.renderer }
-    private var git: GitClient? { workbench.git }
-    private var fileManager: FileManager { workbench.fileManager }
-    private var isActiveSession: Bool { workbench.active === self }
+    /// 树视图里的一次键盘/回车动作。
+    enum TreeCommand {
+        /// 回车 / 双击：目录切换展开，文件打开。
+        case toggle
+        /// 右键：展开目录。
+        case expand
+        /// 左键：折叠目录；已折叠或是文件则跳到父目录。
+        case collapseOrAscend
+    }
 
-    private var watcher: DirectoryWatcher?
-    private let refreshDebouncer = Debouncer(delay: 0.35)
+    /// 需要壳切到某个工具窗口（定位文件时切到项目树）。
+    var onRequestToolWindow: (@MainActor (ToolWindow) -> Void)?
+
+    private let git: GitClient?
+    private let renderer: ContentRenderer
+    private let fileManager = FileManager.default
+    private let preferences: ReadingPreferences
+    /// 由 `WorkbenchModel.activate` 写入。只有当前项目才往共用的 WebView 里画。
+    private(set) var isActive = false
+    private var watcher: ChangeWatcher?
     private var gitTask: Task<Void, Never>?
-    private var pendingChangedPaths: Set<String> = []
 
-    public var activeTab: EditorTab? {
+    var activeTab: EditorTab? {
         guard let activeTabID else { return nil }
         return tabs.first { $0.id == activeTabID }
     }
 
-    public var activeContent: TabContent? {
+    var activeContent: TabContent? {
         guard let activeTabID else { return nil }
         return contents[activeTabID]
     }
 
-    init(root: URL, workbench: WorkbenchModel) {
-        self.workbench = workbench
+    init(root: URL, git: GitClient?, renderer: ContentRenderer, preferences: ReadingPreferences) {
+        self.git = git
+        self.renderer = renderer
+        self.preferences = preferences
         let project = Project(root: root)
         self.project = project
         self.id = project.root.path
@@ -79,16 +81,24 @@ public final class ProjectSession: ObservableObject, Identifiable {
 
         loadChildren(of: project.root.path)
         recomputeRows()
-        startWatching(project.root)
+        watcher = ChangeWatcher(root: project.root) { [weak self] paths in self?.handleChanges(paths) }
 
         Task { [weak self] in
-            guard let self, let git = workbench.git else { return }
+            guard let git else { return }
             let repositoryRoot = await git.repositoryRoot(containing: project.root)
+            guard let self else { return }
             self.project.repositoryRoot = repositoryRoot
-            if repositoryRoot == nil {
+            if let repositoryRoot = self.project.repositoryRoot {
+                let controller = CommitController(git: git, repositoryRoot: repositoryRoot)
+                controller.onRepositoryChanged = { [weak self] affected in
+                    for change in affected { self?.closeTab(EditorTab.id(forDiff: change)) }
+                    self?.refreshAll()
+                }
+                self.commit = controller
+                self.refreshGit()
+            } else {
                 Log.info("git", "\(project.name) 不在 git 仓库里")
             }
-            self.refreshGit()
         }
     }
 
@@ -99,11 +109,19 @@ public final class ProjectSession: ObservableObject, Identifiable {
         watcher = nil
     }
 
+    /// 成为 / 不再是当前项目。成为当前时把活动标签画出来。
+    func setActive(_ active: Bool) {
+        if !active, isActive { rememberScrollOfActiveTab() }
+        isActive = active
+        if active { renderActiveTab() }
+    }
+
+    func dismissBanner() { banner = nil }
+
     // MARK: - 目录树
 
     private func loadChildren(of path: String) {
-        let nodes = DirectoryLister.list(URL(fileURLWithPath: path, isDirectory: true), fileManager: fileManager)
-        tree.setChildren(nodes, for: path)
+        tree.setChildren(DirectoryLister.list(URL(fileURLWithPath: path, isDirectory: true), fileManager: fileManager), for: path)
     }
 
     private func recomputeRows() {
@@ -113,81 +131,68 @@ public final class ProjectSession: ObservableObject, Identifiable {
         rows = tree.rows(root: project.root.path)
     }
 
-    public func toggleExpanded(_ path: String) {
+    func select(_ path: String?) { selectedPath = path }
+
+    func toggleExpanded(_ path: String) {
         tree.toggle(path)
         recomputeRows()
     }
 
-    public func expand(_ path: String) {
+    func expand(_ path: String) {
         guard !tree.isExpanded(path) else { return }
         tree.expand(path)
         recomputeRows()
     }
 
-    public func collapse(_ path: String) {
+    func collapse(_ path: String) {
         guard tree.isExpanded(path) else { return }
         tree.collapse(path)
         recomputeRows()
     }
 
-    public func collapseAll() {
+    func collapseAll() {
         for row in rows where row.isExpanded { tree.collapse(row.id) }
         recomputeRows()
     }
 
-    /// 定位的次数。树视图观察它，据此决定「这次选中要滚动到可见」（鼠标点选不滚）。
-    @Published public private(set) var revealRequests = 0
-
     /// 在树上定位并选中一个文件（IDEA 的 Select Opened File）。
-    public func reveal(_ url: URL) {
+    func reveal(_ url: URL) {
         tree.reveal(url.path, root: project.root.path)
         recomputeRows()
         revealRequests += 1
         selectedPath = url.path
-        workbench.toolWindow = .project
+        onRequestToolWindow?(.project)
     }
 
     /// 定位当前标签对应的文件。
-    public func revealActiveTab() {
+    func revealActiveTab() {
         guard let tab = activeTab else { return }
-        if let url = tab.fileURL {
-            reveal(url)
-        } else if let change = tab.change, let url = self.url(for: change) {
-            reveal(url)
-        }
+        if let url = tab.fileURL ?? tab.change.flatMap({ self.url(for: $0) }) { reveal(url) }
     }
 
     /// 一个节点该用什么 VCS 颜色。
-    public func gitStatus(for node: FileNode) -> GitStatusIndex.Status? {
+    func gitStatus(for node: FileNode) -> GitStatusIndex.Status? {
         guard let relative = project.repositoryRelativePath(of: node.url) else { return nil }
         return gitIndex.status(of: relative, isDirectory: node.isDirectory)
     }
 
-    public func moveSelection(by offset: Int) {
+    func moveSelection(by offset: Int) {
         guard !rows.isEmpty else { return }
         let currentIndex = rows.firstIndex { $0.id == selectedPath } ?? (offset > 0 ? -1 : rows.count)
-        let next = min(rows.count - 1, max(0, currentIndex + offset))
-        selectedPath = rows[next].id
+        selectedPath = rows[min(rows.count - 1, max(0, currentIndex + offset))].id
     }
 
-    /// 选中的目录：展开/折叠；选中的文件：打开。回车与左右键都走这里。
-    public func activateSelection(expandOnly: Bool? = nil) {
+    /// 对选中项执行一个键盘动作。
+    func perform(_ command: TreeCommand) {
         guard let selectedPath, let row = rows.first(where: { $0.id == selectedPath }) else { return }
-        if row.node.isDirectory {
-            switch expandOnly {
-            case .some(true): expand(selectedPath)
-            case .some(false):
-                if tree.isExpanded(selectedPath) {
-                    collapse(selectedPath)
-                } else if let parent = parentPath(of: selectedPath) {
-                    self.selectedPath = parent
-                }
-            case .none: toggleExpanded(selectedPath)
-            }
-        } else if expandOnly == false, let parent = parentPath(of: selectedPath) {
-            self.selectedPath = parent
-        } else if expandOnly != true {
-            openFile(row.node.url, pinned: true)
+        let parent = parentPath(of: selectedPath)
+        switch (command, row.node.isDirectory) {
+        case (.toggle, true): toggleExpanded(selectedPath)
+        case (.toggle, false): openFile(row.node.url, pinned: true)
+        case (.expand, true): expand(selectedPath)
+        case (.expand, false): break
+        case (.collapseOrAscend, true) where tree.isExpanded(selectedPath): collapse(selectedPath)
+        case (.collapseOrAscend, _): if let parent { self.selectedPath = parent }
         }
     }
 
@@ -199,7 +204,7 @@ public final class ProjectSession: ObservableObject, Identifiable {
     // MARK: - 标签页
 
     /// 打开一个文件。`pinned == false` 复用预览标签（变更列表单击、Markdown 链接），`true` 固定。
-    public func openFile(_ url: URL, pinned: Bool) {
+    func openFile(_ url: URL, pinned: Bool) {
         let url = url.resolvingSymlinksInPath().standardizedFileURL
         selectedPath = url.path
         let tab = EditorTab(kind: .file(url), isPreview: !pinned)
@@ -207,12 +212,13 @@ public final class ProjectSession: ObservableObject, Identifiable {
         if contents[tab.id] == nil { loadFile(for: tab) }
     }
 
-    public func openDiff(_ change: GitChange, pinned: Bool = false) {
+    func openDiff(_ change: GitChange, pinned: Bool = false) {
         let tab = EditorTab(kind: .diff(change), isPreview: !pinned)
         show(tab)
         if contents[tab.id] == nil { loadDiff(for: tab) }
     }
 
+    /// 把标签放进标签栏并激活。已经开着的直接切过去；预览标签只保留一个。**这是标签进栏的唯一入口。**
     private func show(_ incoming: EditorTab) {
         if let index = tabs.firstIndex(where: { $0.id == incoming.id }) {
             if !incoming.isPreview { tabs[index].isPreview = false }
@@ -221,8 +227,7 @@ public final class ProjectSession: ObservableObject, Identifiable {
         }
         rememberScrollOfActiveTab()
         if incoming.isPreview, let previewIndex = tabs.firstIndex(where: { $0.isPreview }) {
-            let old = tabs[previewIndex]
-            contents[old.id] = nil
+            contents[tabs[previewIndex].id] = nil
             tabs[previewIndex] = incoming
         } else if let activeIndex = tabs.firstIndex(where: { $0.id == activeTabID }) {
             tabs.insert(incoming, at: activeIndex + 1)
@@ -233,68 +238,73 @@ public final class ProjectSession: ObservableObject, Identifiable {
         renderActiveTab()
     }
 
-    public func activate(_ tabID: String) {
-        guard tabID != activeTabID else { return }
+    func activate(_ tabID: String) {
+        guard tabID != activeTabID, tabs.contains(where: { $0.id == tabID }) else { return }
         rememberScrollOfActiveTab()
         activeTabID = tabID
-        if let tab = activeTab, let url = tab.fileURL { selectedPath = url.path }
-        if let tab = activeTab, contents[tab.id] == nil {
-            tab.isDiff ? loadDiff(for: tab) : loadFile(for: tab)
+        if let tab = activeTab {
+            if let url = tab.fileURL { selectedPath = url.path }
+            if contents[tab.id] == nil { tab.isDiff ? loadDiff(for: tab) : loadFile(for: tab) }
         }
         renderActiveTab()
     }
 
-    public func pin(_ tabID: String) {
+    func pin(_ tabID: String) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         tabs[index].isPreview = false
     }
 
-    public func closeTab(_ tabID: String) {
+    func closeTab(_ tabID: String) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         tabs.remove(at: index)
         contents[tabID] = nil
         if activeTabID == tabID {
-            let next = tabs.indices.contains(index) ? tabs[index] : tabs.last
-            activeTabID = next?.id
+            activeTabID = (tabs.indices.contains(index) ? tabs[index] : tabs.last)?.id
             renderActiveTab()
         }
     }
 
-    public func closeActiveTab() {
+    func closeActiveTab() {
         if let activeTabID { closeTab(activeTabID) }
     }
 
-    public func closeOtherTabs(_ tabID: String) {
+    func closeOtherTabs(_ tabID: String) {
         for tab in tabs where tab.id != tabID { contents[tab.id] = nil }
         tabs = tabs.filter { $0.id == tabID }
         activeTabID = tabID
         renderActiveTab()
     }
 
-    public func closeAllTabs() {
+    func closeAllTabs() {
         tabs = []
         contents = [:]
         activeTabID = nil
         renderActiveTab()
     }
 
-    public func selectNextTab(offset: Int) {
+    func selectNextTab(offset: Int) {
         guard tabs.count > 1, let index = tabs.firstIndex(where: { $0.id == activeTabID }) else { return }
         activate(tabs[(index + offset + tabs.count) % tabs.count].id)
     }
 
-    public func toggleMarkdownSource() {
+    func toggleMarkdownSource() {
         guard let index = tabs.firstIndex(where: { $0.id == activeTabID }) else { return }
         tabs[index].markdownShowsSource.toggle()
         tabs[index].scrollTop = 0
         renderActiveTab()
     }
 
-    func rememberScrollOfActiveTab() {
-        guard isActiveSession, let id = activeTabID else { return }
+    private func rememberScrollOfActiveTab() {
+        guard isActive, let id = activeTabID else { return }
+        rememberScroll(of: id)
+    }
+
+    /// 问 WebView 当前滚到哪，记到那个标签上；记完之后可以接着做点别的（比如重读文件）。
+    private func rememberScroll(of tabID: String, then continuation: @escaping @MainActor (EditorTab) -> Void = { _ in }) {
         renderer.currentScrollTop { [weak self] top in
-            guard let self, let index = self.tabs.firstIndex(where: { $0.id == id }) else { return }
+            guard let self, let index = self.tabs.firstIndex(where: { $0.id == tabID }) else { return }
             self.tabs[index].scrollTop = top
+            continuation(self.tabs[index])
         }
     }
 
@@ -305,40 +315,17 @@ public final class ProjectSession: ObservableObject, Identifiable {
         contents[tab.id] = .loading
         let fileManager = self.fileManager
         Task { [weak self] in
-            let content = await Task.detached(priority: .userInitiated) { Self.load(url, fileManager: fileManager) }.value
-            guard let self, self.tabs.contains(where: { $0.id == tab.id }) else { return }
-            self.contents[tab.id] = content
-            if self.activeTabID == tab.id { self.renderActiveTab() }
+            // 读盘放到后台：几 MB 的文件同步读会卡一下主线程
+            let content = await Task.detached(priority: .userInitiated) { FileContentLoader.load(url, fileManager: fileManager) }.value
+            self?.store(content, for: tab.id)
         }
     }
 
-    nonisolated static func load(_ url: URL, fileManager: FileManager) -> TabContent {
-        let attributes = try? fileManager.attributesOfItem(atPath: url.path)
-        let modified = attributes?[.modificationDate] as? Date
-        let size = (attributes?[.size] as? NSNumber)?.intValue ?? 0
-        guard fileManager.fileExists(atPath: url.path) else {
-            return .message(title: "文件不存在", detail: url.path)
-        }
-        switch FileCategory.forFile(named: url.lastPathComponent) {
-        case .image:
-            return .image(url: url, sizeBytes: size)
-        case .pdf:
-            return .message(title: "PDF 暂不支持预览", detail: "用系统预览打开：右键标签 → 用默认应用打开")
-        case .markdown:
-            switch TextFileLoader.load(url, fileManager: fileManager) {
-            case .text(let text, let encoding, let lines): return .markdown(text: text, encoding: encoding, lineCount: lines, modified: modified)
-            case .binary(let size): return .binary(sizeBytes: size)
-            case .tooLarge(let size, let limit): return .tooLarge(sizeBytes: size, limit: limit)
-            case .unreadable(let reason): return .message(title: "读不出文件", detail: reason)
-            }
-        case .code(let language):
-            switch TextFileLoader.load(url, fileManager: fileManager) {
-            case .text(let text, let encoding, let lines): return .code(text: text, language: language, encoding: encoding, lineCount: lines, modified: modified)
-            case .binary(let size): return .binary(sizeBytes: size)
-            case .tooLarge(let size, let limit): return .tooLarge(sizeBytes: size, limit: limit)
-            case .unreadable(let reason): return .message(title: "读不出文件", detail: reason)
-            }
-        }
+    /// 加载完成后回填。标签在加载期间被关掉了就丢弃；是当前标签就立刻画。
+    private func store(_ content: TabContent, for tabID: String) {
+        guard tabs.contains(where: { $0.id == tabID }) else { return }
+        contents[tabID] = content
+        if activeTabID == tabID { renderActiveTab() }
     }
 
     private func loadDiff(for tab: EditorTab) {
@@ -347,120 +334,50 @@ public final class ProjectSession: ObservableObject, Identifiable {
             return
         }
         contents[tab.id] = .loading
-        let ignoreWhitespace = workbench.ignoreWhitespace
         Task { [weak self] in
-            let content = await Self.computeDiff(change, git: git, repositoryRoot: repositoryRoot, ignoreWhitespace: ignoreWhitespace)
-            guard let self, self.tabs.contains(where: { $0.id == tab.id }) else { return }
-            self.contents[tab.id] = content
-            if self.activeTabID == tab.id { self.renderActiveTab() }
+            let content = await FileContentLoader.loadDiff(change, git: git, repositoryRoot: repositoryRoot)
+            self?.store(content, for: tab.id)
         }
-    }
-
-    nonisolated private static func computeDiff(_ change: GitChange, git: GitClient, repositoryRoot: URL, ignoreWhitespace: Bool) async -> TabContent {
-        do {
-            let raw = try await git.diff(change: change, repositoryRoot: repositoryRoot, ignoreWhitespace: ignoreWhitespace)
-            return .diff(UnifiedDiffParser.parse(raw), language: Language.forFile(named: change.fileName))
-        } catch {
-            return .message(title: "取不到 diff", detail: describe(error))
-        }
-    }
-
-    func reloadActiveDiff() {
-        guard let tab = activeTab, tab.isDiff else { return }
-        loadDiff(for: tab)
     }
 
     // MARK: - 渲染
 
     /// 把当前标签的内容送进 WebView。只有当前项目的会话才真的画。
-    public func renderActiveTab() {
-        guard isActiveSession else { return }
+    func renderActiveTab() {
+        guard isActive else { return }
         guard let tab = activeTab else {
-            renderer.render(["kind": "message", "title": "", "detail": ""])
+            renderer.render(.message("", ""))
             return
         }
-        guard let content = contents[tab.id] else { return }
-        var payload: [String: Any] = ["scrollTop": tab.scrollTop, "wrap": workbench.wordWrap]
-        switch content {
-        case .loading:
-            return
-        case .code(let text, let language, _, _, _):
-            payload["kind"] = "code"
-            payload["path"] = tab.fileURL?.path ?? ""
-            payload["text"] = text
-            if let id = language.highlightID { payload["language"] = id }
-        case .markdown(let text, _, _, _):
-            payload["kind"] = "markdown"
-            payload["path"] = tab.fileURL?.path ?? ""
-            payload["markdown"] = text
-            payload["docDir"] = tab.fileURL?.deletingLastPathComponent().absoluteString ?? ""
-            payload["view"] = tab.markdownShowsSource ? "source" : "preview"
-        case .image(let url, let size):
-            payload["kind"] = "image"
-            payload["path"] = url.path
-            payload["url"] = url.absoluteString
-            payload["sizeText"] = ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file)
-        case .binary(let size):
-            payload["kind"] = "message"
-            payload["title"] = "二进制文件"
-            payload["detail"] = "\(tab.title) · \(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))\n这个阅读器只显示文本。"
-        case .tooLarge(let size, let limit):
-            payload["kind"] = "message"
-            payload["title"] = "文件太大"
-            payload["detail"] = "\(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))，超过 \(ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file)) 的阅读上限。"
-        case .diff(let diff, let language):
-            payload["kind"] = "diff"
-            payload["path"] = tab.change?.path ?? ""
-            if let id = language.highlightID { payload["language"] = id }
-            payload["mode"] = workbench.diffMode.rawValue
-            payload["binary"] = diff.isBinary
-            payload["empty"] = diff.isEmpty
-            payload["added"] = diff.addedCount
-            payload["removed"] = diff.removedCount
-            if diff.isEmpty, tab.change?.kind == .untracked { payload["emptyReason"] = "这是一个空文件。" }
-            payload["rows"] = Self.encodeRows(diff, mode: workbench.diffMode)
-        case .message(let title, let detail):
-            payload["kind"] = "message"
-            payload["title"] = title
-            payload["detail"] = detail
-        }
-        renderer.render(payload)
-    }
-
-    private static func encodeRows(_ diff: FileDiff, mode: DiffMode) -> [Any] {
-        let data: Data?
-        switch mode {
-        case .sideBySide: data = try? JSONEncoder().encode(DiffLayout.sideBySide(diff))
-        case .unified: data = try? JSONEncoder().encode(DiffLayout.unified(diff))
-        }
-        guard let data, let rows = try? JSONSerialization.jsonObject(with: data) as? [Any] else { return [] }
-        return rows
+        guard let content = contents[tab.id], content != .loading else { return }
+        renderer.render(RenderPayload(
+            content.renderContent(for: tab, diffMode: preferences.diffMode),
+            scrollTop: tab.scrollTop,
+            wrap: preferences.wordWrap
+        ))
     }
 
     // MARK: - Git 状态
 
-    public func refreshGit() {
-        guard let git, let repositoryRoot = project.repositoryRoot else {
-            gitSnapshot = .empty
-            gitIndex = .empty
-            changeGroups = ChangeGroups(changes: [])
-            return
-        }
+    func refreshGit() {
+        guard let git, let repositoryRoot = project.repositoryRoot else { return }
         gitTask?.cancel()
         isRefreshingGit = true
-        gitTask = Task { [weak self] in
-            defer { self?.isRefreshingGit = false }
+        let task = Task { [weak self] in
             do {
                 let snapshot = try await git.snapshot(repositoryRoot: repositoryRoot)
-                guard !Task.isCancelled, let self, self.project.repositoryRoot == repositoryRoot else { return }
+                guard !Task.isCancelled, let self else { return }
                 self.apply(snapshot)
-            } catch is CancellationError {
             } catch {
-                guard let self else { return }
-                self.gitError = Self.describe(error)
+                // 被更新的一次刷新顶掉了：不是出错，什么都不用做
+                guard !Task.isCancelled, let self else { return }
+                self.gitError = error.userFacingDescription
                 Log.warn("git", "status 失败：\(error)")
             }
+            // 只有自己还是「最新的那次刷新」时才关掉转圈，别把后来者的转圈提前关掉
+            if let self, self.gitTask?.isCancelled == false { self.isRefreshingGit = false }
         }
+        gitTask = task
     }
 
     private func apply(_ snapshot: GitSnapshot) {
@@ -468,206 +385,42 @@ public final class ProjectSession: ObservableObject, Identifiable {
         gitSnapshot = snapshot
         gitIndex = GitStatusIndex(snapshot: snapshot)
         changeGroups = ChangeGroups(changes: snapshot.changes)
-        // 已经不存在的变更从「不勾选」集合里清掉，免得它越积越大
-        let paths = Set(snapshot.changes.map(\.path))
-        excludedFromCommit = excludedFromCommit.intersection(paths)
+        commit?.update(snapshot: snapshot)
 
+        // 开着的 diff 标签：变更已经不在了的关掉（比如被提交了），其余重新算
         let stillChanged = Dictionary(uniqueKeysWithValues: snapshot.changes.map { ($0.path, $0) })
         for tab in tabs {
             guard let change = tab.change else { continue }
-            if let fresh = stillChanged[change.path] {
-                if fresh != change, let index = tabs.firstIndex(where: { $0.id == tab.id }) {
-                    var replaced = EditorTab(kind: .diff(fresh), isPreview: tab.isPreview)
-                    replaced.scrollTop = tab.scrollTop
-                    tabs[index] = replaced
-                }
-                contents[tab.id] = nil
-                if activeTabID == tab.id { loadDiff(for: tabs.first { $0.id == tab.id } ?? tab) }
-            } else {
+            guard let fresh = stillChanged[change.path] else {
                 closeTab(tab.id)
+                continue
             }
+            if fresh != change, let index = tabs.firstIndex(where: { $0.id == tab.id }) {
+                var replaced = EditorTab(kind: .diff(fresh), isPreview: tab.isPreview)
+                replaced.scrollTop = tab.scrollTop
+                tabs[index] = replaced
+            }
+            contents[tab.id] = nil
+            if activeTabID == tab.id, let current = tabs.first(where: { $0.id == tab.id }) { loadDiff(for: current) }
         }
     }
 
-    /// 手动刷新（⌘R）：目录树整个重列 + git。
-    public func refreshAll() {
+    /// 手动刷新（⌘R）：目录树整个重列 + 重读开着的文件 + git。
+    func refreshAll() {
         tree.invalidateAll()
         recomputeRows()
         reloadOpenFilesIfChanged()
         refreshGit()
     }
 
-    // MARK: - 提交与推送
-
-    public func isIncludedInCommit(_ change: GitChange) -> Bool {
-        !excludedFromCommit.contains(change.path)
-    }
-
-    public func setIncluded(_ included: Bool, for change: GitChange) {
-        if included { excludedFromCommit.remove(change.path) } else { excludedFromCommit.insert(change.path) }
-    }
-
-    public func setAllIncluded(_ included: Bool) {
-        excludedFromCommit = included ? [] : Set(gitSnapshot.changes.map(\.path))
-    }
-
-    public var includedChanges: [GitChange] {
-        gitSnapshot.changes.filter { !excludedFromCommit.contains($0.path) }
-    }
-
-    public var canCommit: Bool {
-        hasGit && !isCommitting && !isPushing && !includedChanges.isEmpty
-            && !commitMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    public var canPush: Bool {
-        hasGit && !isCommitting && !isPushing && !gitSnapshot.branch.isUnborn
-    }
-
-    /// 提交勾选的变更；`push` 为 true 时接着推送。
-    public func commit(push: Bool) {
-        guard canCommit, let git, let repositoryRoot = project.repositoryRoot else { return }
-        let changes = includedChanges
-        var paths = changes.map(\.path)
-        paths += changes.compactMap(\.originalPath)
-        let message = commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
-        isCommitting = true
-        commitStatus = nil
-        Task { [weak self] in
-            do {
-                let result = try await git.commit(paths: paths, message: message, repositoryRoot: repositoryRoot)
-                guard let self else { return }
-                self.commitMessage = ""
-                self.isCommitting = false
-                self.commitStatus = .success("已提交 \(result.shortHash)（\(result.fileCount) 个文件）")
-                Log.info("git", "提交 \(result.shortHash)：\(result.fileCount) 个文件")
-                self.refreshGit()
-                if push { self.pushCurrentBranch() }
-            } catch {
-                guard let self else { return }
-                self.isCommitting = false
-                self.commitStatus = .failure("提交失败：\(Self.describe(error))")
-                Log.warn("git", "提交失败：\(error)")
-                self.refreshGit()
-            }
-        }
-    }
-
-    public func pushCurrentBranch() {
-        guard canPush, let git, let repositoryRoot = project.repositoryRoot else { return }
-        let hasUpstream = gitSnapshot.branch.upstream != nil
-        isPushing = true
-        Task { [weak self] in
-            do {
-                let output = try await git.push(repositoryRoot: repositoryRoot, hasUpstream: hasUpstream)
-                guard let self else { return }
-                self.isPushing = false
-                let summary = output.split(separator: "\n").last.map(String.init) ?? ""
-                self.commitStatus = .success(summary.isEmpty ? "已推送" : "已推送：\(summary)")
-                Log.info("git", "推送完成：\(output)")
-                self.refreshGit()
-            } catch {
-                guard let self else { return }
-                self.isPushing = false
-                self.commitStatus = .failure("推送失败：\(Self.describe(error))")
-                Log.warn("git", "推送失败：\(error)")
-                self.refreshGit()
-            }
-        }
-    }
-
-    // MARK: - 回滚与删除
-
-    /// 回滚一条变更到 HEAD。修改/删除/重命名/冲突 → restore；新增（已在索引）→ 连文件一起删；未跟踪 → 走 `deleteUntracked`。
-    public func rollback(_ change: GitChange) {
-        guard let git, let repositoryRoot = project.repositoryRoot else { return }
-        Task { [weak self] in
-            do {
-                switch change.kind {
-                case .untracked:
-                    try Self.trash(repositoryRoot.appendingPathComponent(change.path))
-                case .added:
-                    try await git.removeAdded(path: change.path, repositoryRoot: repositoryRoot)
-                default:
-                    var paths = [change.path]
-                    if let original = change.originalPath { paths.append(original) }
-                    try await git.restoreToHead(paths: paths, repositoryRoot: repositoryRoot)
-                }
-                Log.info("git", "已回滚 \(change.path)")
-            } catch {
-                self?.commitStatus = .failure("回滚失败：\(Self.describe(error))")
-                Log.warn("git", "回滚 \(change.path) 失败：\(error)")
-            }
-            self?.closeTab(EditorTab(kind: .diff(change), isPreview: true).id)
-            self?.refreshAll()
-        }
-    }
-
-    /// 删除一个未跟踪文件：进废纸篓，不是 rm——IDEA 的删除也能从本地历史找回来，这里用废纸篓兜底。
-    public func deleteUntracked(_ change: GitChange) {
-        guard let repositoryRoot = project.repositoryRoot else { return }
-        do {
-            try Self.trash(repositoryRoot.appendingPathComponent(change.path))
-            closeTab(EditorTab(kind: .diff(change), isPreview: true).id)
-            refreshAll()
-        } catch {
-            commitStatus = .failure("删除失败：\(Self.describe(error))")
-        }
-    }
-
-    nonisolated private static func trash(_ url: URL) throws {
-        try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-    }
-
-    // MARK: - 双击判定
-
-    private var lastClick: (id: String, time: TimeInterval)?
-
-    /// 记录一次单击，返回它是不是双击的第二下。
-    ///
-    /// 不用 SwiftUI 的 `TapGesture(count: 2)`：在 macOS 上它会让同一视图上的单击等到双击超时
-    /// 之后才被判定，表现是「点了要过一会儿才选中」。这里单击立即生效，只额外记一下时间。
-    public func registerClick(on id: String) -> Bool {
-        let now = ProcessInfo.processInfo.systemUptime
-        if let last = lastClick, last.id == id, now - last.time <= NSEvent.doubleClickInterval {
-            lastClick = nil
-            return true
-        }
-        lastClick = (id, now)
-        return false
-    }
-
-    // MARK: - 文件监听
-
-    private func startWatching(_ root: URL) {
-        let watcher = DirectoryWatcher(url: root) { [weak self] paths in
-            let relevant = paths.filter(DirectoryWatcher.isRelevant)
-            guard !relevant.isEmpty else { return }
-            Task { @MainActor [weak self] in self?.noteChanges(relevant) }
-        }
-        if watcher.start() {
-            self.watcher = watcher
-        } else {
-            Log.warn("watch", "FSEvents 启动失败，改动需要手动刷新（⌘R）")
-        }
-    }
-
-    private func noteChanges(_ paths: [String]) {
-        pendingChangedPaths.formUnion(paths)
-        refreshDebouncer.call { [weak self] in
-            guard let self else { return }
-            let changed = self.pendingChangedPaths
-            self.pendingChangedPaths = []
-            self.handleChanges(changed)
-        }
-    }
+    // MARK: - 目录变化
 
     private func handleChanges(_ paths: Set<String>) {
         var directories: Set<String> = []
         for path in paths {
             var isDirectory: ObjCBool = false
             let exists = fileManager.fileExists(atPath: path, isDirectory: &isDirectory)
-            directories.insert(exists && isDirectory.boolValue ? path : (path as NSString).deletingLastPathComponent)
+            if exists, isDirectory.boolValue { directories.insert(path) }
             directories.insert((path as NSString).deletingLastPathComponent)
         }
         for directory in directories where tree.hasLoaded(directory) {
@@ -678,25 +431,14 @@ public final class ProjectSession: ObservableObject, Identifiable {
         refreshGit()
     }
 
+    /// 开着的文件在磁盘上变了就重读；当前显示的那个重渲染但保持滚动位置——Agent 正在改的文件用户多半正盯着看。
     private func reloadOpenFilesIfChanged() {
         for tab in tabs {
             guard let url = tab.fileURL, let content = contents[tab.id], content != .loading else { continue }
-            let attributes = try? fileManager.attributesOfItem(atPath: url.path)
-            let modified = attributes?[.modificationDate] as? Date
-            let exists = fileManager.fileExists(atPath: url.path)
-            let changed: Bool
-            switch content {
-            case .message: changed = exists
-            case .code, .markdown: changed = !exists || modified != content.modificationDate
-            default: changed = !exists || modified != nil
-            }
-            guard changed else { continue }
-            if tab.id == activeTabID, isActiveSession {
-                renderer.currentScrollTop { [weak self] top in
-                    guard let self, let index = self.tabs.firstIndex(where: { $0.id == tab.id }) else { return }
-                    self.tabs[index].scrollTop = top
-                    self.loadFile(for: self.tabs[index])
-                }
+            let modified = (try? fileManager.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+            guard FileContentLoader.isStale(content, modifiedOnDisk: modified, exists: fileManager.fileExists(atPath: url.path)) else { continue }
+            if tab.id == activeTabID, isActive {
+                rememberScroll(of: tab.id) { [weak self] current in self?.loadFile(for: current) }
             } else {
                 contents[tab.id] = nil
             }
@@ -705,21 +447,10 @@ public final class ProjectSession: ObservableObject, Identifiable {
 
     // MARK: - 杂项
 
-    public func revealInFinder(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+    func url(for change: GitChange) -> URL? { project.url(forRepositoryPath: change.path) }
 
-    public func openWithDefaultApp(_ url: URL) { NSWorkspace.shared.open(url) }
-
-    public func url(for change: GitChange) -> URL? { project.url(forRepositoryPath: change.path) }
-
-    public func change(for url: URL) -> GitChange? {
+    func change(for url: URL) -> GitChange? {
         guard let relative = project.repositoryRelativePath(of: url) else { return nil }
         return gitSnapshot.changes.first { $0.path == relative }
-    }
-
-    nonisolated static func describe(_ error: Error) -> String {
-        if let failure = error as? ShellCommandError {
-            return failure.message.isEmpty ? "\(failure.command) 退出码 \(failure.status)" : failure.message
-        }
-        return error.localizedDescription
     }
 }

@@ -66,13 +66,7 @@ public enum DiffLayout {
                 try container.encode(line.oldNumber, forKey: .oldNumber)
                 try container.encode(line.newNumber, forKey: .newNumber)
                 try container.encode(line.text, forKey: .text)
-                let kind: String
-                switch line.kind {
-                case .context: kind = "ctx"
-                case .added: kind = "add"
-                case .removed: kind = "del"
-                }
-                try container.encode(kind, forKey: .kind)
+                try container.encode(line.kind.rawValue, forKey: .kind)
             }
         }
 

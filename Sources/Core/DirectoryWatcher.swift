@@ -4,19 +4,23 @@ import Foundation
 /// 递归监听一个目录，文件有变化就回调（带上变了的路径）。
 ///
 /// 用 FSEvents 而不是 `DispatchSource`：后者一个 fd 只盯一个目录，工作区几千个目录开不起。
-/// 回调在指定队列上，调用方自己做去抖——Agent 一次改动会连着触发几十个事件。
+/// 回调在内部的后台队列上，调用方自己跳回主线程并做去抖——Agent 一次改动会连着触发几十个事件。
 public final class DirectoryWatcher: @unchecked Sendable {
     public typealias Handler = @Sendable ([String]) -> Void
 
     private let url: URL
-    private let latency: TimeInterval
+    /// FSEvents 攒事件的时间；调用方还会再去抖一次，这里不必太长。
+    private static let latency: TimeInterval = 0.4
     private let handler: Handler
-    private let queue = DispatchQueue(label: "agentidea.fsevents", qos: .utility)
+    private let queue: DispatchQueue = {
+        let queue = DispatchQueue(label: "agentidea.fsevents", qos: .utility)
+        queue.setSpecific(key: DirectoryWatcher.queueKey, value: true)
+        return queue
+    }()
     private var stream: FSEventStreamRef?
 
-    public init(url: URL, latency: TimeInterval = 0.4, handler: @escaping Handler) {
+    public init(url: URL, handler: @escaping Handler) {
         self.url = url
-        self.latency = latency
         self.handler = handler
     }
 
@@ -51,7 +55,7 @@ public final class DirectoryWatcher: @unchecked Sendable {
             &context,
             [url.path] as CFArray,
             FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
-            latency,
+            Self.latency,
             flags
         ) else { return false }
         FSEventStreamSetDispatchQueue(created, queue)
@@ -64,13 +68,25 @@ public final class DirectoryWatcher: @unchecked Sendable {
         return true
     }
 
+    /// 停掉监听。**在回调队列上同步做**：回调里用的是 `passUnretained(self)`，若停的那一刻
+    /// 正有一次回调在 utility 队列上跑，它会读到一个正在释放的 self。排到同一队列上就不会撞。
     public func stop() {
-        guard let stream else { return }
-        FSEventStreamStop(stream)
-        FSEventStreamInvalidate(stream)
-        FSEventStreamRelease(stream)
-        self.stream = nil
+        guard stream != nil else { return }
+        let work = { [self] in
+            guard let stream = self.stream else { return }
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            self.stream = nil
+        }
+        if DispatchQueue.getSpecific(key: Self.queueKey) != nil {
+            work()
+        } else {
+            queue.sync(execute: work)
+        }
     }
+
+    private static let queueKey = DispatchSpecificKey<Bool>()
 
     /// 哪些路径的变化值得刷新。
     ///

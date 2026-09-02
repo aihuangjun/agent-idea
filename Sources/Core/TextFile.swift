@@ -6,7 +6,8 @@ public enum LoadedContent: Equatable, Sendable {
     case text(String, encoding: String, lineCount: Int)
     case binary(sizeBytes: Int)
     case tooLarge(sizeBytes: Int, limit: Int)
-    case unreadable(String)
+    /// 读不出来（权限、被占用、读一半没了）。文案由展示层决定。
+    case unreadable
 }
 
 /// 读文本文件并猜编码。
@@ -20,9 +21,7 @@ public enum TextFileLoader {
     public static func load(_ url: URL, limit: Int = defaultLimit, fileManager: FileManager = .default) -> LoadedContent {
         let size = (try? fileManager.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
         if size > limit { return .tooLarge(sizeBytes: size, limit: limit) }
-        guard let data = try? Data(contentsOf: url) else {
-            return .unreadable("读不出这个文件：\(url.lastPathComponent)")
-        }
+        guard let data = try? Data(contentsOf: url) else { return .unreadable }
         return decode(data)
     }
 
@@ -47,7 +46,8 @@ public enum TextFileLoader {
         if let text = String(data: data, encoding: gb18030) {
             return .text(text, encoding: "GB18030", lineCount: lineCount(of: text))
         }
-        let text = String(data: data, encoding: .isoLatin1) ?? String(decoding: data, as: UTF8.self)
+        // Latin-1 对任何字节序列都能解，这里不可能失败
+        let text = String(data: data, encoding: .isoLatin1) ?? ""
         return .text(text, encoding: "Latin-1", lineCount: lineCount(of: text))
     }
 

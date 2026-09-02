@@ -48,8 +48,9 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     public var onOpenPath: ((String) -> Void)?
 
     private var isReady = false
-    private var pendingPayload: [String: Any]?
-    private var lastPayload: [String: Any]?
+    private var pendingPayload: RenderPayload?
+    /// 最近一次渲染的内容。Web 内容进程被系统回收后用它恢复现场。
+    private var lastPayload: RenderPayload?
     private var shellURL: URL?
     private var zoom: Double = 1
     private let messageProxy = ScriptMessageProxy()
@@ -90,18 +91,14 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
 
     // MARK: - 渲染
 
-    /// 显示一份内容。`payload` 的结构见 render.js 顶部注释。
-    public func render(_ payload: [String: Any]) {
+    /// 显示一份内容。页面没就绪就先存着，就绪后补发。
+    public func render(_ payload: RenderPayload) {
         lastPayload = payload
         guard isReady else {
             pendingPayload = payload
             return
         }
-        call("window.ide.render", argument: payload)
-    }
-
-    public func showMessage(title: String, detail: String) {
-        render(["kind": "message", "title": title, "detail": detail])
+        send(payload)
     }
 
     /// 当前滚动位置。切标签前问一次，切回来时带在 payload 里恢复。
@@ -122,16 +119,15 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     }
 
     public func setWrap(_ wrap: Bool) {
-        lastPayload?["wrap"] = wrap
-        pendingPayload?["wrap"] = wrap
+        lastPayload?.wrap = wrap
+        pendingPayload?.wrap = wrap
         guard isReady else { return }
         webView.evaluateJavaScript("window.ide.setWrap(\(wrap))")
     }
 
-    private func call(_ function: String, argument: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: argument),
-              let json = String(data: data, encoding: .utf8) else { return }
-        webView.evaluateJavaScript("\(function)(\(json))")
+    private func send(_ payload: RenderPayload) {
+        guard let data = try? JSONEncoder().encode(payload), let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.ide.render(\(json))")
     }
 
     /// 页面就绪。didFinish 与 JS 的 ready 消息哪个先到都可以，但只有第一个信号补发。
@@ -143,7 +139,7 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         }
         guard let payload = pendingPayload ?? (isFirstSignal ? lastPayload : nil) else { return }
         pendingPayload = nil
-        call("window.ide.render", argument: payload)
+        send(payload)
     }
 
     // MARK: - WKNavigationDelegate

@@ -5,6 +5,7 @@ import SwiftUI
 /// 底部状态栏：分支、变更数、当前文件信息。
 struct StatusBarView: View {
     @EnvironmentObject private var workbench: WorkbenchModel
+    @EnvironmentObject private var preferences: ReadingPreferences
     @ObservedObject var session: ProjectSession
 
     var body: some View {
@@ -31,7 +32,7 @@ struct StatusBarView: View {
             }
             if let banner = session.banner {
                 Text(banner).foregroundStyle(Theme.warning).lineLimit(1)
-                Button { session.banner = nil } label: { Image(systemName: "xmark").font(.system(size: 9)) }.buttonStyle(.plain)
+                Button { session.dismissBanner() } label: { Image(systemName: "xmark").font(.system(size: 9)) }.buttonStyle(.plain)
             }
             Spacer()
             if let content = session.activeContent {
@@ -39,8 +40,8 @@ struct StatusBarView: View {
                     Text(item)
                 }
             }
-            if workbench.zoom != 1 {
-                Button { workbench.resetZoom() } label: { Text("\(Int((workbench.zoom * 100).rounded()))%") }
+            if preferences.zoom != 1 {
+                Button { preferences.resetZoom() } label: { Text("\(Int((preferences.zoom * 100).rounded()))%") }
                     .buttonStyle(.plain).help("点击恢复 100%")
             }
         }

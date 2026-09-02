@@ -1,4 +1,5 @@
 import AppKit
+import Core
 import SwiftUI
 
 /// 面板之间可拖动的竖向分隔条。拖动改的是左侧面板的宽度。
@@ -90,7 +91,9 @@ public struct CountBadge: View {
     }
 }
 
-/// 文件图标：按名字给一个 SF Symbol 和颜色。IDEA 那套图标是私有的，这里用系统符号近似。
+/// 文件图标：按 Core 识别出的语言给一个 SF Symbol 和颜色。IDEA 那套图标是私有的，这里用系统符号近似。
+///
+/// 以 `Language.name` 为键，扩展名的事实源只有 Core 的那一张表；颜色一律引用 `Theme`。
 public enum FileIcon {
     public struct Descriptor: Equatable {
         public let systemName: String
@@ -102,52 +105,69 @@ public enum FileIcon {
         }
     }
 
-    public static func folder(isExpanded: Bool) -> Descriptor {
-        Descriptor(systemName: isExpanded ? "folder.fill" : "folder.fill", color: Color(hex: 0x8C9CB8))
-    }
+    public static let folder = Descriptor(systemName: "folder.fill", color: Theme.folderIcon)
 
     public static func file(named name: String) -> Descriptor {
         let lower = name.lowercased()
+        switch FileCategory.forFile(named: name) {
+        case .image: return Descriptor(systemName: "photo", color: Theme.iconPurple)
+        case .pdf: return Descriptor(systemName: "doc.text.image", color: Theme.danger)
+        case .markdown: return Descriptor(systemName: "doc.richtext", color: Theme.vcsModified)
+        case .code(let language): return byLanguage[language.name] ?? fallback(for: lower)
+        }
+    }
+
+    private static let byLanguage: [String: Descriptor] = [
+        "Swift": Descriptor(systemName: "swift", color: Theme.iconOrange),
+        "JSON": Descriptor(systemName: "curlybraces", color: Theme.iconAmber),
+        "YAML": Descriptor(systemName: "list.bullet.indent", color: Theme.iconPurple),
+        "TOML": Descriptor(systemName: "list.bullet.indent", color: Theme.iconPurple),
+        "INI": Descriptor(systemName: "list.bullet.indent", color: Theme.iconPurple),
+        "Env": Descriptor(systemName: "list.bullet.indent", color: Theme.iconPurple),
+        "XML": Descriptor(systemName: "chevron.left.forwardslash.chevron.right", color: Theme.iconYellow),
+        "HTML": Descriptor(systemName: "globe", color: Theme.iconOrange),
+        "CSS": Descriptor(systemName: "paintpalette", color: Theme.iconBlue),
+        "SCSS": Descriptor(systemName: "paintpalette", color: Theme.iconBlue),
+        "Less": Descriptor(systemName: "paintpalette", color: Theme.iconBlue),
+        "JavaScript": Descriptor(systemName: "j.square", color: Theme.warning),
+        "TypeScript": Descriptor(systemName: "t.square", color: Theme.iconBlue),
+        "Python": Descriptor(systemName: "p.square", color: Theme.iconBlue),
+        "Java": Descriptor(systemName: "cup.and.saucer", color: Theme.iconOrange),
+        "Kotlin": Descriptor(systemName: "cup.and.saucer", color: Theme.iconOrange),
+        "Scala": Descriptor(systemName: "cup.and.saucer", color: Theme.iconOrange),
+        "Go": Descriptor(systemName: "g.square", color: Theme.vcsRenamed),
+        "Rust": Descriptor(systemName: "gearshape", color: Theme.iconOrange),
+        "C": Descriptor(systemName: "c.square", color: Theme.vcsModified),
+        "C++": Descriptor(systemName: "c.square", color: Theme.vcsModified),
+        "C#": Descriptor(systemName: "c.square", color: Theme.vcsModified),
+        "Objective-C": Descriptor(systemName: "c.square", color: Theme.vcsModified),
+        "Objective-C++": Descriptor(systemName: "c.square", color: Theme.vcsModified),
+        "Shell": Descriptor(systemName: "terminal", color: Theme.success),
+        "PowerShell": Descriptor(systemName: "terminal", color: Theme.success),
+        "SQL": Descriptor(systemName: "cylinder", color: Theme.vcsModified),
+        "Diff": Descriptor(systemName: "plus.forwardslash.minus", color: Theme.success),
+        "Dockerfile": Descriptor(systemName: "shippingbox", color: Theme.iconBlue),
+        "Makefile": Descriptor(systemName: "hammer", color: Theme.secondaryText),
+        "CMake": Descriptor(systemName: "hammer", color: Theme.secondaryText),
+        "Ignore": Descriptor(systemName: "arrow.triangle.branch", color: Theme.iconOrange),
+        "Git": Descriptor(systemName: "arrow.triangle.branch", color: Theme.iconOrange),
+    ]
+
+    /// 语言表里没有的：按几种常见的非代码文件给图标，其余是一张白纸。
+    private static func fallback(for lower: String) -> Descriptor {
         let ext = (lower as NSString).pathExtension
         switch ext {
-        case "swift": return Descriptor(systemName: "swift", color: Color(hex: 0xF05138))
-        case "md", "markdown", "mdx": return Descriptor(systemName: "doc.richtext", color: Color(hex: 0x6C9EF8))
-        case "json", "json5", "jsonc": return Descriptor(systemName: "curlybraces", color: Color(hex: 0xE8C08D))
-        case "yaml", "yml", "toml", "ini", "cfg", "conf", "properties", "env": return Descriptor(systemName: "list.bullet.indent", color: Color(hex: 0xC77DBB))
-        case "xml", "plist", "xib", "storyboard", "svg", "entitlements": return Descriptor(systemName: "chevron.left.forwardslash.chevron.right", color: Color(hex: 0xD5B778))
-        case "html", "htm", "vue", "svelte": return Descriptor(systemName: "globe", color: Color(hex: 0xE8A25E))
-        case "css", "scss", "sass", "less": return Descriptor(systemName: "paintpalette", color: Color(hex: 0x56A8F5))
-        case "js", "mjs", "cjs", "jsx": return Descriptor(systemName: "j.square", color: Color(hex: 0xF2C55C))
-        case "ts", "tsx", "mts", "cts": return Descriptor(systemName: "t.square", color: Color(hex: 0x3B8EEA))
-        case "py", "pyi": return Descriptor(systemName: "p.square", color: Color(hex: 0x4B8BBE))
-        case "java", "kt", "kts", "scala": return Descriptor(systemName: "cup.and.saucer", color: Color(hex: 0xE8A25E))
-        case "go": return Descriptor(systemName: "g.square", color: Color(hex: 0x29BEB0))
-        case "rs": return Descriptor(systemName: "gearshape", color: Color(hex: 0xDEA584))
-        case "c", "h", "cpp", "cc", "hpp", "m", "mm", "cs": return Descriptor(systemName: "c.square", color: Color(hex: 0x6C9EF8))
-        case "sh", "bash", "zsh", "fish", "command", "ps1": return Descriptor(systemName: "terminal", color: Color(hex: 0x5FAD65))
-        case "sql": return Descriptor(systemName: "cylinder", color: Color(hex: 0x6C9EF8))
-        case "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "ico", "heic", "icns": return Descriptor(systemName: "photo", color: Color(hex: 0xC77DBB))
-        case "pdf": return Descriptor(systemName: "doc.text.image", color: Color(hex: 0xE55765))
-        case "zip", "gz", "tar", "dmg", "jar", "7z", "rar": return Descriptor(systemName: "doc.zipper", color: Color(hex: 0x9DA0A8))
-        case "lock": return Descriptor(systemName: "lock.doc", color: Color(hex: 0x9DA0A8))
-        case "txt", "log", "text": return Descriptor(systemName: "doc.text", color: Color(hex: 0x9DA0A8))
-        case "diff", "patch": return Descriptor(systemName: "plus.forwardslash.minus", color: Color(hex: 0x5FAD65))
-        default: break
+        case "zip", "gz", "tar", "dmg", "jar", "7z", "rar", "icns":
+            return Descriptor(systemName: "doc.zipper", color: Theme.secondaryText)
+        case "lock":
+            return Descriptor(systemName: "lock.doc", color: Theme.secondaryText)
+        case "txt", "log", "text", "csv", "tsv":
+            return Descriptor(systemName: "doc.text", color: Theme.secondaryText)
+        default:
+            break
         }
-        if lower.hasPrefix(".git") { return Descriptor(systemName: "arrow.triangle.branch", color: Color(hex: 0xE8A25E)) }
-        if lower == "dockerfile" { return Descriptor(systemName: "shippingbox", color: Color(hex: 0x3B8EEA)) }
-        if lower == "makefile" || lower == "cmakelists.txt" { return Descriptor(systemName: "hammer", color: Color(hex: 0x9DA0A8)) }
-        if lower.hasPrefix("license") { return Descriptor(systemName: "checkmark.seal", color: Color(hex: 0x9DA0A8)) }
-        if lower.hasPrefix(".") { return Descriptor(systemName: "gearshape", color: Color(hex: 0x9DA0A8)) }
-        return Descriptor(systemName: "doc", color: Color(hex: 0x9DA0A8))
-    }
-}
-
-public extension View {
-    /// 让一个视图整块可点，并且鼠标悬停时显示出底色。
-    func hoverHighlight(_ isHovering: Binding<Bool>) -> some View {
-        self
-            .background(RoundedRectangle(cornerRadius: 4).fill(isHovering.wrappedValue ? Theme.hover : .clear))
-            .onHover { isHovering.wrappedValue = $0 }
+        if lower.hasPrefix("license") { return Descriptor(systemName: "checkmark.seal", color: Theme.secondaryText) }
+        if lower.hasPrefix(".") { return Descriptor(systemName: "gearshape", color: Theme.secondaryText) }
+        return Descriptor(systemName: "doc", color: Theme.secondaryText)
     }
 }

@@ -3,12 +3,10 @@
   --bg: #1E1F22;
   --panel: #2B2D30;
   --border: #393B40;
-  --hover: #43454A;
   --selection: #2E436E;
   --text: #DFE1E5;
   --text-2: #9DA0A8;
   --text-3: #6F737A;
-  --accent: #3574F0;
   --link: #548AF7;
   --add-bg: rgba(95, 173, 101, 0.16);
   --add-bg-strong: rgba(95, 173, 101, 0.40);
@@ -26,7 +24,7 @@
 html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
 body { font-family: var(--sans); -webkit-font-smoothing: antialiased; overflow-x: auto; }
 * { box-sizing: border-box; }
-::selection { background: #214283; }
+::selection { background: var(--selection); }
 
 /* ---------- 代码 ---------- */
 table.code { border-collapse: collapse; font-family: var(--mono); font-size: var(--code-size); line-height: 1.6; width: 100%; }
@@ -45,8 +43,6 @@ table.code tr:hover td.ln { color: var(--text-2); }
   margin: 0; padding: 6px 14px; font-size: 12px; color: var(--text-2); background: var(--panel);
   border-bottom: 1px solid var(--border); display: flex; gap: 14px; align-items: center;
 }
-.notice a { color: var(--link); cursor: pointer; text-decoration: none; }
-.notice a:hover { text-decoration: underline; }
 
 /* ---------- 空态 / 提示 ---------- */
 .message { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; color: var(--text-2); gap: 8px; padding: 40px; text-align: center; }
@@ -65,7 +61,6 @@ table.code tr:hover td.ln { color: var(--text-2); }
 table.diff { border-collapse: collapse; font-family: var(--mono); font-size: var(--code-size); line-height: 1.6; width: 100%; table-layout: fixed; }
 table.diff td { padding: 0 8px; vertical-align: top; white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere; }
 table.diff td.ln { width: 3.6em; text-align: right; color: var(--text-3); user-select: none; -webkit-user-select: none; padding: 0 8px; }
-table.diff td.ln + td.ln { border-left: none; }
 table.diff td.src { border-left: 1px solid var(--border); }
 table.diff.side td.src { width: 50%; }
 table.diff.side td.ln.right-ln { border-left: 1px solid var(--border); }

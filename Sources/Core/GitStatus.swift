@@ -1,7 +1,7 @@
 import Foundation
 
 /// 一个路径相对 HEAD 发生了什么。口径与 IDEA 提交窗口的分组一致。
-public enum ChangeKind: String, Equatable, Hashable, Sendable, Codable, CaseIterable {
+public enum ChangeKind: Equatable, Hashable, Sendable {
     case added
     case modified
     case deleted
@@ -23,16 +23,6 @@ public enum ChangeKind: String, Equatable, Hashable, Sendable, Codable, CaseIter
         }
     }
 
-    public var label: String {
-        switch self {
-        case .added: return "新增"
-        case .modified: return "修改"
-        case .deleted: return "删除"
-        case .renamed: return "重命名"
-        case .conflicted: return "冲突"
-        case .untracked: return "未跟踪"
-        }
-    }
 }
 
 /// 一条变更。路径相对仓库根，用 `/` 分隔（git 的口径）。
@@ -41,18 +31,13 @@ public struct GitChange: Equatable, Hashable, Sendable, Identifiable {
     public let path: String
     /// 重命名时的原路径。
     public let originalPath: String?
+    /// 暂存区与工作区合起来看的种类：diff 与提交都是工作区对比 HEAD，不区分暂存/未暂存。
     public let kind: ChangeKind
-    /// 暂存区有改动（`git add` 过）。只读阅读器不区分暂存/未暂存的 diff，但列表上标一下。
-    public let isStaged: Bool
-    /// 工作区有改动。
-    public let isUnstaged: Bool
 
-    public init(path: String, originalPath: String? = nil, kind: ChangeKind, isStaged: Bool = false, isUnstaged: Bool = true) {
+    public init(path: String, originalPath: String? = nil, kind: ChangeKind) {
         self.path = path
         self.originalPath = originalPath
         self.kind = kind
-        self.isStaged = isStaged
-        self.isUnstaged = isUnstaged
     }
 
     public var fileName: String { (path as NSString).lastPathComponent }
@@ -140,7 +125,7 @@ public enum GitStatusParser {
             }
 
             if record.hasPrefix("? ") {
-                changes.append(GitChange(path: String(record.dropFirst(2)), kind: .untracked, isStaged: false, isUnstaged: true))
+                changes.append(GitChange(path: String(record.dropFirst(2)), kind: .untracked))
                 continue
             }
             if record.hasPrefix("! ") {
@@ -161,28 +146,17 @@ public enum GitStatusParser {
             case "1":
                 guard parts.count >= 9 else { continue }
                 let path = parts[8...].joined(separator: " ")
-                changes.append(GitChange(
-                    path: path,
-                    kind: kind(index: indexStatus, worktree: worktreeStatus),
-                    isStaged: indexStatus != ".",
-                    isUnstaged: worktreeStatus != "."
-                ))
+                changes.append(GitChange(path: path, kind: kind(index: indexStatus, worktree: worktreeStatus)))
             case "2":
                 guard parts.count >= 10, index < fields.count else { continue }
                 let path = parts[9...].joined(separator: " ")
                 let original = fields[index]
                 index += 1
-                changes.append(GitChange(
-                    path: path,
-                    originalPath: original,
-                    kind: .renamed,
-                    isStaged: indexStatus != ".",
-                    isUnstaged: worktreeStatus != "."
-                ))
+                changes.append(GitChange(path: path, originalPath: original, kind: .renamed))
             case "u":
                 guard parts.count >= 11 else { continue }
                 let path = parts[10...].joined(separator: " ")
-                changes.append(GitChange(path: path, kind: .conflicted, isStaged: true, isUnstaged: true))
+                changes.append(GitChange(path: path, kind: .conflicted))
             default:
                 continue
             }
@@ -259,8 +233,6 @@ public struct GitStatusIndex: Equatable, Sendable {
         self.ignoredFiles = ignoredFiles
         self.ignoredDirectories = ignoredDirectories
     }
-
-    public var changedFileCount: Int { files.count }
 
     public func status(of relativePath: String, isDirectory: Bool) -> Status? {
         if isIgnored(relativePath, isDirectory: isDirectory) { return .ignored }

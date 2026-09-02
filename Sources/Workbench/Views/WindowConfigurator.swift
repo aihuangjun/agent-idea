@@ -24,9 +24,7 @@ struct WindowConfigurator: NSViewRepresentable {
             window.titlebarSeparatorStyle = .none
             window.backgroundColor = NSColor(Theme.panel)
             window.isMovableByWindowBackground = false
-            if let contentView = window.contentView {
-                FirstMouse.enable(on: type(of: contentView))
-            }
+            FirstMouse.enableGlobally()
         }
     }
 }
@@ -43,7 +41,8 @@ struct WindowConfigurator: NSViewRepresentable {
 enum FirstMouse {
     private static var patched = false
 
-    static func enable(on hostingClass: AnyClass) {
+    /// 影响本进程里所有没有自己重写 `acceptsFirstMouse` 的 NSView。
+    static func enableGlobally() {
         guard !patched else { return }
         patched = true
         let selector = #selector(NSView.acceptsFirstMouse(for:))

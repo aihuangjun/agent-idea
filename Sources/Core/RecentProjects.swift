@@ -14,10 +14,16 @@ public struct RecentProject: Codable, Equatable, Hashable, Sendable, Identifiabl
     public var url: URL { URL(fileURLWithPath: path, isDirectory: true) }
     public var name: String { url.lastPathComponent }
     /// `~/ai/agent-idea` 这种给人看的短路径。
-    public var displayPath: String {
+    public var displayPath: String { path.abbreviatingHomeDirectory }
+}
+
+public extension String {
+    /// 把开头的家目录换成 `~`。只换开头：路径中段碰巧出现家目录不能动。
+    var abbreviatingHomeDirectory: String {
         let home = NSHomeDirectory()
-        if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }
-        return path
+        if self == home { return "~" }
+        if hasPrefix(home + "/") { return "~" + dropFirst(home.count) }
+        return self
     }
 }
 

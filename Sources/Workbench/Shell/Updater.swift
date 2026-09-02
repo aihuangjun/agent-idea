@@ -26,17 +26,17 @@ final class Updater: ObservableObject {
     private let lastCheckKey = "updater.lastCheck"
     private var work: Task<Void, Never>?
 
-    init(build: BuildIdentity = .current, installedAppURL: URL = Bundle.main.bundleURL, defaults: UserDefaults = .standard) {
-        self.build = build
-        self.installedAppURL = installedAppURL
-        self.defaults = defaults
+    init() {
+        build = .current
+        installedAppURL = Bundle.main.bundleURL
+        defaults = .standard
     }
 
     var lastCheck: Date? { defaults.object(forKey: lastCheckKey) as? Date }
 
     /// 启动后调用。距上次检查不足一天就什么都不做。
-    func checkInBackgroundIfDue(now: Date = Date()) {
-        guard UpdatePolicy.shouldAutoCheck(lastCheck: lastCheck, now: now) else { return }
+    func checkInBackgroundIfDue() {
+        guard UpdatePolicy.shouldAutoCheck(lastCheck: lastCheck, now: Date()) else { return }
         check(userInitiated: false)
     }
 
@@ -209,11 +209,8 @@ final class Updater: ObservableObject {
             """
         case UpdateError.http(let status, _):
             return "GitHub 返回了 HTTP \(status)，请稍后重试。"
-        case let failure as ShellCommandError:
-            let detail = failure.message.isEmpty ? "" : "\n\(failure.message)"
-            return "\(failure.command) 执行失败（退出码 \(failure.status)）\(detail)"
         default:
-            return error.localizedDescription
+            return error.userFacingDescription
         }
     }
 
