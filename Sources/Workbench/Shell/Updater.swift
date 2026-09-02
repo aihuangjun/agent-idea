@@ -1,0 +1,230 @@
+import AppKit
+import Core
+import Foundation
+
+/// 应用内更新：查、下、换、重启。包放在 GitHub 仓库的 `releases/` 目录里。
+@MainActor
+final class Updater: ObservableObject {
+    enum Phase: Equatable {
+        case idle
+        case checking
+        case upToDate
+        case available(UpdateManifest)
+        case downloading
+        case readyToRelaunch(UpdateManifest)
+        case failed(String)
+    }
+
+    @Published private(set) var phase: Phase = .idle
+    /// 手动触发的检查要给反馈（哪怕结果是「已经是最新」）；自动检查则安静。
+    @Published private(set) var isUserInitiated = false
+
+    let build: BuildIdentity
+    var currentVersion: String { build.version }
+    private let installedAppURL: URL
+    private let defaults: UserDefaults
+    private let lastCheckKey = "updater.lastCheck"
+    private var work: Task<Void, Never>?
+
+    init(build: BuildIdentity = .current, installedAppURL: URL = Bundle.main.bundleURL, defaults: UserDefaults = .standard) {
+        self.build = build
+        self.installedAppURL = installedAppURL
+        self.defaults = defaults
+    }
+
+    var lastCheck: Date? { defaults.object(forKey: lastCheckKey) as? Date }
+
+    /// 启动后调用。距上次检查不足一天就什么都不做。
+    func checkInBackgroundIfDue(now: Date = Date()) {
+        guard UpdatePolicy.shouldAutoCheck(lastCheck: lastCheck, now: now) else { return }
+        check(userInitiated: false)
+    }
+
+    func check(userInitiated: Bool = true) {
+        guard work == nil else { return }
+        isUserInitiated = userInitiated
+        phase = .checking
+        work = Task { [weak self] in
+            defer { self?.work = nil }
+            await self?.performCheck()
+        }
+    }
+
+    func dismiss() { phase = .idle }
+
+    private func performCheck() async {
+        defaults.set(Date(), forKey: lastCheckKey)
+        do {
+            let manifest = try await fetchManifest()
+            guard UpdatePolicy.hasUpdate(manifest: manifest, currentVersion: currentVersion) else {
+                phase = .upToDate
+                return
+            }
+            phase = .available(manifest)
+        } catch {
+            Log.warn("update", "检查失败：\(error)")
+            phase = .failed(Self.describe(error))
+        }
+    }
+
+    func install(_ manifest: UpdateManifest) {
+        guard work == nil else { return }
+        phase = .downloading
+        work = Task { [weak self] in
+            defer { self?.work = nil }
+            guard let self else { return }
+            do {
+                let dmg = try await self.download(manifest)
+                try await self.replaceInstalledApp(with: dmg)
+                self.phase = .readyToRelaunch(manifest)
+            } catch {
+                Log.warn("update", "安装失败：\(error)")
+                self.phase = .failed(Self.describe(error))
+            }
+        }
+    }
+
+    /// 退出自己并拉起新版本：起一个小脚本盯着本进程退出，再由它 open 新版本。
+    func relaunch() {
+        let script = """
+        #!/bin/bash
+        for _ in $(seq 1 100); do
+          kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null || break
+          sleep 0.1
+        done
+        open \(Self.shellQuoted(installedAppURL.path))
+        rm -f "$0"
+        """
+        do {
+            let url = try Self.writeTemporaryScript(script, name: "agentidea-relaunch")
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = [url.path]
+            try process.run()
+        } catch {
+            phase = .failed("无法重启：\(error.localizedDescription)")
+            return
+        }
+        NSApp.terminate(nil)
+    }
+
+    // MARK: - 具体步骤
+
+    private func fetchManifest() async throws -> UpdateManifest {
+        let token = await GitHubToken.resolve()
+        let request = AppDistribution.request(fileName: AppDistribution.manifestName, token: token)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try Self.check(response, hadToken: token != nil)
+        do {
+            return try JSONDecoder().decode(UpdateManifest.self, from: data)
+        } catch {
+            throw UpdateError.badManifest
+        }
+    }
+
+    private func download(_ manifest: UpdateManifest) async throws -> URL {
+        let token = await GitHubToken.resolve()
+        let request = AppDistribution.request(fileName: manifest.fileName, token: token)
+        let (temporary, response) = try await URLSession.shared.download(for: request)
+        try Self.check(response, hadToken: token != nil)
+
+        let destination = FileManager.default.temporaryDirectory.appendingPathComponent("agentidea-update-\(manifest.version).dmg")
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+
+        let actual = try AppDistribution.sha256(ofFileAt: destination)
+        guard actual.caseInsensitiveCompare(manifest.sha256) == .orderedSame else {
+            try? FileManager.default.removeItem(at: destination)
+            throw UpdateError.checksumMismatch
+        }
+        return destination
+    }
+
+    /// 挂载 dmg，把里面的 app 换到当前位置，再卸载。
+    /// 顺序是「旧的先改名让位 → 新的挪进来 → 确认成功再删旧的」，中途失败 trap 把旧版本换回去。
+    private func replaceInstalledApp(with dmg: URL) async throws {
+        let script = """
+        #!/bin/bash
+        set -euo pipefail
+        DMG=\(Self.shellQuoted(dmg.path))
+        TARGET=\(Self.shellQuoted(installedAppURL.path))
+        STAGING="$TARGET.new"
+        BACKUP="$TARGET.old"
+        MOUNT=""
+        cleanup() {
+          status=$?
+          if [ -n "$MOUNT" ]; then hdiutil detach "$MOUNT" >/dev/null 2>&1 || true; fi
+          if [ ! -e "$TARGET" ] && [ -e "$BACKUP" ]; then mv "$BACKUP" "$TARGET" || true; fi
+          rm -rf "$STAGING" 2>/dev/null || true
+          if [ -e "$TARGET" ]; then rm -rf "$BACKUP" 2>/dev/null || true; fi
+          exit $status
+        }
+        trap cleanup EXIT
+        if [ ! -e "$TARGET" ] && [ -e "$BACKUP" ]; then mv "$BACKUP" "$TARGET"; fi
+        MOUNT=$(hdiutil attach "$DMG" -nobrowse -readonly | tail -1 | cut -f3-)
+        [ -d "$MOUNT/AgentIDEA.app" ] || { echo "dmg 里没有 AgentIDEA.app"; exit 1; }
+        rm -rf "$STAGING" "$BACKUP"
+        cp -R "$MOUNT/AgentIDEA.app" "$STAGING"
+        if [ -e "$TARGET" ]; then mv "$TARGET" "$BACKUP"; fi
+        mv "$STAGING" "$TARGET"
+        """
+        let url = try Self.writeTemporaryScript(script, name: "agentidea-install")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: dmg)
+        }
+        _ = try await ShellCommand().runChecked(executable: URL(fileURLWithPath: "/bin/bash"), arguments: [url.path])
+    }
+
+    // MARK: - 杂项
+
+    enum UpdateError: Error {
+        case badManifest
+        case checksumMismatch
+        case http(Int, hadToken: Bool)
+    }
+
+    private static func check(_ response: URLResponse, hadToken: Bool) throws {
+        guard let http = response as? HTTPURLResponse else { return }
+        guard (200..<300).contains(http.statusCode) else { throw UpdateError.http(http.statusCode, hadToken: hadToken) }
+    }
+
+    static func describe(_ error: Error) -> String {
+        switch error {
+        case UpdateError.badManifest:
+            return "更新信息读不出来（latest.json 格式不对），请联系发布者。"
+        case UpdateError.checksumMismatch:
+            return "下载的安装包校验不通过，已丢弃。请稍后重试。"
+        case UpdateError.http(404, hadToken: true):
+            // 带着 token 还 404：文件不在。最可能是还没发布过任何版本
+            return "仓库里还没有发布记录（releases/\(AppDistribution.manifestName) 不存在），或者当前 token 没有这个仓库的读权限。"
+        case UpdateError.http(let status, let hadToken) where status == 401 || status == 403 || status == 404:
+            let hint = hadToken
+                ? "当前 token 没有这个仓库的读权限。"
+                : "没有找到可用的 GitHub 凭据。"
+            return """
+            访问更新仓库被拒绝（HTTP \(status)）。\(hint)
+            仓库是私有的：装好 gh 并登录（brew install gh && gh auth login），
+            或把一个有 repo 读权限的 token 写进 ~/.agentidea/github_token。
+            """
+        case UpdateError.http(let status, _):
+            return "GitHub 返回了 HTTP \(status)，请稍后重试。"
+        case let failure as ShellCommandError:
+            let detail = failure.message.isEmpty ? "" : "\n\(failure.message)"
+            return "\(failure.command) 执行失败（退出码 \(failure.status)）\(detail)"
+        default:
+            return error.localizedDescription
+        }
+    }
+
+    private static func writeTemporaryScript(_ contents: String, name: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(name)-\(UUID().uuidString).sh")
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
+    static func shellQuoted(_ path: String) -> String {
+        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+}

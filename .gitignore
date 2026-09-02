@@ -1,0 +1,14 @@
+.build/
+*.app/
+.swiftpm/
+dist/
+
+# sourcekit-lsp 偶尔会把编译中间产物写到包根目录而不是 .build
+*.o
+*.d
+*.swiftdeps
+*.swiftdeps~
+*.swiftmodule
+*.swiftsourceinfo
+*.abi.json
+Resources/AppIcon.iconset/

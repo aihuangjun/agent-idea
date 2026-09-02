@@ -1,0 +1,28 @@
+/* highlight.js 主题：照 IntelliJ 新版 UI 深色主题的语法配色。
+   这份文件是手写的，不是 vendor，升级 highlight.js 不要覆盖它。 */
+.hljs { color: #BCBEC4; background: transparent; }
+.hljs-comment, .hljs-quote { color: #7A7E85; }
+.hljs-doctag { color: #67A37C; }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-symbol, .hljs-type { color: #CF8E6D; }
+.hljs-string, .hljs-char.escape_ { color: #6AAB73; }
+.hljs-number { color: #2AACB8; }
+.hljs-regexp { color: #42C3D1; }
+.hljs-title.function_, .hljs-title.function_.invoke__, .hljs-built_in { color: #56A8F5; }
+.hljs-title.class_, .hljs-title.class_.inherited__, .hljs-title { color: #BCBEC4; }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable, .hljs-property, .hljs-selector-class, .hljs-selector-id, .hljs-selector-attr, .hljs-selector-pseudo { color: #C77DBB; }
+.hljs-tag, .hljs-name { color: #D5B778; }
+.hljs-tag .hljs-attr { color: #BCBEC4; }
+.hljs-tag .hljs-string { color: #6AAB73; }
+.hljs-meta, .hljs-meta .hljs-keyword { color: #B3AE60; }
+.hljs-meta .hljs-string { color: #6AAB73; }
+.hljs-section { color: #CF8E6D; font-weight: 600; }
+.hljs-bullet { color: #CF8E6D; }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+.hljs-link { color: #548AF7; text-decoration: underline; }
+.hljs-code { color: #6AAB73; }
+.hljs-punctuation, .hljs-operator { color: #BCBEC4; }
+.hljs-params { color: #BCBEC4; }
+.hljs-addition { color: #5FAD65; background: rgba(95, 173, 101, 0.12); }
+.hljs-deletion { color: #E55765; background: rgba(229, 87, 101, 0.12); }
+/* 在 diff 的删除/新增行里正文底色已经带色，语法色稍微压暗一点避免刺眼 */

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Markdown 允许内嵌 HTML，没有 CSP 的话文档里的 <script src="https://…"> 会真的联网执行，
+     而页面又持有全盘读权限。图片放行本地文件与 https/data；脚本只允许本地文件，且不给 'unsafe-inline'。 -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' file: https: data:; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'">
+<title>Agent IDEA</title>
+<link rel="stylesheet" href="hljs-idea-dark.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="root"></div>
+<script src="vendor/markdown-it.min.js"></script>
+<script src="vendor/highlight.min.js"></script>
+<script src="vendor/mermaid.min.js"></script>
+<script src="render.js"></script>
+</body>
+</html>
