@@ -102,13 +102,29 @@
     const lines = highlightLines(text, language);
     const parts = [];
     if (notices.length) parts.push(`<div class="notice">${notices.map(escapeHTML).join(" · ")}</div>`);
-    parts.push(`<table class="code hljs"><tbody>`);
-    for (let i = 0; i < lines.length; i++) {
-      parts.push(`<tr><td class="ln">${i + 1}</td><td class="src">${lines[i] || " "}</td></tr>`);
-    }
-    if (!lines.length) parts.push(`<tr><td class="ln">1</td><td class="src"><span style="color:var(--text-3)">（空文件）</span></td></tr>`);
-    parts.push(`</tbody></table>`);
+    parts.push(codeView(lines, !!(current && current.wrap)));
     root.innerHTML = parts.join("");
+  }
+
+  /* 代码视图的 DOM。
+   * 不换行：左边一个整块的行号栏 + 右边一列行。行号栏只有**一个** position:sticky 元素——
+   *   之前是每行一个 sticky 的 <td>，WebKit 给每个 sticky 元素单独建合成层，几千行的文件切进来要卡几百毫秒。
+   * 自动换行：一行折成几行后行号栏对不齐，改成每行自带行号的 flex 行，此时没有横向滚动也就不需要 sticky。 */
+  function codeView(lines, wrap) {
+    const digits = String(Math.max(1, lines.length)).length;
+    if (!lines.length) {
+      return `<div class="code-view hljs" style="--digits:${digits}"><div class="gutter"><div>1</div></div><div class="lines"><div class="line"><span style="color:var(--text-3)">（空文件）</span></div></div></div>`;
+    }
+    if (wrap) {
+      const rows = [];
+      for (let i = 0; i < lines.length; i++) rows.push(`<div class="line"><span class="ln">${i + 1}</span><span class="src">${lines[i] || " "}</span></div>`);
+      return `<div class="code-view wrap hljs" style="--digits:${digits}">${rows.join("")}</div>`;
+    }
+    const numbers = [];
+    for (let i = 1; i <= lines.length; i++) numbers.push(i);
+    const rows = [];
+    for (let i = 0; i < lines.length; i++) rows.push(`<div class="line">${lines[i] || " "}</div>`);
+    return `<div class="code-view hljs" style="--digits:${digits}"><div class="gutter">${numbers.join("\n")}</div><div class="lines">${rows.join("")}</div></div>`;
   }
 
   /* ---------- Markdown ---------- */
@@ -354,8 +370,8 @@
 
   window.ide = {
     render(payload) {
+      const started = performance.now();
       current = payload;
-      document.body.classList.toggle("wrap", !!payload.wrap);
       try {
         switch (payload.kind) {
           case "code": renderCode(payload); break;
@@ -370,10 +386,20 @@
       }
       // 渲染是同步的，但图片与 mermaid 会撑高页面；先按给的位置滚一次，图出来后位置大体也还对
       window.scrollTo(0, payload.scrollTop || 0);
+      // 告诉宿主画完了、花了多久（宿主据此记日志、探针据此计时）
+      post({ type: "rendered", kind: payload.kind, ms: Math.round(performance.now() - started) });
     },
     getScrollTop() { return window.scrollY || document.documentElement.scrollTop || 0; },
     setZoom(zoom) { document.documentElement.style.setProperty("--zoom", String(zoom)); },
-    setWrap(wrap) { document.body.classList.toggle("wrap", !!wrap); if (current) current.wrap = !!wrap; },
+    setWrap(wrap) {
+      if (!current) return;
+      current.wrap = !!wrap;
+      // 代码视图换行与否是两种 DOM 结构，切换要重画；保持滚动位置
+      if (current.kind === "code" || (current.kind === "markdown" && current.view === "source")) {
+        current.scrollTop = window.ide.getScrollTop();
+        window.ide.render(current);
+      }
+    },
   };
 
   post({ type: "ready" });

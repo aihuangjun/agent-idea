@@ -70,6 +70,7 @@ private struct ProjectContent: View {
                     switch toolWindow {
                     case .project: ProjectTreeView(session: session)
                     case .commit: ChangesView(session: session)
+                    case .history: HistoryView(session: session)
                     }
                 }
                 .frame(width: workbench.toolWindowWidth)
@@ -168,6 +169,7 @@ private struct ToolStrip: View {
         VStack(spacing: 6) {
             stripButton(.project, systemName: "folder", help: "项目（⌘1）", badge: 0)
             stripButton(.commit, systemName: "arrow.triangle.branch", help: "提交（⌘0）", badge: session.changeGroups.total)
+            stripButton(.history, systemName: "clock.arrow.circlepath", help: "提交历史（⌘9）", badge: 0)
             Spacer()
         }
         .padding(.top, 8)

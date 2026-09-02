@@ -71,6 +71,15 @@ public struct AgentIDEARootScene: Scene {
                     .keyboardShortcut("1", modifiers: .command)
                 Button("提交") { workbench.toolWindow = workbench.toolWindow == .commit ? nil : .commit }
                     .keyboardShortcut("0", modifiers: .command)
+                Button("提交历史") { workbench.toolWindow = workbench.toolWindow == .history ? nil : .history }
+                    .keyboardShortcut("9", modifiers: .command)
+                Divider()
+                Button("查找文件…") {
+                    workbench.toolWindow = .project
+                    workbench.active?.search.activate()
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
+                .disabled(workbench.active == nil)
                 Button("在项目视图中定位当前文件") { workbench.active?.revealActiveTab() }
                     .keyboardShortcut("l", modifiers: [.command, .option])
                     .disabled(workbench.active?.activeTab == nil)

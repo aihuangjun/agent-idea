@@ -199,9 +199,11 @@ private func gitRunner(root: String, status: @escaping @Sendable () -> String, e
         await waitUntil { session.hasGit }
         session.refreshGit()
         session.refreshGit()
-        await waitUntil(5) { !session.isRefreshingGit }
+        // 转圈是延迟出现的，不能拿它当「刷新结束」的信号；等结果落地
+        await waitUntil(5) { session.gitSnapshot.branch.name == "main" || session.gitError != nil }
         #expect(session.gitError == nil)
         #expect(session.gitSnapshot.branch.name == "main")
+        #expect(session.isRefreshingGit == false)
     }
 }
 

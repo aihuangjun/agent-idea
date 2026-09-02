@@ -27,17 +27,26 @@ body { font-family: var(--sans); -webkit-font-smoothing: antialiased; overflow-x
 ::selection { background: var(--selection); }
 
 /* ---------- 代码 ---------- */
-table.code { border-collapse: collapse; font-family: var(--mono); font-size: var(--code-size); line-height: 1.6; width: 100%; }
-table.code td { padding: 0 12px 0 0; vertical-align: top; white-space: pre; }
-table.code td.ln {
-  width: 1%; min-width: 3.2em; text-align: right; padding: 0 16px 0 12px; color: var(--text-3);
-  user-select: none; -webkit-user-select: none; position: sticky; left: 0; background: var(--bg);
-  border-right: 1px solid var(--border);
+/* 结构见 render.js 的 codeView()。--digits 由 JS 按行数给，行号栏宽度据此定死，排版不用量每一行。 */
+.code-view { display: flex; align-items: flex-start; width: max-content; min-width: 100%; font-family: var(--mono); font-size: var(--code-size); line-height: 1.6; tab-size: 4; }
+.code-view .gutter {
+  flex: none; position: sticky; left: 0; z-index: 1; white-space: pre; text-align: right; color: var(--text-3);
+  width: calc(var(--digits) * 1ch + 30px); padding: 0 16px 0 12px; background: var(--bg); border-right: 1px solid var(--border);
+  user-select: none; -webkit-user-select: none;
 }
-table.code td.src { padding-left: 14px; tab-size: 4; }
-body.wrap table.code td.src { white-space: pre-wrap; word-break: break-all; }
-table.code tr:hover td.src { background: rgba(255, 255, 255, 0.025); }
-table.code tr:hover td.ln { color: var(--text-2); }
+.code-view .lines { flex: 1 0 auto; min-width: 0; }
+.code-view .line { white-space: pre; padding: 0 12px 0 14px; }
+.code-view .line:hover { background: rgba(255, 255, 255, 0.025); }
+/* 自动换行：每行自带行号 */
+.code-view.wrap { display: block; width: auto; }
+.code-view.wrap .line { display: flex; align-items: flex-start; padding: 0; }
+.code-view.wrap .line:hover { background: none; }
+.code-view.wrap .line:hover .src { background: rgba(255, 255, 255, 0.025); }
+.code-view.wrap .ln { align-self: stretch;
+  flex: none; width: calc(var(--digits) * 1ch + 30px); padding: 0 16px 0 12px; text-align: right; color: var(--text-3);
+  border-right: 1px solid var(--border); user-select: none; -webkit-user-select: none;
+}
+.code-view.wrap .src { flex: 1 1 auto; min-width: 0; white-space: pre-wrap; word-break: break-all; padding: 0 12px 0 14px; }
 
 .notice {
   margin: 0; padding: 6px 14px; font-size: 12px; color: var(--text-2); background: var(--panel);

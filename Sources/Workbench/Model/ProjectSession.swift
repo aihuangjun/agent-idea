@@ -28,7 +28,10 @@ final class ProjectSession: ObservableObject, Identifiable {
     @Published private(set) var gitError: String?
     /// 仓库确定之后才有；没有 git 的项目为 nil。
     @Published private(set) var commit: CommitController?
+    @Published private(set) var history: HistoryController?
     var hasGit: Bool { commit != nil }
+    /// 项目视图里的文件搜索。
+    let search: FileSearchController
 
     // MARK: - 编辑区
 
@@ -77,6 +80,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         let project = Project(root: root)
         self.project = project
         self.id = project.root.path
+        self.search = FileSearchController(root: project.root)
         Log.info("project", "打开 \(project.root.path)")
 
         loadChildren(of: project.root.path)
@@ -95,6 +99,7 @@ final class ProjectSession: ObservableObject, Identifiable {
                     self?.refreshAll()
                 }
                 self.commit = controller
+                self.history = HistoryController(git: git, repositoryRoot: repositoryRoot)
                 self.refreshGit()
             } else {
                 Log.info("git", "\(project.name) 不在 git 仓库里")
@@ -105,6 +110,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 项目被关掉：停监听、停任务。
     func tearDown() {
         gitTask?.cancel()
+        history?.cancel()
+        search.cancel()
         watcher?.stop()
         watcher = nil
     }
@@ -167,7 +174,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 定位当前标签对应的文件。
     func revealActiveTab() {
         guard let tab = activeTab else { return }
-        if let url = tab.fileURL ?? tab.change.flatMap({ self.url(for: $0) }) { reveal(url) }
+        if let url = tab.fileURL ?? tab.diffChange.flatMap({ self.url(for: $0) }) { reveal(url) }
     }
 
     /// 一个节点该用什么 VCS 颜色。
@@ -214,6 +221,13 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     func openDiff(_ change: GitChange, pinned: Bool = false) {
         let tab = EditorTab(kind: .diff(change), isPreview: !pinned)
+        show(tab)
+        if contents[tab.id] == nil { loadDiff(for: tab) }
+    }
+
+    /// 某次历史提交里一个文件的 diff。
+    func openCommitDiff(_ change: GitChange, in commit: GitCommit, pinned: Bool = false) {
+        let tab = EditorTab(kind: .commitDiff(commit, change), isPreview: !pinned)
         show(tab)
         if contents[tab.id] == nil { loadDiff(for: tab) }
     }
@@ -310,12 +324,22 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     // MARK: - 内容加载
 
+    /// 同步读的上限。这个体积以内读盘加解码不到几毫秒，直接在点击的同一回合里读完、画出来，
+    /// 省掉「先摆一个加载中、两次线程跳转、再画」的三步——那三步加起来有几十毫秒，肉眼能看出顿一下。
+    static let synchronousReadLimit = 512 * 1024
+
     private func loadFile(for tab: EditorTab) {
         guard let url = tab.fileURL else { return }
-        contents[tab.id] = .loading
         let fileManager = self.fileManager
+        let size = (try? fileManager.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+        if size <= Self.synchronousReadLimit {
+            contents[tab.id] = FileContentLoader.load(url, fileManager: fileManager)
+            if activeTabID == tab.id { renderActiveTab() }
+            return
+        }
+        contents[tab.id] = .loading
         Task { [weak self] in
-            // 读盘放到后台：几 MB 的文件同步读会卡一下主线程
+            // 大文件读盘放到后台：几 MB 的文件同步读会卡一下主线程
             let content = await Task.detached(priority: .userInitiated) { FileContentLoader.load(url, fileManager: fileManager) }.value
             self?.store(content, for: tab.id)
         }
@@ -328,14 +352,16 @@ final class ProjectSession: ObservableObject, Identifiable {
         if activeTabID == tabID { renderActiveTab() }
     }
 
+    /// 两种 diff 标签（工作区变更、历史提交）都从这里加载。
     private func loadDiff(for tab: EditorTab) {
-        guard let change = tab.change, let git, let repositoryRoot = project.repositoryRoot else {
+        guard let change = tab.diffChange, let git, let repositoryRoot = project.repositoryRoot else {
             contents[tab.id] = .message(title: "没有 git", detail: "这个项目不在 git 仓库里，或者本机没有 git。")
             return
         }
+        let commit = tab.commitDiff?.commit
         contents[tab.id] = .loading
         Task { [weak self] in
-            let content = await FileContentLoader.loadDiff(change, git: git, repositoryRoot: repositoryRoot)
+            let content = await FileContentLoader.loadDiff(change, in: commit, git: git, repositoryRoot: repositoryRoot)
             self?.store(content, for: tab.id)
         }
     }
@@ -362,8 +388,14 @@ final class ProjectSession: ObservableObject, Identifiable {
     func refreshGit() {
         guard let git, let repositoryRoot = project.repositoryRoot else { return }
         gitTask?.cancel()
-        isRefreshingGit = true
         let task = Task { [weak self] in
+            // 转圈延迟出现：status 通常几十毫秒就回来，每次都闪一下转圈反而显得卡
+            let spinner = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard !Task.isCancelled else { return }
+                self?.isRefreshingGit = true
+            }
+            defer { spinner.cancel() }
             do {
                 let snapshot = try await git.snapshot(repositoryRoot: repositoryRoot)
                 guard !Task.isCancelled, let self else { return }
@@ -375,17 +407,29 @@ final class ProjectSession: ObservableObject, Identifiable {
                 Log.warn("git", "status 失败：\(error)")
             }
             // 只有自己还是「最新的那次刷新」时才关掉转圈，别把后来者的转圈提前关掉
-            if let self, self.gitTask?.isCancelled == false { self.isRefreshingGit = false }
+            if let self, self.gitTask?.isCancelled == false, self.isRefreshingGit { self.isRefreshingGit = false }
         }
         gitTask = task
     }
 
     private func apply(_ snapshot: GitSnapshot) {
         gitError = nil
+        let ignoredChanged = snapshot.ignored != gitSnapshot.ignored
         gitSnapshot = snapshot
         gitIndex = GitStatusIndex(snapshot: snapshot)
         changeGroups = ChangeGroups(changes: snapshot.changes)
         commit?.update(snapshot: snapshot)
+        // 有了新提交（或切了分支）才重拉历史；工作区文件改动不影响 log。控制器自己比对 HEAD 去重
+        history?.currentHead = snapshot.branch.headOID
+        history?.refreshIfLoaded()
+        // 搜索索引跳过 git 忽略的路径。闭包里只放值类型，能拿到后台去跑；忽略集变了已建的索引作废
+        if let prefix = project.repositoryRelativePath(of: project.root) {
+            let index = gitIndex
+            search.isExcluded = { path, isDirectory in
+                index.isIgnored(prefix.isEmpty ? path : prefix + "/" + path, isDirectory: isDirectory)
+            }
+            if ignoredChanged { search.markStale() }
+        }
 
         // 开着的 diff 标签：变更已经不在了的关掉（比如被提交了），其余重新算
         let stillChanged = Dictionary(uniqueKeysWithValues: snapshot.changes.map { ($0.path, $0) })
@@ -429,6 +473,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         recomputeRows()
         reloadOpenFilesIfChanged()
         refreshGit()
+        search.applyChanges(paths)
     }
 
     /// 开着的文件在磁盘上变了就重读；当前显示的那个重渲染但保持滚动位置——Agent 正在改的文件用户多半正盯着看。
@@ -448,6 +493,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     // MARK: - 杂项
 
     func url(for change: GitChange) -> URL? { project.url(forRepositoryPath: change.path) }
+
+    func fileExists(_ url: URL) -> Bool { fileManager.fileExists(atPath: url.path) }
 
     func change(for url: URL) -> GitChange? {
         guard let relative = project.repositoryRelativePath(of: url) else { return nil }

@@ -46,6 +46,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     public var onOpenExternal: ((URL) -> Void)?
     /// Markdown 里点了指向本地文件的相对链接。
     public var onOpenPath: ((String) -> Void)?
+    /// render.js 画完一份内容：种类与它自己量的毫秒数。
+    public var onRendered: ((String, Int) -> Void)?
 
     private var isReady = false
     private var pendingPayload: RenderPayload?
@@ -187,6 +189,11 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
             if let href = body["href"] as? String, let url = URL(string: href) { onOpenExternal?(url) }
         case "openPath":
             if let path = body["path"] as? String { onOpenPath?(path) }
+        case "rendered":
+            let ms = (body["ms"] as? NSNumber)?.intValue ?? 0
+            let kind = body["kind"] as? String ?? ""
+            if ms >= 300 { Log.warn("web", "渲染 \(kind) 用了 \(ms) ms") }
+            onRendered?(kind, ms)
         default:
             break
         }

@@ -10,20 +10,36 @@ struct EditorAreaView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if session.tabs.isEmpty {
-                EmptyEditorView()
-            } else {
+            if !session.tabs.isEmpty {
                 TabBar(session: session)
                 EditorHeader(session: session)
+            }
+            // WebView 常驻：没有标签时盖一层空态，而不是把它从视图树里拿掉——
+            // WKWebView 挂上/摘下一次要几十毫秒，第一次打开文件、关掉最后一个标签都会顿一下。
+            ZStack {
                 ContentWebView(renderer: workbench.renderer)
-                    .overlay {
-                        if session.activeContent == .loading {
-                            ProgressView().controlSize(.small)
-                        }
-                    }
+                if session.tabs.isEmpty {
+                    EmptyEditorView()
+                } else if session.activeContent == .loading {
+                    DelayedProgressView()
+                }
             }
         }
         .background(Theme.editorBackground)
+    }
+}
+
+/// 过了一小会儿还没加载完才转圈：小文件几毫秒就好，转圈一闪而过只会显得卡。
+private struct DelayedProgressView: View {
+    @State private var isShown = false
+
+    var body: some View {
+        ProgressView().controlSize(.small)
+            .opacity(isShown ? 1 : 0)
+            .task {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                isShown = true
+            }
     }
 }
 
@@ -37,6 +53,8 @@ private struct EmptyEditorView: View {
                 shortcut("双击文件打开", "")
                 shortcut("项目视图", "⌘1")
                 shortcut("提交视图", "⌘0")
+                shortcut("提交历史", "⌘9")
+                shortcut("查找文件", "⇧⌘O")
                 shortcut("定位当前文件", "⌥⌘L")
                 shortcut("打开项目", "⌘O")
                 shortcut("关闭标签", "⌘W")
@@ -45,6 +63,7 @@ private struct EmptyEditorView: View {
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.editorBackground)
         .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 
@@ -98,7 +117,10 @@ private struct TabItem: View {
                 .foregroundStyle(isActive ? Theme.text : Theme.secondaryText)
                 .lineLimit(1)
             if tab.isDiff {
-                Text("diff").font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.vcsModified)
+                // 工作区 diff 标「diff」，历史提交的标它的短 hash，一眼分得清看的是哪一份
+                Text(tab.commitDiff?.commit.shortHash ?? "diff")
+                    .font(.system(size: 9, weight: .semibold, design: tab.commitDiff == nil ? .default : .monospaced))
+                    .foregroundStyle(Theme.vcsModified)
                     .padding(.horizontal, 4).padding(.vertical, 1)
                     .background(Capsule().fill(Theme.vcsModified.opacity(0.15)))
             }
@@ -134,7 +156,7 @@ private struct TabItem: View {
             Button("关闭全部") { session.closeAllTabs() }
             Divider()
             if tab.isPreview { Button("固定标签") { session.pin(tab.id) } }
-            if let url = tab.fileURL ?? tab.change.flatMap({ session.url(for: $0) }) {
+            if let url = tab.fileURL ?? tab.diffChange.flatMap({ session.url(for: $0) }) {
                 Button("在项目视图中显示") { session.reveal(url) }
                 Button("在访达中显示") { Desktop.revealInFinder(url) }
                 Button("用默认应用打开") { Desktop.openWithDefaultApp(url) }
@@ -172,8 +194,8 @@ private struct EditorHeader: View {
             .pickerStyle(.segmented)
             .controlSize(.small)
             .frame(width: 110)
-            if let change = tab.change, change.kind != .deleted, let url = session.url(for: change) {
-                IconButton("doc.text", help: "打开文件", size: 22) { session.openFile(url, pinned: true) }
+            if let change = tab.diffChange, change.kind != .deleted, let url = session.url(for: change), session.fileExists(url) {
+                IconButton("doc.text", help: "打开文件（当前版本）", size: 22) { session.openFile(url, pinned: true) }
             }
         } else if case .markdown = session.activeContent {
             Picker("", selection: Binding(
@@ -210,7 +232,7 @@ private struct Breadcrumb: View {
         if let url = tab.fileURL {
             return session.project.projectRelativeComponents(of: url)
         }
-        if let change = tab.change {
+        if let change = tab.diffChange {
             return change.path.split(separator: "/").map(String.init)
         }
         return [tab.title]
@@ -219,6 +241,11 @@ private struct Breadcrumb: View {
     var body: some View {
         let parts = components
         HStack(spacing: 4) {
+            if let commitDiff = tab.commitDiff {
+                Text(commitDiff.commit.shortHash).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.vcsModified)
+                Text(commitDiff.commit.subject).font(Theme.smallFont).foregroundStyle(Theme.secondaryText).lineLimit(1)
+                Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold)).foregroundStyle(Theme.mutedText)
+            }
             ForEach(Array(parts.enumerated()), id: \.offset) { index, part in
                 if index > 0 {
                     Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold)).foregroundStyle(Theme.mutedText)

@@ -71,3 +71,16 @@ import Testing
     #expect(many.count == RecentProjects.limit)
     #expect(many.first?.path == "/tmp/p29")
 }
+
+@Test func relativeDateText() {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+    let now = calendar.date(from: DateComponents(year: 2026, month: 9, day: 2, hour: 15, minute: 0))!
+    #expect(DateText.relative(now.addingTimeInterval(-30), now: now, calendar: calendar) == "刚刚")
+    #expect(DateText.relative(now.addingTimeInterval(-5 * 60), now: now, calendar: calendar) == "5 分钟前")
+    #expect(DateText.relative(now.addingTimeInterval(-3 * 3600), now: now, calendar: calendar) == "3 小时前")
+    #expect(DateText.relative(now.addingTimeInterval(-20 * 3600), now: now, calendar: calendar) == "昨天")
+    #expect(DateText.relative(now.addingTimeInterval(-3 * 86400), now: now, calendar: calendar) == "3 天前")
+    #expect(DateText.relative(now.addingTimeInterval(-30 * 86400), now: now, calendar: calendar) == "8月3日")
+    #expect(DateText.relative(now.addingTimeInterval(-400 * 86400), now: now, calendar: calendar) == "2025年7月29日")
+}

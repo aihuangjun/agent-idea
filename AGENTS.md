@@ -21,7 +21,7 @@ scripts/fetch_vendor.sh         # 仅升级前端离线依赖时（需联网）
 |---|---|---|
 | `Core` | 纯逻辑：版本/构建标识、日志、命令执行、git status/diff 解析、diff 排版、目录树扁平化、语言映射、文本解码、FSEvents 监听、GitHub 分发地址 | 无 |
 | `DesignSystem` | 深色主题常量、`RenderPayload`（渲染契约的 Swift 事实源）、`ContentRenderer`（WKWebView + render.js 的桥）、通用控件、文件图标、随包分发的 `Resources/web` | Core |
-| `Workbench` | `WorkbenchModel`（多个项目、`ReadingPreferences`、共用的 WebView）→ `ProjectSession`（单个项目：树、git 状态、标签）→ `CommitController`（勾选、提交、推送、回滚）/ `ChangeWatcher`（监听 + 去抖）/ `FileContentLoader`（文件与 diff → `TabContent` → `RenderPayload`），加全部视图、窗口、菜单、更新器。除 `AgentIDEARootScene` 外全部 internal | Core, DesignSystem |
+| `Workbench` | `WorkbenchModel`（多个项目、`ReadingPreferences`、共用的 WebView）→ `ProjectSession`（单个项目：树、git 状态、标签）→ `CommitController`（勾选、提交、推送、回滚）/ `HistoryController`（`git log` 分页、选中提交的文件列表）/ `FileSearchController`（文件搜索索引与查询）/ `ChangeWatcher`（监听 + 去抖）/ `FileContentLoader`（文件与 diff → `TabContent` → `RenderPayload`），加全部视图、窗口、菜单、更新器。除 `AgentIDEARootScene` 外全部 internal | Core, DesignSystem |
 | `AgentIDEAApp` | 只有 `@main` | Workbench |
 
 **规矩：**
@@ -38,7 +38,13 @@ scripts/fetch_vendor.sh         # 仅升级前端离线依赖时（需联网）
 - **git 命令带 `GIT_OPTIONAL_LOCKS=0`**：否则 `git status` 会写 `.git/index`，被 FSEvents 监听到，再触发一次 status，循环不止。`DirectoryWatcher.isRelevant` 另外把 `.git/` 里除 index/HEAD/refs 之外的噪音都滤掉。
 - **`git diff --no-index` 有差异时退出码是 1**，`GitClient.diff` 接受 0 和 1。
 - **`--ignored=matching` 而不是默认的 `traditional`**：配合 `--untracked-files=all` 时后者会把 `node_modules` 里几万个文件逐个列出来。
-- **目录树照 IDEA 习惯**：单击只选中，双击文件打开（固定标签）、双击目录展开/折叠。预览标签（斜体、复用同一个）只给变更列表单击和 Markdown 链接用。`ProjectSession.show` 是标签的唯一入口。
+- **目录树照 IDEA 习惯**：单击只选中，双击文件打开（固定标签）、双击目录展开/折叠。预览标签（斜体、复用同一个）只给变更列表 / 历史文件列表单击和 Markdown 链接用。`ProjectSession.show` 是标签的唯一入口。
+- **列表点击一律用 `PressGesture`（`.onPress`）而不是 `onTapGesture`**：按下就选中，松开才结算双击。`onTapGesture` 要等 mouseUp，用户感觉「点了要等一下」。目录树的箭头区域按横坐标判断，不给箭头单独套手势（嵌套手势会互相等待）。
+- **性能探针**：`Tests/WorkbenchTests/PerformanceProbe.swift`、`Tests/DesignSystemTests/LayoutProbe.swift`，只在 `AGENTIDEA_PERF=1` 时跑，往屏幕外的窗口合成鼠标事件量点击→选中、打开→渲染的耗时（`AGENTIDEA_PERF_FILES` 指定文件）。离屏窗口不会合成/绘制，量不到画到屏幕那一段。
+- **代码视图的 DOM 有两种**（render.js `codeView()`）：不换行时是「一个 sticky 行号栏 + 行列表」——原先每行一个 sticky `<td>`，WebKit 给每个 sticky 元素单独建合成层，几千行的文件切进来卡几百毫秒；自动换行时每行自带行号（折行后才对得齐）。所以 `setWrap` 对代码要重画一次。render.js 每次画完 post `rendered`（含毫秒数），超过 300ms 记日志。
+- **小文件同步读**（`ProjectSession.synchronousReadLimit`，512KB）：点击的同一回合里读完画出来，没有「加载中」那一帧；大文件才走后台 + 延迟 200ms 出现的转圈。git 刷新的转圈同样延迟 300ms（`refreshGit`），所以测试里别拿 `isRefreshingGit` 当「刷新结束」的信号。
+- **提交历史**：`GitClient.log` 用 `-z` + `%x1f` 分隔字段（`GitLogParser.format`），文件列表用 `diff --name-status -z --find-renames <第一个父提交|空树> <hash>`。`GitBranch.headOID` 变了才重拉（`apply(snapshot)`），工作区改动不触发。历史 diff 标签是 `EditorTab.Kind.commitDiff`，`tab.change` 只指工作区变更（git 刷新据此关标签），要两种都拿用 `tab.diffChange`。
+- **文件搜索**：索引（`FileIndexer`）在第一次打开搜索时于后台建，`ChangeWatcher` 报的变化增量套用（`applyChanges`），忽略集变了才整个重建（`markStale`）；跳过 git 忽略的路径（闭包只捕获值类型的 `GitStatusIndex`，能进后台）。打分在 `FileSearch`，纯逻辑有单测。
 - **多项目共用一个 WebView**：`ProjectSession` 不认识父对象，依赖全部注入；是否当前由 `WorkbenchModel.activate` 调 `setActive` 写入，只有当前会话才往 WebView 里画。要壳做事（切工具窗口）走 `onRequestToolWindow` 回调。
 - **取消不是失败**：`ShellCommand.run` 被取消时抛 `CancellationError`（不是退出码 15）。`refreshGit` 每次会取消上一次，靠这一点区分「被顶掉」和「git 出错」；转圈只由最新那次刷新关掉。
 - **双击判定**在 Core 的 `DoubleClickDetector`（纯逻辑，可测），视图持有；模型不 import AppKit，`NSWorkspace` 调用在视图层的 `Desktop`。

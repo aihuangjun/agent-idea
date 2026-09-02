@@ -50,21 +50,43 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     let count = try await renderAndInspect(
         RenderPayload(.code(path: "/x/Greeter.swift", text: source, language: "swift")),
         snapshotName: "code",
-        inspect: "document.querySelectorAll('table.code tr').length"
+        inspect: "document.querySelectorAll('.code-view .line').length"
     )
     #expect((count as? NSNumber)?.intValue == 8)
     let keywords = try await renderAndInspect(
         RenderPayload(.code(path: "/x/Greeter.swift", text: source, language: "swift")),
-        inspect: "document.querySelectorAll('table.code .hljs-keyword').length"
+        inspect: "document.querySelectorAll('.code-view .hljs-keyword').length"
     )
     #expect(((keywords as? NSNumber)?.intValue ?? 0) >= 3)
+}
+
+@Test @MainActor func wrappedCodeUsesPerLineNumbers() async throws {
+    // 不换行：一个整块行号栏 + N 行；换行：每行自带行号、没有整块行号栏
+    let source = (1...5).map { "line \($0) " + String(repeating: "x", count: 300) }.joined(separator: "\n")
+    let plain = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.txt", text: source, language: nil), wrap: false),
+        inspect: "[document.querySelectorAll('.code-view .gutter').length, document.querySelectorAll('.code-view .line').length, document.querySelectorAll('.code-view .ln').length].join(',')"
+    )
+    #expect(plain as? String == "1,5,0")
+    let wrapped = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.txt", text: source, language: nil), wrap: true),
+        snapshotName: "code-wrap",
+        inspect: "[document.querySelectorAll('.code-view.wrap .gutter').length, document.querySelectorAll('.code-view.wrap .line').length, document.querySelectorAll('.code-view.wrap .ln').length].join(',')"
+    )
+    #expect(wrapped as? String == "0,5,5")
+    // 运行时切换换行：代码要重画成另一种结构，并保持滚动位置
+    let toggled = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.txt", text: (1...400).map { "line \($0)" }.joined(separator: "\n"), language: nil), scrollTop: 600, wrap: false),
+        inspect: "(function(){ const before = window.ide.getScrollTop(); window.ide.setWrap(true); return [before >= 500, document.querySelectorAll('.code-view.wrap .ln').length, Math.abs(window.ide.getScrollTop() - before) < 2].join(','); })()"
+    )
+    #expect(toggled as? String == "true,400,true")
 }
 
 @Test @MainActor func singleLineJSONIsPrettyPrinted() async throws {
     let json = "{\"a\":1,\"b\":[1,2,3],\"c\":{\"d\":\"e\"},\"long\":\"" + String(repeating: "x", count: 150) + "\"}"
     let rows = try await renderAndInspect(
         RenderPayload(.code(path: "/x/a.json", text: json, language: "json")),
-        inspect: "document.querySelectorAll('table.code tr').length"
+        inspect: "document.querySelectorAll('.code-view .line').length"
     )
     #expect(((rows as? NSNumber)?.intValue ?? 0) > 5)
 }

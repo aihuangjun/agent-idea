@@ -37,9 +37,15 @@ enum FileContentLoader {
         }
     }
 
-    nonisolated static func loadDiff(_ change: GitChange, git: GitClient, repositoryRoot: URL) async -> TabContent {
+    /// 工作区变更的 diff；`commit` 给了就是那次提交里这个文件的 diff。
+    nonisolated static func loadDiff(_ change: GitChange, in commit: GitCommit? = nil, git: GitClient, repositoryRoot: URL) async -> TabContent {
         do {
-            let raw = try await git.diff(change: change, repositoryRoot: repositoryRoot)
+            let raw: String
+            if let commit {
+                raw = try await git.diff(change: change, in: commit, repositoryRoot: repositoryRoot)
+            } else {
+                raw = try await git.diff(change: change, repositoryRoot: repositoryRoot)
+            }
             return .diff(UnifiedDiffParser.parse(raw), language: Language.forFile(named: change.fileName))
         } catch {
             return .message(title: "取不到 diff", detail: error.userFacingDescription)
@@ -61,7 +67,7 @@ enum FileContentLoader {
 extension TabContent {
     /// 这份内容在 WebView 里怎么画。
     func renderContent(for tab: EditorTab, diffMode: DiffViewMode) -> RenderPayload.Content {
-        let path = tab.fileURL?.path ?? tab.change?.path ?? ""
+        let path = tab.fileURL?.path ?? tab.diffChange?.path ?? ""
         switch self {
         case .loading:
             return .message(title: "", detail: "")
@@ -80,7 +86,7 @@ extension TabContent {
         case .tooLarge(let size, let limit):
             return .message(title: "文件太大", detail: "\(Self.byteCount(size))，超过 \(Self.byteCount(limit)) 的阅读上限。")
         case .diff(let diff, let language):
-            let emptyReason = diff.isEmpty && tab.change?.kind == .untracked ? "这是一个空文件。" : nil
+            let emptyReason = diff.isEmpty && tab.diffChange?.kind == .untracked ? "这是一个空文件。" : nil
             return .diff(path: path, language: language.highlightID, diff: diff, mode: diffMode, emptyReason: emptyReason)
         case .message(let title, let detail):
             return .message(title: title, detail: detail)

@@ -5,7 +5,10 @@ import Foundation
 struct EditorTab: Identifiable, Equatable {
     enum Kind: Equatable {
         case file(URL)
+        /// 工作区相对 HEAD 的变更。
         case diff(GitChange)
+        /// 某次历史提交里一个文件的变更。
+        case commitDiff(GitCommit, GitChange)
     }
 
     let id: String
@@ -23,17 +26,19 @@ struct EditorTab: Identifiable, Equatable {
         switch kind {
         case .file(let url): id = Self.id(forFile: url)
         case .diff(let change): id = Self.id(forDiff: change)
+        case .commitDiff(let commit, let change): id = Self.id(forCommit: commit, change: change)
         }
     }
 
-    /// 标签 id 的拼法只在这两处：别处要按内容找标签时用它们，不要临时构造一个 EditorTab。
+    /// 标签 id 的拼法只在这几处：别处要按内容找标签时用它们，不要临时构造一个 EditorTab。
     static func id(forFile url: URL) -> String { "file:" + url.path }
     static func id(forDiff change: GitChange) -> String { "diff:" + change.path }
+    static func id(forCommit commit: GitCommit, change: GitChange) -> String { "commit:" + commit.hash + ":" + change.path }
 
     var title: String {
         switch kind {
         case .file(let url): return url.lastPathComponent
-        case .diff(let change): return change.fileName
+        case .diff(let change), .commitDiff(_, let change): return change.fileName
         }
     }
 
@@ -42,12 +47,27 @@ struct EditorTab: Identifiable, Equatable {
         return nil
     }
 
+    /// **工作区**的变更。git 状态刷新后要据此关掉已消失的 diff 标签，历史提交的 diff 不在其列。
     var change: GitChange? {
         if case .diff(let change) = kind { return change }
         return nil
     }
 
-    var isDiff: Bool { change != nil }
+    /// 历史提交的 diff：哪次提交、哪个文件。
+    var commitDiff: (commit: GitCommit, change: GitChange)? {
+        if case .commitDiff(let commit, let change) = kind { return (commit, change) }
+        return nil
+    }
+
+    /// 任一种 diff 标签对应的变更（面包屑、定位文件、渲染路径用）。
+    var diffChange: GitChange? {
+        switch kind {
+        case .file: return nil
+        case .diff(let change), .commitDiff(_, let change): return change
+        }
+    }
+
+    var isDiff: Bool { diffChange != nil }
 }
 
 /// 一个标签里装的内容，加载完成后放进 `ProjectSession.contents`。
@@ -95,6 +115,7 @@ enum TabContent: Equatable {
 enum ToolWindow: String {
     case project
     case commit
+    case history
 }
 
 extension ChangeKind {

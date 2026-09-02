@@ -20,15 +20,15 @@ struct ChangesView: View {
             }
             if let commit = session.commit {
                 if let error = session.gitError {
-                    emptyState(title: "git 出错了", detail: error)
+                    ToolWindowEmptyState(title: "git 出错了", detail: error)
                 } else if session.changeGroups.total == 0 {
-                    emptyState(title: "没有变更", detail: "工作区与 HEAD 一致。Agent 改了东西之后这里会自动出现。")
+                    ToolWindowEmptyState(title: "没有变更", detail: "工作区与 HEAD 一致。Agent 改了东西之后这里会自动出现。")
                 } else {
                     changeList(commit: commit)
                 }
                 CommitPanel(commit: commit, branch: session.gitSnapshot.branch)
             } else {
-                emptyState(title: "没有 git 仓库", detail: "这个目录不在 git 仓库里，或者本机没有安装 git。")
+                ToolWindowEmptyState(title: "没有 git 仓库", detail: "这个目录不在 git 仓库里，或者本机没有安装 git。")
             }
         }
         .background(Theme.panel)
@@ -56,17 +56,6 @@ struct ChangesView: View {
             }
             .padding(.vertical, 4)
         }
-    }
-
-    private func emptyState(title: String, detail: String) -> some View {
-        VStack(spacing: 6) {
-            Spacer()
-            Text(title).font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text)
-            Text(detail).font(Theme.smallFont).foregroundStyle(Theme.secondaryText).multilineTextAlignment(.center)
-            Spacer()
-        }
-        .padding(20)
-        .frame(maxWidth: .infinity)
     }
 }
 
@@ -166,8 +155,12 @@ private struct ChangeRow: View {
         .background(Rectangle().fill(isActive ? Theme.selection : (isHovering ? Theme.hover.opacity(0.5) : .clear)))
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        // 单击立刻出预览 diff，双击间隔内的第二下把它固定
-        .onTapGesture { session.openDiff(change, pinned: clicks.registerClick(on: change.path)) }
+        // 按下立刻出预览 diff，双击间隔内的第二下把它固定
+        .onPress { _ in
+            session.openDiff(change, pinned: false)
+        } release: { isClick in
+            if isClick, clicks.registerClick(on: change.path) { session.openDiff(change, pinned: true) }
+        }
         .contextMenu {
             Button("显示 diff") { session.openDiff(change, pinned: true) }
             if change.kind != .deleted, let url = session.url(for: change) {

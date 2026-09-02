@@ -57,14 +57,17 @@ public struct GitBranch: Equatable, Hashable, Sendable {
     public let behind: Int
     /// 还没有任何提交的仓库。
     public let isUnborn: Bool
+    /// HEAD 指向的提交；没有提交时为空串。提交历史看它变了才重新拉。
+    public let headOID: String
 
-    public init(name: String, isDetached: Bool = false, upstream: String? = nil, ahead: Int = 0, behind: Int = 0, isUnborn: Bool = false) {
+    public init(name: String, isDetached: Bool = false, upstream: String? = nil, ahead: Int = 0, behind: Int = 0, isUnborn: Bool = false, headOID: String = "") {
         self.name = name
         self.isDetached = isDetached
         self.upstream = upstream
         self.ahead = ahead
         self.behind = behind
         self.isUnborn = isUnborn
+        self.headOID = headOID
     }
 }
 
@@ -170,7 +173,7 @@ public enum GitStatusParser {
         } else {
             name = head
         }
-        let branch = GitBranch(name: name, isDetached: isDetached, upstream: upstream, ahead: ahead, behind: behind, isUnborn: isUnborn)
+        let branch = GitBranch(name: name, isDetached: isDetached, upstream: upstream, ahead: ahead, behind: behind, isUnborn: isUnborn, headOID: isUnborn ? "" : oid)
         return GitSnapshot(branch: branch, changes: changes, ignored: ignored)
     }
 

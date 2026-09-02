@@ -100,6 +100,31 @@ public struct GitClient: Sendable {
         return output.text
     }
 
+    // MARK: - 提交历史
+
+    /// 当前分支的提交，新的在前。`skip` 用来翻页。仓库还没有提交时返回空数组。
+    public func log(repositoryRoot: URL, limit: Int, skip: Int = 0) async throws -> [GitCommit] {
+        // 只有第一页需要先确认有 HEAD（没有提交时 git log 会报错）；翻页时第一页已经证明有了
+        if skip == 0, !(await hasHead(repositoryRoot: repositoryRoot)) { return [] }
+        var arguments = ["log", "-z", "--format=" + GitLogParser.format, "-n", String(limit)]
+        if skip > 0 { arguments += ["--skip", String(skip)] }
+        let output = try await run(arguments, in: repositoryRoot)
+        return GitLogParser.parse(output.standardOutput)
+    }
+
+    /// 一次提交改了哪些文件：对比它的第一个父提交（根提交对比空树；合并提交看的是相对主线的变化）。
+    public func changedFiles(in commit: GitCommit, repositoryRoot: URL) async throws -> [GitChange] {
+        let output = try await run(["diff", "--name-status", "-z", "--find-renames", commit.diffBase, commit.hash], in: repositoryRoot)
+        return GitNameStatusParser.parse(output.standardOutput)
+    }
+
+    /// 某次提交里一个文件的 diff（相对第一个父提交）。
+    public func diff(change: GitChange, in commit: GitCommit, repositoryRoot: URL) async throws -> String {
+        var arguments = ["diff", "--no-color", "--no-ext-diff", "-U3", "--find-renames", commit.diffBase, commit.hash, "--", change.path]
+        if let original = change.originalPath { arguments.append(original) }
+        return try await run(arguments, in: repositoryRoot, acceptable: [0, 1]).text
+    }
+
     // MARK: - 写操作（提交与推送）
 
     /// 提交结果。
