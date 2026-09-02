@@ -28,12 +28,12 @@ scripts/build_app.sh --no-install
 ## 发布
 
 ```bash
-scripts/release.sh 0.2.0            # 跑测试 → 构建 → 打 dmg → 放进 releases/ → 提交并推送
+scripts/release.sh 0.2.0            # 跑测试 → 构建 → 打 dmg → 提交推送 → 打 tag → 建 GitHub Release
 scripts/release.sh 0.2.0 --local    # 只打到 dist/，不动仓库
 ```
 
-历史版本都在 [`releases/`](releases/) 目录（每版一个 dmg，`latest.json` 指向最新）。
-应用里「Agent IDEA → 检查更新…」读的就是 GitHub 上这份 `latest.json`。仓库是私有的，
+历史版本都在仓库的 [Releases](https://github.com/aihuangjun/agent-idea/releases)（tag `vX.Y.Z`，dmg 作附件）。
+应用里「Agent IDEA → 检查更新…」读的就是最新那个 Release。仓库是私有的，
 更新器需要 GitHub 凭据：本机装好 `gh` 并登录，或把 token 写进 `~/.agentidea/github_token`。
 
 ## 结构

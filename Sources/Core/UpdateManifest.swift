@@ -1,21 +1,24 @@
 import Foundation
 
-/// 仓库里 `releases/latest.json`：发布脚本写，应用读。字段刻意保持最小；脚本多写的键（publishedAt）解码时忽略。
-public struct UpdateManifest: Codable, Equatable, Sendable {
+/// 一个可更新到的版本：从 GitHub Release 里整理出来的、更新器真正需要的几项。
+public struct UpdateManifest: Equatable, Sendable {
     public let version: String
-    /// dmg 文件名，与清单同目录。
+    /// dmg 文件名。
     public let fileName: String
     public let sizeBytes: Int
-    /// dmg 的 sha256，下载后校验。
+    /// dmg 的 sha256（小写十六进制），下载后校验。
     public let sha256: String
-    /// 这一版的变更说明，取自 CHANGELOG。
+    /// 附件的 API 地址（`AppDistribution.assetRequest`）。
+    public let downloadURL: URL
+    /// 这一版的变更说明（Release 正文，来自 CHANGELOG）。
     public let notes: String?
 
-    public init(version: String, fileName: String, sizeBytes: Int, sha256: String, notes: String? = nil) {
+    public init(version: String, fileName: String, sizeBytes: Int, sha256: String, downloadURL: URL, notes: String? = nil) {
         self.version = version
         self.fileName = fileName
         self.sizeBytes = sizeBytes
         self.sha256 = sha256
+        self.downloadURL = downloadURL
         self.notes = notes
     }
 
@@ -24,6 +27,64 @@ public struct UpdateManifest: Codable, Equatable, Sendable {
     public var displaySize: String {
         let mb = Double(sizeBytes) / 1_048_576
         return mb >= 1 ? String(format: "%.1f MB", mb) : "\(sizeBytes) B"
+    }
+
+    /// Release 里没有可用的 dmg 附件，或附件没有 sha256 摘要。
+    public enum ReleaseError: Error, Equatable {
+        case noDiskImage
+        case noDigest(String)
+    }
+
+    /// 从 `GET /repos/{owner}/{repo}/releases/latest` 的 JSON 里整理出来。
+    /// 版本号是 tag 去掉前缀；找第一个 `.dmg` 附件；sha256 取附件的 `digest`（形如 `sha256:…`）。
+    public init(release: GitHubRelease, tagPrefix: String = AppDistribution.tagPrefix) throws {
+        guard let asset = release.assets.first(where: { $0.name.lowercased().hasSuffix(".dmg") }) else { throw ReleaseError.noDiskImage }
+        guard let digest = asset.digest, digest.lowercased().hasPrefix("sha256:") else { throw ReleaseError.noDigest(asset.name) }
+        let tag = release.tagName
+        let version = tag.hasPrefix(tagPrefix) ? String(tag.dropFirst(tagPrefix.count)) : tag
+        let notes = release.body?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.init(
+            version: version,
+            fileName: asset.name,
+            sizeBytes: asset.size,
+            sha256: String(digest.dropFirst("sha256:".count)).lowercased(),
+            downloadURL: asset.url,
+            notes: notes?.isEmpty == false ? notes : nil
+        )
+    }
+}
+
+/// GitHub Release 接口返回的 JSON 里我们用到的字段。
+public struct GitHubRelease: Decodable, Equatable, Sendable {
+    public struct Asset: Decodable, Equatable, Sendable {
+        public let name: String
+        public let size: Int
+        /// API 地址（`…/releases/assets/{id}`），不是 `browser_download_url`。
+        public let url: URL
+        /// `sha256:<hex>`；GitHub 对新上传的附件都会给。
+        public let digest: String?
+
+        public init(name: String, size: Int, url: URL, digest: String?) {
+            self.name = name
+            self.size = size
+            self.url = url
+            self.digest = digest
+        }
+    }
+
+    public let tagName: String
+    public let body: String?
+    public let assets: [Asset]
+
+    public init(tagName: String, body: String?, assets: [Asset]) {
+        self.tagName = tagName
+        self.body = body
+        self.assets = assets
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case tagName = "tag_name"
+        case body, assets
     }
 }
 

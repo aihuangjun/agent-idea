@@ -2,7 +2,7 @@ import AppKit
 import Core
 import Foundation
 
-/// 应用内更新：查、下、换、重启。包放在 GitHub 仓库的 `releases/` 目录里。
+/// 应用内更新：查、下、换、重启。包放在仓库的 GitHub Releases 里（见 `AppDistribution`）。
 @MainActor
 final class Updater: ObservableObject {
     enum Phase: Equatable {
@@ -112,20 +112,23 @@ final class Updater: ObservableObject {
 
     private func fetchManifest() async throws -> UpdateManifest {
         let token = await GitHubToken.resolve()
-        let request = AppDistribution.request(fileName: AppDistribution.manifestName, token: token)
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: AppDistribution.latestReleaseRequest(token: token))
         try Self.check(response, hadToken: token != nil)
         do {
-            return try JSONDecoder().decode(UpdateManifest.self, from: data)
+            return try UpdateManifest(release: JSONDecoder().decode(GitHubRelease.self, from: data))
         } catch {
+            Log.warn("update", "Release 信息读不出来：\(error)")
             throw UpdateError.badManifest
         }
     }
 
     private func download(_ manifest: UpdateManifest) async throws -> URL {
         let token = await GitHubToken.resolve()
-        let request = AppDistribution.request(fileName: manifest.fileName, token: token)
-        let (temporary, response) = try await URLSession.shared.download(for: request)
+        let request = AppDistribution.assetRequest(url: manifest.downloadURL, token: token)
+        // GitHub 会 302 到对象存储；那边见到 Authorization 头会拒绝，重定向时要把它摘掉
+        let session = URLSession(configuration: .ephemeral, delegate: RedirectSanitizer(), delegateQueue: nil)
+        defer { session.finishTasksAndInvalidate() }
+        let (temporary, response) = try await session.download(for: request)
         try Self.check(response, hadToken: token != nil)
 
         let destination = FileManager.default.temporaryDirectory.appendingPathComponent("agentidea-update-\(manifest.version).dmg")
@@ -192,12 +195,12 @@ final class Updater: ObservableObject {
     static func describe(_ error: Error) -> String {
         switch error {
         case UpdateError.badManifest:
-            return "更新信息读不出来（latest.json 格式不对），请联系发布者。"
+            return "更新信息读不出来（最新 Release 里没有带摘要的 dmg 附件），请联系发布者。"
         case UpdateError.checksumMismatch:
             return "下载的安装包校验不通过，已丢弃。请稍后重试。"
         case UpdateError.http(404, hadToken: true):
             // 带着 token 还 404：文件不在。最可能是还没发布过任何版本
-            return "仓库里还没有发布记录（releases/\(AppDistribution.manifestName) 不存在），或者当前 token 没有这个仓库的读权限。"
+            return "仓库里还没有发布过 Release，或者当前 token 没有这个仓库的读权限。"
         case UpdateError.http(let status, let hadToken) where status == 401 || status == 403 || status == 404:
             let hint = hadToken
                 ? "当前 token 没有这个仓库的读权限。"
@@ -211,6 +214,19 @@ final class Updater: ObservableObject {
             return "GitHub 返回了 HTTP \(status)，请稍后重试。"
         default:
             return error.userFacingDescription
+        }
+    }
+
+    /// 跨到别的主机的重定向不带 Authorization。GitHub 附件下载 302 到 objects.githubusercontent.com，
+    /// 那边带着 GitHub 的 token 会返回 400。
+    private final class RedirectSanitizer: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            var sanitized = request
+            if request.url?.host != task.originalRequest?.url?.host {
+                sanitized.setValue(nil, forHTTPHeaderField: "Authorization")
+            }
+            completionHandler(sanitized)
         }
     }
 

@@ -1,11 +1,11 @@
 #!/bin/bash
-# 发布一个版本：更新版本号 → 跑测试 → 构建 → 打 dmg → 落到 releases/ → 提交并推送到 GitHub。
+# 发布一个版本：更新版本号 → 跑测试 → 构建 → 打 dmg → 提交推送 → 打 tag → 建 GitHub Release 并上传 dmg。
 #
 # 用法：scripts/release.sh 0.2.0 [--local]
-#   --local  只打到 dist/，不动 releases/、不提交（本地验证用）
+#   --local  只打到 dist/，不提交、不建 Release（本地验证用）
 #
-# 历史发布的 app 全部留在 releases/ 目录里（每个版本一个 dmg + 一份 latest.json 指向最新版），
-# 应用内「检查更新…」读的就是 GitHub 上这份 latest.json。
+# 历史版本都在仓库的 GitHub Releases 里（tag vX.Y.Z，dmg 作附件），
+# 应用内「检查更新…」读的是 releases/latest 接口。需要本机装好 gh 并登录。
 # 版本号请先与用户确认——推出去的包收不回来。
 set -euo pipefail
 
@@ -26,6 +26,11 @@ if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
 fi
 
 scripts/clean_strays.sh
+
+if $UPLOAD && ! gh auth status >/dev/null 2>&1; then
+  echo "发布中止：gh 没有登录（brew install gh && gh auth login），建 Release 要用它。"
+  exit 1
+fi
 
 # 发布必须有变更记录，否则过几个版本就没人说得清每个包里到底有什么。
 if ! grep -q "^## $VERSION " CHANGELOG.md 2>/dev/null; then
@@ -136,32 +141,30 @@ NOTES=$(awk -v ver="## $VERSION " '
   collecting { print }
 ' CHANGELOG.md | sed '/^$/d' | head -12)
 
-# 与 Core/AppDistribution.swift 里的目录名、清单名必须一致（bash 引用不到 Swift 常量）。
-RELEASES="releases"
-mkdir -p "$RELEASES"
-cp "$DMG" "$RELEASES/"
-MANIFEST="$RELEASES/latest.json"
-AI_NOTES="$NOTES" /usr/bin/python3 - "$VERSION" "$(basename "$DMG")" "$SIZE" "$SHA" "$MANIFEST" <<'PY'
-import json, sys, datetime, os
-version, file_name, size, sha, out = sys.argv[1:6]
-json.dump({
-    "version": version,
-    "fileName": file_name,
-    "sizeBytes": int(size),
-    "sha256": sha,
-    "publishedAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "notes": os.environ.get("AI_NOTES") or None,
-}, open(out, "w"), ensure_ascii=False, indent=2)
-print(open(out).read())
-PY
+# tag 前缀与 Core/AppDistribution.swift 的 tagPrefix 必须一致（bash 引用不到 Swift 常量）。
+TAG="v$VERSION"
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null || gh release view "$TAG" >/dev/null 2>&1; then
+  echo "发布中止：$TAG 已经存在。推出去的版本不能覆盖，要重发就升一个版本号。"
+  exit 1
+fi
 
 echo "==> 提交并推送到 GitHub"
-git add VERSION CHANGELOG.md "$RELEASES/$(basename "$DMG")" "$MANIFEST"
+git add VERSION CHANGELOG.md
 git commit -m "release $VERSION" -m "$NOTES" >/dev/null
-git push
+git tag -a "$TAG" -m "Agent IDEA $VERSION"
+git push origin HEAD "$TAG"
+
+# dmg 作为 Release 附件。GitHub 会给附件算 sha256（接口里的 digest 字段），应用下载后据此校验。
+echo "==> 创建 GitHub Release $TAG"
+gh release create "$TAG" "$DMG" --title "Agent IDEA $VERSION" --notes "$NOTES" --verify-tag
+REMOTE_SHA=$(gh api "repos/{owner}/{repo}/releases/tags/$TAG" --jq '.assets[] | select(.name | endswith(".dmg")) | .digest' | sed 's/^sha256://')
+if [ "$REMOTE_SHA" != "$SHA" ]; then
+  echo "发布中止：GitHub 上附件的摘要（$REMOTE_SHA）与本地（$SHA）不一致，上传可能出错了。请到 Releases 页面检查。"
+  exit 1
+fi
 
 echo
 echo "==> 发布完成：$VERSION"
-echo "    dmg    $RELEASES/$(basename "$DMG")"
-echo "    清单   $MANIFEST"
+echo "    Release  $(gh release view "$TAG" --json url --jq .url)"
+echo "    dmg      $DMG  sha256 $SHA"
 echo "    装着旧版本的机器在「Agent IDEA → 检查更新…」里就能拿到它；也可以直接把 dmg 发过去。"

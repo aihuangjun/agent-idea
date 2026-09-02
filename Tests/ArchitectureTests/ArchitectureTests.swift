@@ -66,9 +66,9 @@ private func imports(in file: URL) throws -> Set<String> {
 @Test func distributionConstantsAgreeWithReleaseScript() throws {
     let script = try String(contentsOf: packageRoot.appendingPathComponent("scripts/release.sh"), encoding: .utf8)
     let swift = try String(contentsOf: packageRoot.appendingPathComponent("Sources/Core/AppDistribution.swift"), encoding: .utf8)
-    #expect(script.contains("RELEASES=\"releases\""))
-    #expect(swift.contains("releasesDirectory = \"releases\""))
-    #expect(script.contains("latest.json") && swift.contains("manifestName = \"latest.json\""))
+    // tag 前缀：脚本打 tag、应用解析 tag 用的必须是同一个
+    #expect(script.contains("TAG=\"v$VERSION\"") && swift.contains("tagPrefix = \"v\""))
+    #expect(script.contains("gh release create \"$TAG\"") && swift.contains("/releases/latest"))
     // 构建脚本写的 Info.plist 键与 BuildIdentity 读的必须一致
     let build = try String(contentsOf: packageRoot.appendingPathComponent("scripts/build_app.sh"), encoding: .utf8)
     let identity = try String(contentsOf: packageRoot.appendingPathComponent("Sources/Core/BuildIdentity.swift"), encoding: .utf8)

@@ -396,7 +396,7 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
 @Test @MainActor func updaterDescribesAuthFailures() {
     let message = Updater.describe(Updater.UpdateError.http(404, hadToken: false))
     #expect(message.contains("gh auth login"))
-    #expect(Updater.describe(Updater.UpdateError.http(404, hadToken: true)).contains("还没有发布记录"))
+    #expect(Updater.describe(Updater.UpdateError.http(404, hadToken: true)).contains("还没有发布过 Release"))
     #expect(Updater.describe(Updater.UpdateError.checksumMismatch).contains("校验"))
     #expect(Updater.shellQuoted("/Applications/It's.app") == "'/Applications/It'\\''s.app'")
 }

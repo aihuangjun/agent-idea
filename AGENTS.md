@@ -5,7 +5,7 @@
 ```bash
 swift build && swift test
 scripts/build_app.sh            # 组装 .build/AgentIDEA.app，签名，冒烟启动，装到 /Applications
-scripts/release.sh 0.2.0        # 发布：测试 → 构建 → dmg → releases/ → git commit + push
+scripts/release.sh 0.2.0        # 发布：测试 → 构建 → dmg → git commit + push + tag → gh release create
 swift scripts/make_icon.swift && iconutil -c icns Resources/AppIcon.iconset -o Resources/AppIcon.icns \
   && rm -rf Resources/AppIcon.iconset     # 仅改图标时
 scripts/fetch_vendor.sh         # 仅升级前端离线依赖时（需联网）
@@ -51,7 +51,7 @@ scripts/fetch_vendor.sh         # 仅升级前端离线依赖时（需联网）
 - **提交只动勾选的路径**：`git add -A -- <paths>` 再 `git commit --only -- <paths>`，用户在终端里 add 过的别的东西不会被带进去。git 的环境底子是 `LoginShellEnvironment`（登录 shell 抓的），否则 GUI 里 push 找不到 ssh-agent 和凭据助手；同时 `GIT_TERMINAL_PROMPT=0`，绝不让 git 停下来等输入。
 - **切标签前要先问 WebView 当前滚动位置**（`rememberScrollOfActiveTab`），否则切回来在顶部。
 - **签名**：`build_app.sh` 优先用钥匙串里的「AgentIDEA Local」证书，没有就 adhoc。`release.sh` 会核对产物的指定要求里确实是那张证书（钥匙串锁着时 find-identity 找得到、codesign 却签不成，会静默退回 adhoc）。
-- **发布落点两份事实**：`scripts/release.sh` 的 `RELEASES` / `latest.json` 与 `Core/AppDistribution.swift` 的常量必须一致（bash 引不到 Swift）；架构测试核对。
+- **发布走 GitHub Releases**：`scripts/release.sh` 打 tag `v$VERSION`、`gh release create` 上传 dmg；应用读 `releases/latest` 接口，用附件的 `digest`（sha256）校验下载。tag 前缀在脚本与 `Core/AppDistribution.swift` 各有一份（bash 引不到 Swift），架构测试核对。私有仓库下载附件要走附件的 API 地址 + `Accept: application/octet-stream`，302 到对象存储时必须摘掉 Authorization（`Updater.RedirectSanitizer`）。
 - **更新器访问私有仓库**：token 依次取 `~/.agentidea/github_token`、`GITHUB_TOKEN`/`GH_TOKEN`、`gh auth token`。GUI 应用不继承 shell 的 PATH，所以 gh / git 都按固定路径找（`ExecutableLocator`）。
 - **主题色两份**：`Theme.swift` 与 `web/style.css` 顶部变量，架构测试核对几个关键色。
 

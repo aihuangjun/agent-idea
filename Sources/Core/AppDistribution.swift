@@ -3,31 +3,34 @@ import Foundation
 
 /// 应用包放在哪、怎么取（**取包侧**）。
 ///
-/// 发布产物放在本仓库的 `releases/` 目录里，由 `scripts/release.sh` 提交推送到 GitHub；
-/// 应用通过 GitHub Contents API 取 `latest.json` 与 dmg。
-/// 放包侧是 bash，引用不到这里的常量，所以目录名与清单名**实际有两份**，改一处必须同步改另一处。
+/// 发布产物放在本仓库的 GitHub Releases 里：每个版本一个 tag（`v1.2.0`），dmg 作为附件，
+/// 由 `scripts/release.sh` 用 `gh release create` 上传。应用读 `releases/latest` 接口，
+/// 从附件的 `digest` 字段拿 sha256 校验下载。仓库是私有的，要带 token；改成公开后不带也能用。
+/// 放包侧是 bash，引用不到这里的常量，所以 tag 前缀**实际有两份**，改一处必须同步改另一处。
 public enum AppDistribution {
     public static let repositoryOwner = "aihuangjun"
     public static let repositoryName = "agent-idea"
-    public static let branch = "main"
-    /// 与 `scripts/release.sh` 的 `RELEASES` 必须一致。
-    public static let releasesDirectory = "releases"
-    public static let manifestName = "latest.json"
+    /// 与 `scripts/release.sh` 的 `TAG="v$VERSION"` 必须一致。
+    public static let tagPrefix = "v"
 
-    /// Contents API 地址。带上 `Accept: application/vnd.github.raw+json` 就直接返回文件内容，
-    /// 二进制也行（上限 100MB，dmg 远小于此）。仓库是私有的，要带 token；改成公开后不带也能用。
-    public static func contentsURL(fileName: String) -> URL {
-        var components = URLComponents()
-        components.scheme = "https"
-        components.host = "api.github.com"
-        components.path = "/repos/\(repositoryOwner)/\(repositoryName)/contents/\(releasesDirectory)/\(fileName)"
-        components.queryItems = [URLQueryItem(name: "ref", value: branch)]
-        return components.url!
+    /// 最新一个正式 Release（不含 pre-release 与草稿）。
+    public static var latestReleaseURL: URL {
+        URL(string: "https://api.github.com/repos/\(repositoryOwner)/\(repositoryName)/releases/latest")!
     }
 
-    public static func request(fileName: String, token: String?) -> URLRequest {
-        var request = URLRequest(url: contentsURL(fileName: fileName))
-        request.setValue("application/vnd.github.raw+json", forHTTPHeaderField: "Accept")
+    public static func latestReleaseRequest(token: String?) -> URLRequest {
+        request(url: latestReleaseURL, accept: "application/vnd.github+json", token: token)
+    }
+
+    /// 下载附件：对附件的 API 地址带 `Accept: application/octet-stream`，GitHub 会 302 到真正的文件地址。
+    /// 私有仓库必须走这个地址（`browser_download_url` 只认浏览器会话）。
+    public static func assetRequest(url: URL, token: String?) -> URLRequest {
+        request(url: url, accept: "application/octet-stream", token: token)
+    }
+
+    private static func request(url: URL, accept: String, token: String?) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.setValue(accept, forHTTPHeaderField: "Accept")
         request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
         request.setValue("AgentIDEA-Updater", forHTTPHeaderField: "User-Agent")
         if let token, !token.isEmpty {

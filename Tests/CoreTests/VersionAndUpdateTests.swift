@@ -25,7 +25,7 @@ import Testing
 }
 
 @Test func updatePolicy() {
-    let manifest = UpdateManifest(version: "0.2.0", fileName: "AgentIDEA-0.2.0.dmg", sizeBytes: 1_048_576, sha256: "x")
+    let manifest = UpdateManifest(version: "0.2.0", fileName: "AgentIDEA-0.2.0.dmg", sizeBytes: 1_048_576, sha256: "x", downloadURL: URL(string: "https://api.github.com/x")!)
     #expect(UpdatePolicy.hasUpdate(manifest: manifest, currentVersion: "0.1.0"))
     #expect(!UpdatePolicy.hasUpdate(manifest: manifest, currentVersion: "0.2.0"))
     #expect(!UpdatePolicy.hasUpdate(manifest: manifest, currentVersion: "garbage"))
@@ -39,13 +39,43 @@ import Testing
     #expect(UpdatePolicy.shouldAutoCheck(lastCheck: now.addingTimeInterval(3600), now: now))
 }
 
-@Test func distributionPointsAtReleasesDirectoryOnGitHub() {
-    let url = AppDistribution.contentsURL(fileName: "latest.json")
-    #expect(url.absoluteString == "https://api.github.com/repos/aihuangjun/agent-idea/contents/releases/latest.json?ref=main")
-    let request = AppDistribution.request(fileName: "a.dmg", token: "tok")
+@Test func distributionPointsAtGitHubReleases() {
+    #expect(AppDistribution.latestReleaseURL.absoluteString == "https://api.github.com/repos/aihuangjun/agent-idea/releases/latest")
+    let request = AppDistribution.latestReleaseRequest(token: "tok")
     #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer tok")
-    #expect(request.value(forHTTPHeaderField: "Accept") == "application/vnd.github.raw+json")
-    #expect(AppDistribution.request(fileName: "a.dmg", token: nil).value(forHTTPHeaderField: "Authorization") == nil)
+    #expect(request.value(forHTTPHeaderField: "Accept") == "application/vnd.github+json")
+    #expect(AppDistribution.latestReleaseRequest(token: nil).value(forHTTPHeaderField: "Authorization") == nil)
+    let asset = AppDistribution.assetRequest(url: URL(string: "https://api.github.com/repos/o/r/releases/assets/1")!, token: "tok")
+    #expect(asset.value(forHTTPHeaderField: "Accept") == "application/octet-stream")
+    #expect(asset.value(forHTTPHeaderField: "Authorization") == "Bearer tok")
+}
+
+@Test func manifestIsBuiltFromReleaseJSON() throws {
+    let json = """
+    {"tag_name": "v0.2.0", "body": "- 提交历史\\n- 查找文件\\n", "draft": false,
+     "assets": [
+       {"name": "notes.txt", "size": 10, "url": "https://api.github.com/repos/o/r/releases/assets/1", "digest": "sha256:aa"},
+       {"name": "AgentIDEA-0.2.0.dmg", "size": 2717371, "url": "https://api.github.com/repos/o/r/releases/assets/2",
+        "browser_download_url": "https://github.com/o/r/releases/download/v0.2.0/AgentIDEA-0.2.0.dmg",
+        "digest": "sha256:6CD87900B78412E26015A2D9C59C7A737AE422869325B5C6301A21348A8965E7"}
+     ]}
+    """
+    let release = try JSONDecoder().decode(GitHubRelease.self, from: Data(json.utf8))
+    let manifest = try UpdateManifest(release: release)
+    #expect(manifest.version == "0.2.0")
+    #expect(manifest.fileName == "AgentIDEA-0.2.0.dmg" && manifest.sizeBytes == 2_717_371)
+    #expect(manifest.sha256 == "6cd87900b78412e26015a2d9c59c7a737ae422869325b5c6301a21348a8965e7")
+    #expect(manifest.downloadURL.absoluteString == "https://api.github.com/repos/o/r/releases/assets/2")
+    #expect(manifest.notes == "- 提交历史\n- 查找文件")
+    #expect(UpdatePolicy.hasUpdate(manifest: manifest, currentVersion: "0.1.0"))
+
+    // 没有 dmg 附件、附件没有摘要：都不能当成可更新
+    let noDmg = GitHubRelease(tagName: "v9.0.0", body: nil, assets: [release.assets[0]])
+    #expect(throws: UpdateManifest.ReleaseError.noDiskImage) { try UpdateManifest(release: noDmg) }
+    let noDigest = GitHubRelease(tagName: "v9.0.0", body: "", assets: [.init(name: "a.dmg", size: 1, url: release.assets[1].url, digest: nil)])
+    #expect(throws: UpdateManifest.ReleaseError.noDigest("a.dmg")) { try UpdateManifest(release: noDigest) }
+    // tag 没有 v 前缀也认
+    #expect(try UpdateManifest(release: GitHubRelease(tagName: "1.0.0", body: nil, assets: [release.assets[1]])).version == "1.0.0")
 }
 
 @Test func sha256OfFile() throws {
