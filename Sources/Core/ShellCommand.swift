@@ -65,6 +65,10 @@ public struct ShellCommand: CommandRunning {
         process.standardError = errPipe
         // stdin 堵死：不设的话子进程继承我们的 stdin，git 一旦决定问点什么就会安静地等一个永远不会有的回答。
         process.standardInput = FileHandle.nullDevice
+        // 退出码靠 terminationHandler 拿，**不用 waitUntilExit**：它内部转 run loop 等通知，在协作线程池上偶发
+        // 收不到、子进程都没了还一直等（2026-09-02 发布时测试套件就这么挂过一次）。handler 要在 run() 之前装好。
+        let exit = ExitWaiter()
+        process.terminationHandler = { exit.finish($0.terminationStatus) }
 
         try process.run()
 
@@ -73,10 +77,7 @@ public struct ShellCommand: CommandRunning {
             async let outData = Self.readToEnd(outPipe.fileHandleForReading)
             async let errData = Self.readToEnd(errPipe.fileHandleForReading)
             let (out, err) = await (outData, errData)
-            let status = await Task.detached(priority: .utility) { () -> Int32 in
-                process.waitUntilExit()
-                return process.terminationStatus
-            }.value
+            let status = await exit.status()
             // 被取消而死的进程退出码是 15（SIGTERM）。这不是「命令失败」，调用方要能用 CancellationError 区分：
             // 否则一次被新刷新顶掉的 git status 会被当成 git 出错显示在界面上。
             try Task.checkCancellation()
@@ -94,6 +95,35 @@ public struct ShellCommand: CommandRunning {
                 try? await Task.sleep(nanoseconds: UInt64(Self.terminationGrace * 1_000_000_000))
                 guard process.isRunning else { return }
                 kill(process.processIdentifier, SIGKILL)
+            }
+        }
+    }
+
+    /// 把 `terminationHandler` 的一次回调变成一个可 await 的值。回调可能先于 await 到，也可能后到，两边都要接得住。
+    private final class ExitWaiter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: Int32?
+        private var continuation: CheckedContinuation<Int32, Never>?
+
+        func finish(_ status: Int32) {
+            lock.lock()
+            result = status
+            let waiting = continuation
+            continuation = nil
+            lock.unlock()
+            waiting?.resume(returning: status)
+        }
+
+        func status() async -> Int32 {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if let result {
+                    lock.unlock()
+                    continuation.resume(returning: result)
+                    return
+                }
+                self.continuation = continuation
+                lock.unlock()
             }
         }
     }
