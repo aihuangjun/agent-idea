@@ -11,9 +11,13 @@
  * editable 为真的 code / markdown 源码用 CodeMirror 编辑器画，否则是只读的静态视图。
  * 宿主还会问 window.ide.getState() → { scrollTop, text: 编辑器里的全文或 null, cursor }，切标签前拿走最新文字；
  * 基线是异步取的，到了就 window.ide.setBase({ path, base })，编辑器在行号右侧画「改过（蓝）/ 新增（绿）」的标记（IDEA 的 gutter）。
+ * window.ide.navigateChange("next" | "previous") 跳到下一处 / 上一处变更（IDEA 的 F7 / ⇧F7）：编辑器里按光标找、把那一行滚到正中；
+ * 只读 diff 表格按连续的变更行段落跳。回 { index, total }，没有可跳的回 null；页面里按 F7 / ⇧F7 也走它。
+ * 渲染完、跳转后、光标移动、改动、滚动时都会 post changes { hasPrevious, hasNext }，宿主据此把到头的箭头灰掉。
  * path：diff 用来显示（summary 那一行）；编辑器发 edited 消息时带上它，宿主据此找到是哪个文件。
  * 往 Swift 发消息一律 post({type, ...})：ready / rendered / openExternal / openPath / edited { path, text } /
- * navigate { direction: "back" | "forward" }（编辑器里按 ⌥← / ⌥→：这两个键在应用里是后退/前进，不给 CodeMirror 按词移动）。
+ * navigate { direction: "back" | "forward" }（编辑器里按 ⌥← / ⌥→：这两个键在应用里是后退/前进，不给 CodeMirror 按词移动）/
+ * changes { hasPrevious, hasNext }。
  * 自有代码不写内联事件处理器（CSP 不给 unsafe-inline）。
  */
 (function () {
@@ -25,6 +29,7 @@
   const WORD_DIFF_LIMIT = 2000;         // 单行超过这个长度不做词级对比
   const LINE_HIGHLIGHT_LIMIT = 2000;    // diff 里单行超过这个长度不做语法高亮
   let current = null;                   // 最近一次 payload：Markdown 相对链接要用它的 docDir，setWrap 要改它的 wrap
+  let changeIndex = -1;                 // 只读 diff 表格里当前停在第几处变更（navigateChange 用），换内容时归零
 
   function post(message) {
     try { window.webkit.messageHandlers.ide.postMessage(message); } catch (_) { /* 测试页里没有宿主 */ }
@@ -254,10 +259,13 @@
   /* 改动停手 300ms 后：把全文发给宿主、重算标记；onChange 给分栏预览 / diff 装饰用（它们自己再去抖）。 */
   function attachEditorEvents(onChange) {
     editor.on("change", () => {
+      changeLinesCache = null;
       if (editTimer) clearTimeout(editTimer);
-      editTimer = setTimeout(() => { editTimer = null; postEdited(); updateChangeMarkers(); }, EDIT_DEBOUNCE);
+      editTimer = setTimeout(() => { editTimer = null; postEdited(); updateChangeMarkers(); reportChangePosition(); }, EDIT_DEBOUNCE);
       if (onChange) onChange();
     });
+    // 纯光标移动才即时上报；刚敲过字的那 300ms 交给上面的定时器——否则并排 diff 的 leftChunks() 会每敲一个键就同步重算整份 diff
+    editor.on("cursorActivity", () => { if (!editTimer) reportChangePosition(); });
   }
 
   /* 把编辑器装进 host。 */
@@ -285,6 +293,7 @@
     editor = null;
     mergeView = null;
     unifiedWidgets = [];
+    changeLinesCache = null;
   }
 
   /* ---------- 可编辑的 diff（工作区变更） ---------- */
@@ -671,7 +680,7 @@
         if (row.type === "hunk") { parts.push(hunkRow(row.text, 3)); continue; }
         const k = row.k;
         const marker = k === "add" ? "+" : k === "del" ? "−" : " ";
-        parts.push(`<tr><td class="ln ${k}">${row.o == null ? "" : row.o}</td><td class="ln ${k}">${row.n == null ? "" : row.n}</td>` +
+        parts.push(`<tr${k === "add" || k === "del" ? ' class="changed"' : ""}><td class="ln ${k}">${row.o == null ? "" : row.o}</td><td class="ln ${k}">${row.n == null ? "" : row.n}</td>` +
           `<td class="src ${k}"><span class="marker">${marker}</span>${highlightOne(row.t, language) || " "}</td></tr>`);
       }
       parts.push(`</tbody></table>`);
@@ -684,13 +693,131 @@
         if (l.k === "del" && r.k === "add" && l.t.length <= WORD_DIFF_LIMIT && r.t.length <= WORD_DIFF_LIMIT) {
           ranges = changedRanges(l.t, r.t);
         }
-        parts.push(`<tr><td class="ln ${l.k}">${l.n == null ? "" : l.n}</td>${cell(l, language, ranges && ranges.left)}` +
+        const changed = l.k === "del" || l.k === "add" || r.k === "del" || r.k === "add";
+        parts.push(`<tr${changed ? ' class="changed"' : ""}><td class="ln ${l.k}">${l.n == null ? "" : l.n}</td>${cell(l, language, ranges && ranges.left)}` +
           `<td class="ln right-ln ${r.k}">${r.n == null ? "" : r.n}</td>${cell(r, language, ranges && ranges.right)}</tr>`);
       }
       parts.push(`</tbody></table>`);
     }
     root.innerHTML = parts.join("");
   }
+
+  /* ---------- 上一个 / 下一个变更（IDEA 的 F7 / ⇧F7） ---------- */
+
+  function lastIndex(array, test) {
+    for (let i = array.length - 1; i >= 0; i--) if (test(array[i])) return i;
+    return -1;
+  }
+
+  let changeLinesCache = null;   // editorChangeLines 的结果；光标每动一下都要问，文本一变就作废
+
+  /* 编辑器里每处改动在工作区文本里的起始行（从 0 数）：并排可编辑 diff 问 MergeView 的 chunk（它自己有缓存），
+   * 单列可编辑 diff 与带基线的编辑器按行级 diff 的分组算（与标记、底色是同一份数据）。 */
+  function editorChangeLines() {
+    if (!editor || !current) return [];
+    if (mergeView) return (mergeView.leftChunks() || []).map((chunk) => chunk.editFrom);
+    if (changeLinesCache) return changeLinesCache;
+    const base = current.edit ? current.edit.oldText : current.base;
+    if (typeof base !== "string") return [];
+    const groups = lineChanges(base.split("\n"), editor.getValue().split("\n"));
+    changeLinesCache = (groups || []).map((group) => group.newStart);
+    return changeLinesCache;
+  }
+
+  /* 编辑器：以光标所在行为准找下一处 / 上一处，光标放到那一行行首、把它滚到视口正中（IDEA 就是这么放的）。 */
+  function navigateEditor(direction) {
+    const lines = editorChangeLines();
+    if (!lines.length) return null;
+    const cursor = editor.getCursor().line;
+    const index = direction === "next" ? lines.findIndex((line) => line > cursor) : lastIndex(lines, (line) => line < cursor);
+    if (index < 0) return { index: lines.indexOf(cursor), total: lines.length };
+    const line = Math.min(lines[index], editor.lastLine());
+    editor.setCursor({ line, ch: 0 });   // cursorActivity 会把新位置报给宿主
+    const info = editor.getScrollInfo();
+    editor.scrollTo(null, Math.max(0, editor.heightAtLine(line, "local") - info.clientHeight / 2 + editor.defaultTextHeight() / 2));
+    return { index, total: lines.length };
+  }
+
+  /* 只读 diff 表格：一段连续的变更行算一处。上次跳到的那处还在视口里就从它往下 / 往上数一处，
+   * 否则（用户自己滚过了）从视口顶部往下找第一处 / 往上找最后一处。 */
+  function staticChangeRuns() {
+    const runs = [];
+    for (const row of root.querySelectorAll("table.diff tr.changed")) {
+      const previous = row.previousElementSibling;
+      if (previous && previous.classList.contains("changed")) runs[runs.length - 1].push(row); else runs.push([row]);
+    }
+    return runs;
+  }
+
+  function staticTopOf(run) { return run[0].getBoundingClientRect().top + (window.scrollY || document.documentElement.scrollTop || 0); }
+
+  /* 往 direction 方向该跳到第几处；到头了回 -1。 */
+  function staticTarget(runs, direction) {
+    const top = window.scrollY || document.documentElement.scrollTop || 0, height = window.innerHeight;
+    const lastTop = changeIndex >= 0 && changeIndex < runs.length ? staticTopOf(runs[changeIndex]) : null;
+    let index;
+    if (lastTop !== null && lastTop >= top && lastTop < top + height) {
+      index = changeIndex + (direction === "next" ? 1 : -1);
+    } else if (direction === "next") {
+      index = runs.findIndex((run) => staticTopOf(run) > top + 1);
+    } else {
+      index = lastIndex(runs, (run) => staticTopOf(run) < top - 1);
+    }
+    return index >= 0 && index < runs.length ? index : -1;
+  }
+
+  function navigateStatic(direction) {
+    const runs = staticChangeRuns();
+    if (!runs.length) return null;
+    const index = staticTarget(runs, direction);
+    if (index < 0) return { index: changeIndex, total: runs.length };
+    const run = runs[index];
+    for (const row of root.querySelectorAll("tr.current-change")) row.classList.remove("current-change");
+    for (const row of run) row.classList.add("current-change");
+    window.scrollTo(0, Math.max(0, staticTopOf(run) - window.innerHeight / 2 + run[0].getBoundingClientRect().height / 2));
+    changeIndex = index;
+    reportChangePosition();
+    return { index, total: runs.length };
+  }
+
+  /* 告诉宿主前面 / 后面还有没有变更可跳（到头的箭头灰掉）。编辑器以光标行为准，只读 diff 按 staticTarget 的答案。 */
+  function reportChangePosition() {
+    let hasPrevious = false, hasNext = false;
+    if (editor) {
+      const lines = editorChangeLines();
+      const cursor = editor.getCursor().line;
+      hasPrevious = lines.some((line) => line < cursor);
+      hasNext = lines.some((line) => line > cursor);
+    } else if (current && current.kind === "diff") {
+      const runs = staticChangeRuns();
+      if (runs.length) {
+        hasPrevious = staticTarget(runs, "previous") >= 0;
+        hasNext = staticTarget(runs, "next") >= 0;
+      }
+    }
+    post({ type: "changes", hasPrevious, hasNext });
+  }
+
+  // 只读 diff 里用户自己滚动之后，「前面 / 后面」的答案会变
+  let scrollReportTimer = null;
+  window.addEventListener("scroll", () => {
+    if (editor || !current || current.kind !== "diff") return;
+    if (scrollReportTimer) clearTimeout(scrollReportTimer);
+    scrollReportTimer = setTimeout(() => { scrollReportTimer = null; reportChangePosition(); }, 100);
+  }, { passive: true });
+
+  function navigateChange(direction) {
+    if (editor) return navigateEditor(direction);
+    if (current && current.kind === "diff") return navigateStatic(direction);
+    return null;
+  }
+
+  // F7 / ⇧F7 在页面里就处理掉（编辑器不认这两个键，事件会冒上来）；页面没处理的键 WebKit 才交给应用菜单
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "F7" || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+    event.preventDefault();
+    navigateChange(event.shiftKey ? "previous" : "next");
+  });
 
   /* ---------- 入口 ---------- */
 
@@ -699,6 +826,7 @@
       const started = performance.now();
       flushEditor();
       current = payload;
+      changeIndex = -1;
       try {
         switch (payload.kind) {
           case "code": renderCode(payload); break;
@@ -715,6 +843,7 @@
       window.scrollTo(0, payload.scrollTop || 0);
       // 告诉宿主画完了、花了多久（宿主据此记日志、探针据此计时）
       post({ type: "rendered", kind: payload.kind, ms: Math.round(performance.now() - started) });
+      reportChangePosition();
     },
     getScrollTop() {
       if (editor) return editor.getScrollInfo().top;
@@ -735,13 +864,21 @@
       if (current.edit) {
         if (current.edit.filePath !== message.path) return;
         current.edit.oldText = typeof message.base === "string" ? message.base : "";
+        changeLinesCache = null;
         if (mergeView) mergeView.leftOriginal().setValue(current.edit.oldText);
         if (current.mode === "unified") decorateUnified(); else updateDiffSummary();
+        reportChangePosition();
         return;
       }
       if (current.path !== message.path) return;
       current.base = typeof message.base === "string" ? message.base : null;
+      changeLinesCache = null;
       updateChangeMarkers();
+      reportChangePosition();
+    },
+    /* 上一处 / 下一处变更；回 { index, total }，没有可跳的回 null。 */
+    navigateChange(direction) {
+      return navigateChange(direction);
     },
     setZoom(zoom) {
       document.documentElement.style.setProperty("--zoom", String(zoom));

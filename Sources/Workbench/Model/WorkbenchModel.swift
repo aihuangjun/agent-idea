@@ -80,6 +80,7 @@ final class WorkbenchModel: ObservableObject {
             self?.active?.applyEdit(path: path, text: text)
         }
         self.renderer.onShellReloaded = { [weak self] in self?.active?.renderActiveTab() }
+        self.renderer.onChangePosition = { [weak self] position in self?.active?.setChangePosition(position) }
         self.renderer.onNavigate = { [weak self] direction in
             switch direction {
             case .back: self?.active?.goBack()

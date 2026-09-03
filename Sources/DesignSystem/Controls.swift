@@ -45,6 +45,7 @@ public struct IconButton: View {
     let size: CGFloat
     let action: () -> Void
     @State private var isHovering = false
+    @Environment(\.isEnabled) private var isEnabled
 
     public init(_ systemName: String, help: String, isActive: Bool = false, size: CGFloat = 26, action: @escaping () -> Void) {
         self.systemName = systemName
@@ -62,8 +63,10 @@ public struct IconButton: View {
                 .frame(width: size, height: size)
                 .background(
                     RoundedRectangle(cornerRadius: 5)
-                        .fill(isActive ? Theme.selection.opacity(0.9) : (isHovering ? Theme.hover : .clear))
+                        .fill(isActive ? Theme.selection.opacity(0.9) : (isHovering && isEnabled ? Theme.hover : .clear))
                 )
+                // `.disabled` 时明确灰掉：plain 样式对自定义 label 不一定有禁用外观
+                .opacity(isEnabled ? 1 : 0.35)
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }

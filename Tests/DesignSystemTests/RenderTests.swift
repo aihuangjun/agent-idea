@@ -257,3 +257,69 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     )
     #expect(summary as? String == "4,1,1")
 }
+
+/// 上一处 / 下一处变更（F7 / ⇧F7）：只读 diff 表格按连续的变更行段落跳并高亮，编辑器按光标找、光标落到那一行；到头了不动。
+@Test @MainActor func navigateChangeStepsThroughDiffAndEditor() async throws {
+    // 两处改动，中间隔着上下文行
+    let diff = UnifiedDiffParser.parse("""
+    --- a/a.txt
+    +++ b/a.txt
+    @@ -1,7 +1,7 @@
+     l1
+    -l2
+    +L2
+     l3
+     l4
+    -l5
+    -l6
+    +L5
+    +L6
+     l7
+    """)
+    // 每一步都会把「前面 / 后面还有没有」报给宿主：一开始只有后面，跳到最后一处只有前面
+    let positions = Locked<[ContentRenderer.ChangePosition]>([])
+    let table = try await renderAndInspect(
+        RenderPayload(.diff(path: "a.txt", language: nil, diff: diff, mode: .sideBySide, emptyReason: nil)),
+        prepare: "window.__seq = [JSON.stringify(window.ide.navigateChange('next')), document.querySelectorAll('tr.current-change').length, JSON.stringify(window.ide.navigateChange('next')), document.querySelectorAll('tr.current-change').length, JSON.stringify(window.ide.navigateChange('next')), JSON.stringify(window.ide.navigateChange('previous')), (function(){ document.dispatchEvent(new KeyboardEvent('keydown', {key: 'F7', bubbles: true, cancelable: true})); return document.querySelector('tr.current-change td.ln').textContent; })()].join('|')",
+        settle: 0.3,
+        configure: { renderer in renderer.onChangePosition = { position in positions.value.append(position) } },
+        inspect: "window.__seq"
+    )
+    #expect(table as? String == "{\"index\":0,\"total\":2}|1|{\"index\":1,\"total\":2}|2|{\"index\":1,\"total\":2}|{\"index\":0,\"total\":2}|5")
+    #expect(positions.value.first == ContentRenderer.ChangePosition(hasPrevious: false, hasNext: true))
+    #expect(positions.value.last == ContentRenderer.ChangePosition(hasPrevious: true, hasNext: false))
+
+    let unified = try await renderAndInspect(
+        RenderPayload(.diff(path: "a.txt", language: nil, diff: diff, mode: .unified, emptyReason: nil)),
+        inspect: "[JSON.stringify(window.ide.navigateChange('previous')), JSON.stringify(window.ide.navigateChange('next')), document.querySelectorAll('tr.current-change').length].join('|')"
+    )
+    #expect(unified as? String == "{\"index\":-1,\"total\":2}|{\"index\":0,\"total\":2}|2")
+
+    // 可编辑 diff（并排是 MergeView 的 chunk，单列是行级 diff 的分组）与带基线的编辑器：光标在改动的第一行
+    let edit = DiffEdit(oldText: "a\nb\nc\nd\ne\nf\n", newText: "a\nB\nc\nd\nE\nf\n", filePath: "/x/a.txt")
+    let sequence = "[window.ide.navigateChange('next').index, cm().getCursor().line, window.ide.navigateChange('next').index, cm().getCursor().line, window.ide.navigateChange('next').index, cm().getCursor().line, window.ide.navigateChange('previous').index, cm().getCursor().line].join(',')"
+    for mode in DiffViewMode.allCases {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: "a.txt", isBinary: false, hunks: []), mode: mode, emptyReason: nil, edit: edit)),
+            inspect: "(function(){ const cm = () => document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror; return \(sequence); })()"
+        )
+        #expect(result as? String == "0,1,1,4,1,4,0,1", "\(mode)")
+    }
+    let editorPositions = Locked<[ContentRenderer.ChangePosition]>([])
+    let editorResult = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.txt", text: "a\nX\nc\nd\n", language: nil, editable: true, base: "a\nb\nc\n")),
+        prepare: "const cm = () => document.querySelector('.CodeMirror').CodeMirror; window.__seq = [window.ide.navigateChange('next').index, cm().getCursor().line, window.ide.navigateChange('next').index, cm().getCursor().line].join(',')",
+        settle: 0.3,
+        configure: { renderer in renderer.onChangePosition = { position in editorPositions.value.append(position) } },
+        inspect: "window.__seq"
+    )
+    #expect(editorResult as? String == "0,1,1,3")
+    // 光标停在第一处改动上时前面没有、后面有；跳到最后一处后只有前面
+    #expect(editorPositions.value.first == ContentRenderer.ChangePosition(hasPrevious: false, hasNext: true))
+    #expect(editorPositions.value.last == ContentRenderer.ChangePosition(hasPrevious: true, hasNext: false))
+    let noBase = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.txt", text: "a\n", language: nil, editable: true)),
+        inspect: "String(window.ide.navigateChange('next'))"
+    )
+    #expect(noBase as? String == "null")
+}

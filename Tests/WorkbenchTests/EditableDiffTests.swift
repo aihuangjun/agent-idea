@@ -123,3 +123,28 @@ private func makeSession(in directory: URL) -> (ProjectSession, FakeCommandRunne
         if case .diff = session.contents[deletedTab.id] {} else { Issue.record("已删除的应是静态 diff：\(String(describing: session.contents[deletedTab.id]))") }
     }
 }
+
+/// F7 / ⇧F7 与标题条的上下箭头只在有变更点可跳的标签上有效：diff 标签、有工作区变更的文本标签；没变更的文件不行。
+@Test @MainActor func changeNavigationIsOfferedOnDiffsAndChangedFiles() async throws {
+    try await withTemporaryDirectory { directory in
+        let file = directory.appendingPathComponent("m.txt")
+        try "v2\n".write(to: file, atomically: true, encoding: .utf8)
+        let clean = directory.appendingPathComponent("clean.txt")
+        try "same\n".write(to: clean, atomically: true, encoding: .utf8)
+        let (session, _) = makeSession(in: directory)
+        await waitUntil { session.changeGroups.total == 3 }
+        #expect(!session.canNavigateChanges)
+
+        let change = try #require(session.gitSnapshot.changes.first { $0.path == "m.txt" })
+        session.openDiff(change, pinned: true)
+        #expect(session.canNavigateChanges)
+
+        session.openFile(file, pinned: true)
+        await waitUntil { session.activeContent?.text != nil }
+        #expect(session.canNavigateChanges)
+
+        session.openFile(clean, pinned: true)
+        await waitUntil { session.activeContent?.text != nil }
+        #expect(!session.canNavigateChanges)
+    }
+}

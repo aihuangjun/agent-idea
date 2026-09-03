@@ -57,6 +57,7 @@ private struct EmptyEditorView: View {
                 shortcut("查找文件", "⌘F")
                 shortcut("定位当前文件", "⌥⌘L")
                 shortcut("后退 / 前进", "⌥← / ⌥→")
+                shortcut("上一处 / 下一处变更", "⇧F7 / F7")
                 shortcut("保存", "⌘S")
                 shortcut("打开项目", "⌘O")
                 shortcut("关闭标签", "⌘W")
@@ -207,6 +208,15 @@ private struct EditorHeader: View {
 
     @ViewBuilder
     private func controls(for tab: EditorTab) -> some View {
+        if session.canNavigateChanges {
+            // IDEA diff 视图工具条上的上下箭头：跳到上一处 / 下一处变更（⇧F7 / F7）
+            HStack(spacing: 0) {
+                IconButton("chevron.up", help: "上一处变更（⇧F7）", size: 22) { session.navigateChange(.previous) }
+                    .disabled(!session.changePosition.hasPrevious)
+                IconButton("chevron.down", help: "下一处变更（F7）", size: 22) { session.navigateChange(.next) }
+                    .disabled(!session.changePosition.hasNext)
+            }
+        }
         if tab.isDiff {
             Picker("", selection: $preferences.diffMode) {
                 ForEach(DiffViewMode.allCases, id: \.self) { Text($0.label).tag($0) }

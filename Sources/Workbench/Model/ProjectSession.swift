@@ -48,6 +48,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     @Published private(set) var navigation = NavigationHistory<String>()
     /// 顶部一条可关闭的提示。
     @Published private(set) var banner: String?
+    /// 当前正文里前面 / 后面还有没有变更可跳（页面报上来的，见 `setChangePosition`）。
+    @Published private(set) var changePosition = ContentRenderer.ChangePosition()
 
     /// 树视图里的一次键盘/回车动作。
     enum TreeCommand {
@@ -329,6 +331,29 @@ final class ProjectSession: ObservableObject, Identifiable {
         isNavigating = true
         activate(target)
         isNavigating = false
+    }
+
+    // MARK: - 上一处 / 下一处变更
+
+    /// 当前标签里有可以跳的变更点：任一种 diff 标签，或者有工作区变更、且在编辑器里打开（行号旁有标记）的文本标签。
+    /// Markdown 预览没有行；超过 2MB 的只读代码视图没有标记，也没有。
+    var canNavigateChanges: Bool {
+        guard let tab = activeTab else { return false }
+        if tab.isDiff { return true }
+        guard let url = tab.fileURL, change(for: url) != nil, isEditable(tab), let content = contents[tab.id] else { return false }
+        if case .markdown = content, tab.markdownView == .preview { return false }
+        return true
+    }
+
+    /// F7 / ⇧F7、标题条的上下箭头：让 WebView 跳到下一处 / 上一处变更。
+    func navigateChange(_ step: ContentRenderer.ChangeStep) {
+        guard isActive, canNavigateChanges else { return }
+        renderer.navigateChange(step)
+    }
+
+    /// 页面报上来的：前面 / 后面还有没有变更可跳。到头的方向箭头与菜单项灰掉（IDEA 一样）。
+    func setChangePosition(_ position: ContentRenderer.ChangePosition) {
+        if position != changePosition { changePosition = position }
     }
 
     func pin(_ tabID: String) {

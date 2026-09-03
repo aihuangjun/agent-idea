@@ -41,7 +41,7 @@ struct ChangesView: View {
                     GroupHeader(title: "变更", changes: session.changeGroups.tracked, commit: commit, isCollapsed: $trackedCollapsed)
                     if !trackedCollapsed {
                         ForEach(session.changeGroups.tracked) { change in
-                            ChangeRow(session: session, commit: commit, clicks: clicks, change: change)
+                            ChangeRow(session: session, commit: commit, clicks: clicks, change: change, isActive: isActive(change))
                         }
                     }
                 }
@@ -49,13 +49,19 @@ struct ChangesView: View {
                     GroupHeader(title: "未跟踪文件", changes: session.changeGroups.untracked, commit: commit, isCollapsed: $untrackedCollapsed)
                     if !untrackedCollapsed {
                         ForEach(session.changeGroups.untracked) { change in
-                            ChangeRow(session: session, commit: commit, clicks: clicks, change: change)
+                            ChangeRow(session: session, commit: commit, clicks: clicks, change: change, isActive: isActive(change))
                         }
                     }
                 }
             }
             .padding(.vertical, 4)
         }
+    }
+
+    /// 当前标签就是这条变更的 diff。由这里算好再传给行：行视图只按传进去的值重画，
+    /// 自己去读 `session.activeTab` 的话 SwiftUI 看不出行有变化，切到别的文件时上一行的高亮不会消失（0.3.0 的 bug）。
+    private func isActive(_ change: GitChange) -> Bool {
+        session.activeTab?.change?.path == change.path
     }
 }
 
@@ -99,10 +105,9 @@ private struct ChangeRow: View {
     @ObservedObject var commit: CommitController
     let clicks: DoubleClickDetector
     let change: GitChange
+    let isActive: Bool
     @State private var isHovering = false
     @State private var pendingAction: DestructiveConfirmation?
-
-    private var isActive: Bool { session.activeTab?.change?.path == change.path }
 
     var body: some View {
         let icon = FileIcon.file(named: change.fileName)

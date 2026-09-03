@@ -61,6 +61,26 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         case forward
     }
 
+    /// 上一处 / 下一处变更（IDEA 的 ⇧F7 / F7）。
+    public enum ChangeStep: String, Sendable {
+        case next
+        case previous
+    }
+
+    /// 页面报上来的：光标 / 视口前面、后面还有没有变更可跳。到头的那个方向的箭头灰掉。
+    public struct ChangePosition: Equatable, Sendable {
+        public var hasPrevious: Bool
+        public var hasNext: Bool
+
+        public init(hasPrevious: Bool = false, hasNext: Bool = false) {
+            self.hasPrevious = hasPrevious
+            self.hasNext = hasNext
+        }
+    }
+
+    /// 页面里前面 / 后面还有没有变更可跳变了（渲染完、跳转后、光标移动、改动、滚动）。
+    public var onChangePosition: ((ChangePosition) -> Void)?
+
     /// WebView 里当前的状态：滚到哪、编辑器里的文字（没有编辑器时为 nil）、光标。
     public struct ViewState: Equatable, Sendable {
         public var scrollTop: Double
@@ -163,6 +183,14 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         webView.evaluateJavaScript("window.ide.setBase(\(json))")
     }
 
+    /// 跳到当前内容里的下一处 / 上一处变更：编辑器按光标找，只读 diff 按变更段落找（都在 render.js 里）。
+    public func navigateChange(_ step: ChangeStep) {
+        guard isReady else { return }
+        webView.evaluateJavaScript("window.ide.navigateChange(\"\(step.rawValue)\")") { _, error in
+            if let error { Log.warn("web", "navigateChange 失败：\(error)") }
+        }
+    }
+
     public func setWrap(_ wrap: Bool) {
         lastPayload?.wrap = wrap
         pendingPayload?.wrap = wrap
@@ -257,6 +285,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
             if let path = body["path"] as? String, let text = body["text"] as? String { onEdited?(path, text) }
         case "navigate":
             if let direction = (body["direction"] as? String).flatMap(NavigationDirection.init) { onNavigate?(direction) }
+        case "changes":
+            onChangePosition?(ChangePosition(hasPrevious: body["hasPrevious"] as? Bool ?? false, hasNext: body["hasNext"] as? Bool ?? false))
         default:
             break
         }

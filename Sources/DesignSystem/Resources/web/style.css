@@ -117,6 +117,9 @@ table.diff tr.hunk td .hunk-range { color: var(--text-3); margin-right: 10px; }
 table.diff .wd { border-radius: 2px; }
 table.diff td.add .wd { background: var(--add-bg-strong); }
 table.diff td.del .wd { background: var(--del-bg-strong); }
+/* navigateChange 跳到的那一处：左侧一道蓝条 + 淡淡的底色，滚过去一眼能找到 */
+table.diff tr.current-change td { background-image: linear-gradient(rgba(84, 138, 247, 0.10), rgba(84, 138, 247, 0.10)); }
+table.diff tr.current-change td:first-child { box-shadow: inset 3px 0 0 var(--link); }
 table.diff td.src .marker { display: inline-block; width: 1.1em; color: var(--text-3); user-select: none; -webkit-user-select: none; }
 .diff-summary { padding: 6px 14px; font-size: 12px; color: var(--text-2); background: var(--panel); border-bottom: 1px solid var(--border); display: flex; gap: 12px; align-items: center; }
 .diff-summary .add { color: #5FAD65; }

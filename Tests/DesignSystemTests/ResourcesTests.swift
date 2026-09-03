@@ -18,7 +18,7 @@ import Testing
 @Test func renderScriptExposesTheContract() throws {
     let shell = try #require(WebResources.shellURL)
     let script = try String(contentsOf: shell.deletingLastPathComponent().appendingPathComponent("render.js"), encoding: .utf8)
-    for entry in ["render(payload)", "getScrollTop()", "setZoom(zoom)", "setWrap(wrap)", "type: \"ready\"", "type: \"openExternal\"", "type: \"openPath\"", "type: \"rendered\""] {
+    for entry in ["render(payload)", "getScrollTop()", "setZoom(zoom)", "setWrap(wrap)", "navigateChange(direction)", "type: \"ready\"", "type: \"openExternal\"", "type: \"openPath\"", "type: \"rendered\""] {
         #expect(script.contains(entry), "render.js 缺少 \(entry)")
     }
 }
