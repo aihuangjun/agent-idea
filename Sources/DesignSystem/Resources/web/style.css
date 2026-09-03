@@ -53,6 +53,40 @@ body { font-family: var(--sans); -webkit-font-smoothing: antialiased; overflow-x
   border-bottom: 1px solid var(--border); display: flex; gap: 14px; align-items: center;
 }
 
+/* ---------- 编辑器 ---------- */
+/* 编辑器自己滚（CodeMirror 只画视口内的行），所以让它占满视口、页面不滚。 */
+.editor-host { height: 100vh; }
+.md-split { display: flex; height: 100vh; }
+.md-split .editor-host { flex: 1 1 50%; min-width: 0; border-right: 1px solid var(--border); }
+.md-split .md-pane { flex: 1 1 50%; min-width: 0; overflow: auto; }
+.md-split .md-pane article.md { padding: 20px 28px 60px; }
+/* 可编辑 diff：summary 一行在上面，剩下的高度给编辑器 */
+.diff-host, .merge-host { height: calc(100vh - 29px); }
+.diff-summary .hint { margin-left: auto; color: var(--text-3); }
+.CodeMirror-merge, .CodeMirror-merge .CodeMirror { height: 100%; }
+.CodeMirror-merge { border: none; }
+.CodeMirror-merge-pane { height: 100%; }
+.CodeMirror-merge-gap { background: var(--panel); border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
+/* merge 插件给「左边那份 diff」的两个窗格用同一组 l-* 类名，所以按窗格上色：基线窗格红、编辑窗格绿 */
+.CodeMirror-merge-left .CodeMirror-merge-l-chunk { background: var(--del-bg); }
+.CodeMirror-merge-left .CodeMirror-merge-l-chunk-start { border-top: 1px solid rgba(229, 87, 101, 0.5); }
+.CodeMirror-merge-left .CodeMirror-merge-l-chunk-end { border-bottom: 1px solid rgba(229, 87, 101, 0.5); }
+.CodeMirror-merge-editor .CodeMirror-merge-l-chunk { background: var(--add-bg); }
+.CodeMirror-merge-editor .CodeMirror-merge-l-chunk-start { border-top: 1px solid rgba(95, 173, 101, 0.5); }
+.CodeMirror-merge-editor .CodeMirror-merge-l-chunk-end { border-bottom: 1px solid rgba(95, 173, 101, 0.5); }
+.CodeMirror-merge-r-connect { fill: var(--add-bg); stroke: rgba(95, 173, 101, 0.5); stroke-width: 1px; }
+.CodeMirror-merge-l-connect { fill: var(--del-bg); stroke: rgba(229, 87, 101, 0.5); stroke-width: 1px; }
+.CodeMirror-merge-copy { color: var(--text-2); }
+.CodeMirror-merge-copy:hover { color: var(--text); }
+.CodeMirror-merge-scrolllock { color: var(--text-3); }
+.CodeMirror-merge-l-inserted { background-image: none; background: var(--add-bg-strong); }
+.CodeMirror-merge-l-deleted { background-image: none; background: var(--del-bg-strong); }
+.CodeMirror-merge-collapsed-widget { background: var(--panel); border-color: var(--border); color: var(--text-2); }
+/* 单列可编辑 diff：新增行底色、被删行的只读小块 */
+.CodeMirror-linebackground.cm-diff-added { background: var(--add-bg); }
+.cm-diff-removed { background: var(--del-bg); font-family: var(--mono); font-size: var(--code-size); line-height: 1.6; color: var(--text-2); white-space: pre; padding: 0 12px 0 14px; border-left: 3px solid rgba(229, 87, 101, 0.6); }
+.cm-diff-removed div { text-decoration: line-through; text-decoration-color: rgba(229, 87, 101, 0.5); }
+
 /* ---------- 空态 / 提示 ---------- */
 .message { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; color: var(--text-2); gap: 8px; padding: 40px; text-align: center; }
 .message h2 { margin: 0; font-size: 15px; font-weight: 500; color: var(--text); }

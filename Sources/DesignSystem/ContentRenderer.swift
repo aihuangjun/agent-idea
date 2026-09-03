@@ -48,6 +48,31 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     public var onOpenPath: ((String) -> Void)?
     /// render.js 画完一份内容：种类与它自己量的毫秒数。
     public var onRendered: ((String, Int) -> Void)?
+    /// 编辑器里的文字变了（停手 300ms 后发一次）：文件路径与整份文本。
+    public var onEdited: ((String, String) -> Void)?
+    /// 编辑器里按了后退 / 前进（⌥← / ⌥→）。
+    public var onNavigate: ((NavigationDirection) -> Void)?
+    /// Web 内容进程被系统回收、页面重新加载好了：宿主要按当前状态重画（上次的 payload 里没有之后的编辑）。
+    public var onShellReloaded: (() -> Void)?
+    private var isRecoveringFromCrash = false
+
+    public enum NavigationDirection: String, Sendable {
+        case back
+        case forward
+    }
+
+    /// WebView 里当前的状态：滚到哪、编辑器里的文字（没有编辑器时为 nil）、光标。
+    public struct ViewState: Equatable, Sendable {
+        public var scrollTop: Double
+        public var text: String?
+        public var cursor: EditorCursor?
+
+        public init(scrollTop: Double = 0, text: String? = nil, cursor: EditorCursor? = nil) {
+            self.scrollTop = scrollTop
+            self.text = text
+            self.cursor = cursor
+        }
+    }
 
     private var isReady = false
     private var pendingPayload: RenderPayload?
@@ -103,21 +128,39 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         send(payload)
     }
 
-    /// 当前滚动位置。切标签前问一次，切回来时带在 payload 里恢复。
-    public func currentScrollTop(_ completion: @escaping (Double) -> Void) {
+    /// 当前状态：滚动位置、编辑器里的文字与光标。切标签前问一次，切回来时带在 payload 里恢复；
+    /// 文字直接拿走，不用等编辑器那边停手 300ms 才发过来的那份。页面没就绪时立刻回一份空状态。
+    public func currentState(_ completion: @escaping (ViewState) -> Void) {
         guard isReady else {
-            completion(0)
+            completion(ViewState())
             return
         }
-        webView.evaluateJavaScript("window.ide.getScrollTop()") { value, _ in
-            completion((value as? NSNumber)?.doubleValue ?? 0)
+        webView.evaluateJavaScript("window.ide.getState()") { value, _ in
+            let dictionary = value as? [String: Any] ?? [:]
+            completion(ViewState(
+                scrollTop: (dictionary["scrollTop"] as? NSNumber)?.doubleValue ?? 0,
+                text: dictionary["text"] as? String,
+                cursor: Self.cursor(from: dictionary["cursor"])
+            ))
         }
+    }
+
+    private static func cursor(from value: Any?) -> EditorCursor? {
+        guard let dictionary = value as? [String: Any],
+              let line = (dictionary["line"] as? NSNumber)?.intValue, let ch = (dictionary["ch"] as? NSNumber)?.intValue else { return nil }
+        return EditorCursor(line: line, ch: ch)
     }
 
     public func setZoom(_ zoom: Double) {
         self.zoom = zoom
         guard isReady else { return }
         webView.evaluateJavaScript("window.ide.setZoom(\(zoom))")
+    }
+
+    /// 基线到了（异步取的 HEAD 内容）：正在编辑这个文件的话立刻画标记，不用重画整个编辑器。
+    public func setBase(path: String, text: String?) {
+        guard isReady, let data = try? JSONEncoder().encode(["path": path, "base": text]), let json = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.ide.setBase(\(json))")
     }
 
     public func setWrap(_ wrap: Bool) {
@@ -128,8 +171,14 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     }
 
     private func send(_ payload: RenderPayload) {
-        guard let data = try? JSONEncoder().encode(payload), let json = String(data: data, encoding: .utf8) else { return }
-        webView.evaluateJavaScript("window.ide.render(\(json))")
+        guard let data = try? JSONEncoder().encode(payload), let json = String(data: data, encoding: .utf8) else {
+            Log.warn("web", "payload 编码失败")
+            return
+        }
+        Log.info("web", "render \(payload.content.kindName) \(json.utf8.count) 字节")
+        webView.evaluateJavaScript("window.ide.render(\(json))") { _, error in
+            if let error { Log.warn("web", "render 失败：\(error)") }
+        }
     }
 
     /// 页面就绪。didFinish 与 JS 的 ready 消息哪个先到都可以，但只有第一个信号补发。
@@ -138,6 +187,13 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         isReady = true
         if isFirstSignal, zoom != 1 {
             webView.evaluateJavaScript("window.ide.setZoom(\(zoom))")
+        }
+        if isFirstSignal, isRecoveringFromCrash, let onShellReloaded {
+            // 让宿主重画：它手里有最新的草稿；这里存的 lastPayload 是崩溃前上一次渲染的样子
+            isRecoveringFromCrash = false
+            pendingPayload = nil
+            onShellReloaded()
+            return
         }
         guard let payload = pendingPayload ?? (isFirstSignal ? lastPayload : nil) else { return }
         pendingPayload = nil
@@ -173,6 +229,7 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     /// Web 内容进程被系统回收（大文档时会发生）：重新加载页面并恢复当前内容。
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         Log.warn("web", "内容进程被回收，重新加载渲染页")
+        isRecoveringFromCrash = onShellReloaded != nil
         loadShell()
     }
 
@@ -194,6 +251,12 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
             let kind = body["kind"] as? String ?? ""
             if ms >= 300 { Log.warn("web", "渲染 \(kind) 用了 \(ms) ms") }
             onRendered?(kind, ms)
+        case "error":
+            Log.warn("web", "页面脚本出错：\(body["message"] as? String ?? "") @ \(body["where"] as? String ?? "")")
+        case "edited":
+            if let path = body["path"] as? String, let text = body["text"] as? String { onEdited?(path, text) }
+        case "navigate":
+            if let direction = (body["direction"] as? String).flatMap(NavigationDirection.init) { onNavigate?(direction) }
         default:
             break
         }
@@ -201,6 +264,10 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
 }
 
 /// 把 `ContentRenderer` 的 WKWebView 放进 SwiftUI 层级。视图是壳、渲染器是本体。
+///
+/// 返回的是自己的容器，WebView 挂在容器里，而不是直接把共用的 WebView 交给 SwiftUI：切项目时 `ProjectContent` 换了身份，
+/// 新的 representable 先把 WebView 搬走、旧的随后拆卸时会再把它从父视图里摘掉——同一个 NSView 被两边争，正文就空了。
+/// 容器各是各的，拆旧容器不影响新容器；`updateNSView` 再核对一次归属，被摘走了就挂回来。
 public struct ContentWebView: NSViewRepresentable {
     private let renderer: ContentRenderer
 
@@ -208,6 +275,23 @@ public struct ContentWebView: NSViewRepresentable {
         self.renderer = renderer
     }
 
-    public func makeNSView(context: Context) -> NSView { renderer.webView }
-    public func updateNSView(_ nsView: NSView, context: Context) {}
+    public func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        attach(to: container)
+        return container
+    }
+
+    public func updateNSView(_ container: NSView, context: Context) {
+        // 只在 WebView 无家可归（所在容器已被拆下窗口）时才挂回来；它正在另一个活着的容器里就别抢——两个容器互抢会来回跳
+        let webView = renderer.webView
+        if webView.superview !== container, webView.window == nil { attach(to: container) }
+    }
+
+    private func attach(to container: NSView) {
+        let webView = renderer.webView
+        webView.removeFromSuperview()
+        webView.frame = container.bounds
+        webView.autoresizingMask = [.width, .height]
+        container.addSubview(webView)
+    }
 }

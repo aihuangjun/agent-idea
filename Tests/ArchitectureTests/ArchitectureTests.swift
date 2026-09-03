@@ -84,6 +84,32 @@ private func imports(in file: URL) throws -> Set<String> {
     #expect(updater.contains("/AgentIDEA.app\"") && script.contains(".build/AgentIDEA.app \"$STAGE/\""))
 }
 
+/// CodeMirror 的 mode 列表有三份手抄（index.html 的 <script>、vendor 目录、fetch_vendor.sh），必须一致；
+/// Core 的语言表里每个 highlight.js 语言名要么在 render.js 的 CM_MODES 里、要么明确列在「按纯文本编辑」的名单里。
+@Test func codeMirrorModesAgreeAcrossFiles() throws {
+    let web = packageRoot.appendingPathComponent("Sources/DesignSystem/Resources/web")
+    let html = try String(contentsOf: web.appendingPathComponent("index.html"), encoding: .utf8)
+    let referenced = Set(html.matches(of: #/vendor\/codemirror\/mode\/([a-z]+)\.js/#).map { String($0.1) })
+    let vendored = Set(try FileManager.default.contentsOfDirectory(atPath: web.appendingPathComponent("vendor/codemirror/mode").path)
+        .filter { $0.hasSuffix(".js") }.map { String($0.dropLast(3)) })
+    #expect(referenced == vendored, "index.html 引用的 mode 与 vendor 目录里的不一致：\(referenced.symmetricDifference(vendored))")
+    let script = try String(contentsOf: packageRoot.appendingPathComponent("scripts/fetch_vendor.sh"), encoding: .utf8)
+    let fetched = script.firstMatch(of: #/for mode in ([a-z ]+); do/#).map { Set($0.1.split(separator: " ").map(String.init)) } ?? []
+    #expect(fetched == vendored, "fetch_vendor.sh 的 mode 列表与 vendor 目录不一致：\(fetched.symmetricDifference(vendored))")
+
+    let render = try String(contentsOf: web.appendingPathComponent("render.js"), encoding: .utf8)
+    let modesBlock = try #require(render.firstMatch(of: #/const CM_MODES = \{(.*?)\};/#.dotMatchesNewlines()).map { String($0.1) })
+    let cmLanguages = Set(modesBlock.matches(of: #/(?:^|[\s{,])([a-z]+):/#).map { String($0.1) })
+    let language = try String(contentsOf: packageRoot.appendingPathComponent("Sources/Core/Language.swift"), encoding: .utf8)
+    let highlightIDs = Set(language.matches(of: #/add\(\[[^\]]*\], "[^"]*", "([^"]+)"\)/#).map { String($0.1) }
+        + language.matches(of: #/highlightID: "([^"]+)"/#).map { String($0.1) })
+    // 这些语言 CodeMirror 5 没有现成的 mode（或不值得多带一个文件），按纯文本编辑
+    let plainTextEdited: Set<String> = ["makefile", "graphql", "vbnet", "wasm", "nix", "elixir", "erlang", "haskell", "clojure", "zig"]
+    let unmapped = highlightIDs.subtracting(cmLanguages).subtracting(plainTextEdited)
+    #expect(unmapped.isEmpty, "这些语言既没有 CodeMirror mode 也没登记为纯文本编辑：\(unmapped.sorted())")
+    #expect(plainTextEdited.isDisjoint(with: cmLanguages), "已经有 mode 的语言不该还在纯文本名单里")
+}
+
 @Test func themeAndStylesheetShareColors() throws {
     let theme = try String(contentsOf: packageRoot.appendingPathComponent("Sources/DesignSystem/Theme.swift"), encoding: .utf8)
     let css = try String(contentsOf: packageRoot.appendingPathComponent("Sources/DesignSystem/Resources/web/style.css"), encoding: .utf8)

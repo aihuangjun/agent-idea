@@ -20,6 +20,11 @@ public enum AppPaths {
         configurationDirectory.appendingPathComponent("recent.json")
     }
 
+    /// `~/.agentidea/run/`：「在终端中运行」生成的包装脚本。
+    public static var runDirectory: URL {
+        configurationDirectory.appendingPathComponent("run", isDirectory: true)
+    }
+
     /// `~/.agentidea/github_token`：检查更新时访问私有仓库用的 token（可选）。
     public static var gitHubTokenFile: URL {
         configurationDirectory.appendingPathComponent("github_token")

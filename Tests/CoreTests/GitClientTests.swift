@@ -70,6 +70,7 @@ import TestSupport
         try await run(["config", "user.name", "t"])
         try "a\nb\n".write(to: directory.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
         try ".build/\n".write(to: directory.appendingPathComponent(".gitignore"), atomically: true, encoding: .utf8)
+        try "d".write(to: directory.appendingPathComponent("d.txt"), atomically: true, encoding: .utf8)
         try await run(["add", "."])
         try await run(["commit", "-q", "-m", "init"])
         try "a\nc\n".write(to: directory.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
@@ -90,19 +91,75 @@ import TestSupport
         #expect(modified.addedCount == 1 && modified.removedCount == 1)
         let untracked = UnifiedDiffParser.parse(try await git.diff(change: GitChange(path: "n.txt", kind: .untracked), repositoryRoot: directory))
         #expect(untracked.addedCount == 1 && untracked.oldPath == nil)
+
+        // 回归：Agent 已经 git mv / git rm 过的东西也要能提交——原路径既不在磁盘也不在索引里，
+        // 0.2.1 之前一股脑 `add -A` 会报 pathspec did not match
+        try await run(["mv", "f.txt", "g.txt"])
+        try await run(["rm", "-q", "d.txt"])
+        let staged = try await git.snapshot(repositoryRoot: directory)
+        let renamed = staged.changes.first { $0.kind == .renamed }
+        #expect(renamed?.path == "g.txt" && renamed?.originalPath == "f.txt")
+        #expect(staged.changes.first { $0.path == "d.txt" }?.kind == .deleted)
+        let paths = staged.changes.map(\.path) + staged.changes.compactMap(\.originalPath)
+        let result = try await git.commit(paths: paths, message: "move", repositoryRoot: directory)
+        #expect(result.fileCount == 4)
+        let after = try await git.snapshot(repositoryRoot: directory)
+        #expect(after.changes.isEmpty)
+        #expect(after.branch.headOID != snapshot.branch.headOID)
+
+        // HEAD 里的内容当编辑器变更标记的基线；HEAD 里没有的文件是 nil
+        #expect(await git.headContent(path: "g.txt", repositoryRoot: directory) == "a\nc\n")
+        #expect(await git.headContent(path: "nope.txt", repositoryRoot: directory) == nil)
+
+        // 回滚刚才那次提交里对 d.txt 的删除：文件回到工作区，成为一条未跟踪变更（只动工作区）
+        let commits = try await git.log(repositoryRoot: directory, limit: 1)
+        let latest = try #require(commits.first)
+        let deleted = try #require(try await git.changedFiles(in: latest, repositoryRoot: directory).first { $0.path == "d.txt" })
+        try await git.revert(change: deleted, in: latest, repositoryRoot: directory)
+        #expect(try String(contentsOf: directory.appendingPathComponent("d.txt"), encoding: .utf8) == "d")
+        let reverted = try await git.snapshot(repositoryRoot: directory)
+        #expect(reverted.changes.map(\.path) == ["d.txt"])
     }
 }
 
 @Test func commitAndPushArguments() async throws {
-    let repo = URL(fileURLWithPath: "/repo")
-    let runner = FakeCommandRunner(responses: [shellOutput(""), shellOutput(""), shellOutput("abc1234\n"), shellOutput("ok")])
-    let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
-    let result = try await git.commit(paths: ["b.txt", "a.txt", "a.txt"], message: "msg", repositoryRoot: repo)
-    #expect(result == GitClient.CommitResult(shortHash: "abc1234", fileCount: 2))
-    #expect(runner.calls[0].arguments == ["add", "-A", "--", "a.txt", "b.txt"])
-    #expect(runner.calls[1].arguments == ["commit", "--quiet", "--only", "-m", "msg", "--", "a.txt", "b.txt"])
-    _ = try await git.push(repositoryRoot: repo, hasUpstream: false)
-    #expect(runner.calls[3].arguments == ["push", "--porcelain", "-u", "origin", "HEAD"])
+    try await withTemporaryDirectory { repo in
+        try "a".write(to: repo.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try "b".write(to: repo.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        let runner = FakeCommandRunner(responses: [shellOutput(""), shellOutput(""), shellOutput("abc1234\n"), shellOutput("ok")])
+        let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
+        let result = try await git.commit(paths: ["b.txt", "a.txt", "a.txt"], message: "msg", repositoryRoot: repo)
+        #expect(result == GitClient.CommitResult(shortHash: "abc1234", fileCount: 2))
+        #expect(runner.calls[0].arguments == ["add", "-A", "--", "a.txt", "b.txt"])
+        #expect(runner.calls[1].arguments == ["commit", "--quiet", "--only", "-m", "msg", "--", "a.txt", "b.txt"])
+        _ = try await git.push(repositoryRoot: repo, hasUpstream: false)
+        #expect(runner.calls[3].arguments == ["push", "--porcelain", "-u", "origin", "HEAD"])
+    }
+}
+
+/// 磁盘上已经没有的路径（删除、重命名的原路径）不能交给 `add`——已暂存时 pathspec 什么都匹配不到，git 直接报错。
+@Test func commitStagesMissingPathsWithRmCached() async throws {
+    try await withTemporaryDirectory { repo in
+        try "new".write(to: repo.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+        // 目标失效的符号链接也算「在」：lstat 看得到它
+        try FileManager.default.createSymbolicLink(at: repo.appendingPathComponent("link"), withDestinationURL: repo.appendingPathComponent("nowhere"))
+        let runner = FakeCommandRunner(responses: [shellOutput(""), shellOutput(""), shellOutput(""), shellOutput("abc1234\n")])
+        let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
+        _ = try await git.commit(paths: ["new.txt", "old.txt", "gone.txt", "link"], message: "msg", repositoryRoot: repo)
+        #expect(runner.calls[0].arguments == ["add", "-A", "--", "link", "new.txt"])
+        #expect(runner.calls[1].arguments == ["rm", "--cached", "--ignore-unmatch", "--quiet", "--", "gone.txt", "old.txt"])
+        #expect(runner.calls[2].arguments == ["commit", "--quiet", "--only", "-m", "msg", "--", "gone.txt", "link", "new.txt", "old.txt"])
+    }
+}
+
+/// 只有磁盘上没有的路径时不跑 `add`（`add -A --` 后面没有 pathspec 会把整个仓库都加进去）。
+@Test func commitSkipsAddWhenNothingPresent() async throws {
+    try await withTemporaryDirectory { repo in
+        let runner = FakeCommandRunner(responses: [shellOutput(""), shellOutput(""), shellOutput("abc1234\n")])
+        let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
+        _ = try await git.commit(paths: ["gone.txt"], message: "msg", repositoryRoot: repo)
+        #expect(runner.calls.map(\.arguments.first) == ["rm", "commit", "rev-parse"])
+    }
 }
 
 @Test func gitEnvironmentNeverPromptsAndUsesLoginShell() {
@@ -129,6 +186,37 @@ import TestSupport
     #expect(runner.calls[0].arguments == ["restore", "--source=HEAD", "--staged", "--worktree", "--", "new.swift", "old.swift"])
     try await git.removeAdded(path: "a.txt", repositoryRoot: repo)
     #expect(runner.calls[1].arguments == ["rm", "-f", "-q", "--", "a.txt"])
+}
+
+/// 回滚历史里的一个变更：拿那次提交的补丁反向 apply；补丁走临时文件，用完删掉。
+@Test func revertAppliesReversePatchFromTemporaryFile() async throws {
+    let repo = URL(fileURLWithPath: "/repo")
+    let patchSeen = Locked<String?>(nil)
+    let patchFile = Locked<String?>(nil)
+    let runner = FakeCommandRunner { arguments, _ in
+        if arguments.first == "diff" { return shellOutput("diff --git a/x b/x\n") }
+        if arguments.first == "apply", let file = arguments.last {
+            patchFile.value = file
+            patchSeen.value = try? String(contentsOfFile: file, encoding: .utf8)
+        }
+        return shellOutput("")
+    }
+    let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
+    let commit = GitCommit(hash: "abc", shortHash: "abc", parents: ["p1"], authorName: "", authorEmail: "", date: Date(), subject: "", body: "")
+    try await git.revert(change: GitChange(path: "x", originalPath: "old", kind: .renamed), in: commit, repositoryRoot: repo)
+    #expect(runner.calls[0].arguments == ["diff", "--binary", "--no-color", "--no-ext-diff", "--find-renames", "p1", "abc", "--", "x", "old"])
+    #expect(runner.calls[1].arguments.prefix(3) == ["apply", "--reverse", "--whitespace=nowarn"])
+    #expect(patchSeen.value == "diff --git a/x b/x\n")
+    #expect(patchFile.value.map { !FileManager.default.fileExists(atPath: $0) } == true, "临时补丁用完要删")
+
+    // 没有补丁（这次提交没改这个文件）：报错而不是假装成功
+    let empty = FakeCommandRunner(responses: [shellOutput("")])
+    await #expect(throws: GitClient.GitRevertError.nothingToRevert) {
+        try await GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: empty)
+            .revert(change: GitChange(path: "x", kind: .modified), in: commit, repositoryRoot: repo)
+    }
+    #expect(empty.calls.count == 1)
+    #expect(GitClient.GitRevertError.nothingToRevert.userFacingDescription.contains("没有可回滚"))
 }
 
 @Test func cancelledCommandThrowsCancellationError() async throws {

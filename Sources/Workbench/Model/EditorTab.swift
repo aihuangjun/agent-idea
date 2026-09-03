@@ -1,7 +1,8 @@
 import Core
+import DesignSystem
 import Foundation
 
-/// 编辑区的一个标签。**只读**——这个应用不编辑文件。
+/// 编辑区的一个标签。文件标签可以编辑（未保存的文本放在 `ProjectSession.drafts`，不在这里）；diff 标签只读。
 struct EditorTab: Identifiable, Equatable {
     enum Kind: Equatable {
         case file(URL)
@@ -17,8 +18,10 @@ struct EditorTab: Identifiable, Equatable {
     var isPreview: Bool
     /// 切走时记下的滚动位置，切回来恢复。
     var scrollTop: Double = 0
-    /// Markdown 标签：看渲染结果还是看源码。
-    var markdownShowsSource = false
+    /// 切走时记下的光标位置（只有编辑器才有）。
+    var cursor: EditorCursor?
+    /// Markdown 标签：看渲染结果、看源码，还是分栏。
+    var markdownView: MarkdownView = .preview
 
     init(kind: Kind, isPreview: Bool) {
         self.kind = kind
@@ -31,7 +34,13 @@ struct EditorTab: Identifiable, Equatable {
     }
 
     /// 标签 id 的拼法只在这几处：别处要按内容找标签时用它们，不要临时构造一个 EditorTab。
+    /// 文件标签的 id 同时也是「文档 id」：diff 标签编辑的文件与文件标签共用同一份内容、基线、草稿。
     static func id(forFile url: URL) -> String { "file:" + url.path }
+    /// 从文档 id 反推文件 URL。
+    static func fileURL(fromID id: String) -> URL? {
+        guard id.hasPrefix("file:") else { return nil }
+        return URL(fileURLWithPath: String(id.dropFirst(5)))
+    }
     static func id(forDiff change: GitChange) -> String { "diff:" + change.path }
     static func id(forCommit commit: GitCommit, change: GitChange) -> String { "commit:" + commit.hash + ":" + change.path }
 
@@ -79,6 +88,8 @@ enum TabContent: Equatable {
     case binary(sizeBytes: Int)
     case tooLarge(sizeBytes: Int, limit: Int)
     case diff(FileDiff, language: Language)
+    /// 可编辑的工作区 diff：两份全文由编辑器自己比。文件本身的内容在 `contents[documentID]`（与文件标签共用）。
+    case editableDiff(documentID: String)
     case message(title: String, detail: String)
 
     /// 状态栏右侧那几格。
@@ -103,6 +114,32 @@ enum TabContent: Equatable {
         switch self {
         case .code(_, _, _, _, let modified), .markdown(_, _, _, let modified): return modified
         default: return nil
+        }
+    }
+
+    /// 文本内容（代码 / Markdown）；其它种类为 nil。
+    var text: String? {
+        switch self {
+        case .code(let text, _, _, _, _), .markdown(let text, _, _, _): return text
+        default: return nil
+        }
+    }
+
+    /// 读进来时用的编码名，保存时按它编回去。
+    var encodingName: String? {
+        switch self {
+        case .code(_, _, let encoding, _, _), .markdown(_, let encoding, _, _): return encoding
+        default: return nil
+        }
+    }
+
+    /// 保存之后：同一份内容换上新文本与磁盘上的修改时间。
+    func replacingText(_ text: String, modified: Date?) -> TabContent {
+        let lines = TextFileLoader.lineCount(of: text)
+        switch self {
+        case .code(_, let language, let encoding, _, _): return .code(text: text, language: language, encoding: encoding, lineCount: lines, modified: modified)
+        case .markdown(_, let encoding, _, _): return .markdown(text: text, encoding: encoding, lineCount: lines, modified: modified)
+        default: return self
         }
     }
 

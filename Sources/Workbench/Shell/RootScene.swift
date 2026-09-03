@@ -56,6 +56,13 @@ public struct AgentIDEARootScene: Scene {
                     }
                 }
                 Divider()
+                Button("保存") { workbench.active?.saveActiveTab() }
+                    .keyboardShortcut("s", modifiers: .command)
+                    .disabled(!(workbench.active.flatMap { session in session.activeTab.map(session.isModified) } ?? false))
+                Button("全部保存") { workbench.saveAll() }
+                    .keyboardShortcut("s", modifiers: [.command, .option])
+                    .disabled(workbench.sessions.allSatisfy { $0.drafts.isEmpty })
+                Divider()
                 Button("关闭标签") { workbench.active?.closeActiveTab() }
                     .keyboardShortcut("w", modifiers: .command)
                     .disabled(workbench.active?.activeTab == nil)
@@ -78,11 +85,18 @@ public struct AgentIDEARootScene: Scene {
                     workbench.toolWindow = .project
                     workbench.active?.search.activate()
                 }
-                .keyboardShortcut("o", modifiers: [.command, .shift])
+                .keyboardShortcut("f", modifiers: .command)
                 .disabled(workbench.active == nil)
                 Button("在项目视图中定位当前文件") { workbench.active?.revealActiveTab() }
                     .keyboardShortcut("l", modifiers: [.command, .option])
                     .disabled(workbench.active?.activeTab == nil)
+                Divider()
+                Button("后退") { workbench.active?.goBack() }
+                    .keyboardShortcut(.leftArrow, modifiers: .option)
+                    .disabled(!(workbench.active?.canGoBack ?? false))
+                Button("前进") { workbench.active?.goForward() }
+                    .keyboardShortcut(.rightArrow, modifiers: .option)
+                    .disabled(!(workbench.active?.canGoForward ?? false))
                 Divider()
                 Button("刷新") { workbench.active?.refreshAll() }
                     .keyboardShortcut("r", modifiers: .command)
@@ -103,7 +117,7 @@ public struct AgentIDEARootScene: Scene {
                 Button(workbench.preferences.diffMode == .sideBySide ? "diff：切到单列视图" : "diff：切到并排视图") {
                     workbench.preferences.diffMode = workbench.preferences.diffMode == .sideBySide ? .unified : .sideBySide
                 }
-                Button("Markdown：预览 / 源码") { workbench.active?.toggleMarkdownSource() }
+                Button("Markdown：预览 / 源码 / 分栏") { workbench.active?.cycleMarkdownView() }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
             }
             CommandMenu("Git") {
@@ -170,6 +184,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let urls = pending
         pending = []
         for url in urls { workbench.openProject(url) }
+    }
+
+    /// 切到别的应用、退出：把没保存的都写回去（IDEA 的自动保存时机）。
+    func applicationDidResignActive(_ notification: Notification) {
+        MainActor.assumeIsolated { workbench?.saveAll() }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        MainActor.assumeIsolated { workbench?.saveAll() }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

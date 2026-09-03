@@ -52,6 +52,16 @@ enum FileContentLoader {
         }
     }
 
+    /// 可编辑的工作区 diff：左边基线（HEAD），右边文档（含草稿）。
+    static func editableDiff(change: GitChange, document: TabContent, draft: String?, base: String?, filePath: String, cursor: EditorCursor?, mode: DiffViewMode) -> RenderPayload.Content {
+        let language = Language.forFile(named: change.fileName)
+        return .diff(
+            path: change.path, language: language.highlightID,
+            diff: FileDiff(oldPath: nil, newPath: change.path, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+            edit: DiffEdit(oldText: base ?? "", newText: draft ?? document.text ?? "", filePath: filePath, cursor: cursor)
+        )
+    }
+
     /// 开着的内容与磁盘上的是否已经对不上。
     static func isStale(_ content: TabContent, modifiedOnDisk: Date?, exists: Bool) -> Bool {
         switch content {
@@ -65,19 +75,19 @@ enum FileContentLoader {
 }
 
 extension TabContent {
-    /// 这份内容在 WebView 里怎么画。
-    func renderContent(for tab: EditorTab, diffMode: DiffViewMode) -> RenderPayload.Content {
+    /// 这份内容在 WebView 里怎么画。`draft` 是还没保存的文本（有就画它）；`editable` 决定用编辑器还是只读视图。
+    func renderContent(for tab: EditorTab, diffMode: DiffViewMode, draft: String? = nil, editable: Bool = false, base: String? = nil) -> RenderPayload.Content {
         let path = tab.fileURL?.path ?? tab.diffChange?.path ?? ""
         switch self {
         case .loading:
             return .message(title: "", detail: "")
         case .code(let text, let language, _, _, _):
-            return .code(path: path, text: text, language: language.highlightID)
+            return .code(path: path, text: draft ?? text, language: language.highlightID, editable: editable, cursor: tab.cursor, base: base)
         case .markdown(let text, _, _, _):
             return .markdown(
-                path: path, markdown: text,
+                path: path, markdown: draft ?? text,
                 documentDirectory: tab.fileURL?.deletingLastPathComponent() ?? URL(fileURLWithPath: "/"),
-                showsSource: tab.markdownShowsSource
+                view: tab.markdownView, editable: editable, cursor: tab.cursor, base: base
             )
         case .image(let url, let size):
             return .image(path: url.path, url: url, sizeText: Self.byteCount(size))
@@ -88,6 +98,9 @@ extension TabContent {
         case .diff(let diff, let language):
             let emptyReason = diff.isEmpty && tab.diffChange?.kind == .untracked ? "这是一个空文件。" : nil
             return .diff(path: path, language: language.highlightID, diff: diff, mode: diffMode, emptyReason: emptyReason)
+        case .editableDiff:
+            // 要文档内容才画得出来，由 ProjectSession.renderActiveTab 走 editableDiff(change:document:…)
+            return .message(title: "", detail: "")
         case .message(let title, let detail):
             return .message(title: title, detail: detail)
         }

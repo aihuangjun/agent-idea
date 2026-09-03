@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Core
 import DesignSystem
 import Foundation
@@ -47,6 +48,8 @@ final class WorkbenchModel: ObservableObject {
     private let defaults: UserDefaults
     private let recentStore: JSONFileStore<[RecentProject]>
     private var preferenceObservation: Task<Void, Never>?
+    /// 当前会话一变（草稿、标签、导航）就把 workbench 的变化也发出去：菜单项的启用状态只观察 workbench。
+    private var activeSessionObservation: AnyCancellable?
 
     var active: ProjectSession? {
         guard let activeSessionID else { return nil }
@@ -72,6 +75,17 @@ final class WorkbenchModel: ObservableObject {
         self.renderer.onOpenPath = { [weak self] path in
             self?.active?.openFile(URL(fileURLWithPath: path), pinned: false)
         }
+        // 编辑器只画当前项目的标签，改动也只可能是它的
+        self.renderer.onEdited = { [weak self] path, text in
+            self?.active?.applyEdit(path: path, text: text)
+        }
+        self.renderer.onShellReloaded = { [weak self] in self?.active?.renderActiveTab() }
+        self.renderer.onNavigate = { [weak self] direction in
+            switch direction {
+            case .back: self?.active?.goBack()
+            case .forward: self?.active?.goForward()
+            }
+        }
         observePreferences()
     }
 
@@ -87,7 +101,8 @@ final class WorkbenchModel: ObservableObject {
                 guard !Task.isCancelled else { return }
                 if preferences.diffMode != lastDiffMode {
                     lastDiffMode = preferences.diffMode
-                    active?.renderActiveTab()
+                    // 只有 diff 标签关心这个；先把编辑器里的状态要回来再重画（可编辑的 diff 也是编辑器）
+                    if active?.activeTab?.isDiff == true { active?.rerenderActiveTab() }
                 }
                 if preferences.wordWrap != lastWrap {
                     lastWrap = preferences.wordWrap
@@ -139,6 +154,7 @@ final class WorkbenchModel: ObservableObject {
         active?.setActive(false)
         activeSessionID = sessionID
         next.setActive(true)
+        activeSessionObservation = next.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
         saveOpenProjects()
     }
 
@@ -149,6 +165,7 @@ final class WorkbenchModel: ObservableObject {
         if activeSessionID == id {
             session.setActive(false)
             activeSessionID = nil
+            activeSessionObservation = nil
             if let next = sessions.indices.contains(index) ? sessions[index] : sessions.last {
                 activate(next.id)
             } else {
@@ -156,6 +173,11 @@ final class WorkbenchModel: ObservableObject {
             }
         }
         saveOpenProjects()
+    }
+
+    /// 所有项目里没保存的都写回磁盘（切到别的应用、退出时调，IDEA 也是这两个时机自动保存）。
+    func saveAll() {
+        for session in sessions { session.saveAll() }
     }
 
     func selectNextProject(offset: Int) {

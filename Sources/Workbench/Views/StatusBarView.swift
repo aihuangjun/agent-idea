@@ -35,10 +35,8 @@ struct StatusBarView: View {
                 Button { session.dismissBanner() } label: { Image(systemName: "xmark").font(.system(size: 9)) }.buttonStyle(.plain)
             }
             Spacer()
-            if let content = session.activeContent {
-                ForEach(Array(content.statusSummary.enumerated()), id: \.offset) { _, item in
-                    Text(item)
-                }
+            ForEach(Array(session.activeStatusSummary.enumerated()), id: \.offset) { _, item in
+                Text(item)
             }
             if preferences.zoom != 1 {
                 Button { preferences.resetZoom() } label: { Text("\(Int((preferences.zoom * 100).rounded()))%") }

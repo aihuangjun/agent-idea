@@ -187,6 +187,11 @@ private struct CommitDetails: View {
                 .padding(.horizontal, 10).padding(.vertical, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if let status = history.status {
+                StatusLine(status: status) { history.dismissStatus() }
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
+            }
         }
         .background(Theme.panel)
         .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
@@ -201,7 +206,7 @@ private struct CommitDetails: View {
                 Text("\(files.count) 个文件").font(Theme.smallFont).foregroundStyle(Theme.mutedText)
                 LazyVStack(spacing: 0) {
                     ForEach(files) { change in
-                        CommitFileRow(session: session, clicks: clicks, commit: commit, change: change,
+                        CommitFileRow(session: session, history: history, clicks: clicks, commit: commit, change: change,
                                       isActive: session.activeTab?.commitDiff.map { $0.commit.id == commit.id && $0.change.path == change.path } ?? false)
                     }
                 }
@@ -218,43 +223,22 @@ private struct CommitDetails: View {
     }
 }
 
-/// 提交里的一个文件：单击预览 diff，双击固定。
+/// 提交里的一个文件：单击预览 diff，双击固定，右键可以把这个变更回滚到工作区。
 private struct CommitFileRow: View {
     let session: ProjectSession
+    let history: HistoryController
     let clicks: DoubleClickDetector
     let commit: GitCommit
     let change: GitChange
     let isActive: Bool
     @State private var isHovering = false
-
-    private var fileName: some View {
-        Text(change.fileName)
-            .font(Theme.uiFont)
-            .foregroundStyle(VCSColors.color(for: change.kind))
-            .strikethrough(change.kind == .deleted)
-            .lineLimit(1)
-            .truncationMode(.tail)
-    }
+    @State private var pendingRevert: DestructiveConfirmation?
 
     var body: some View {
         let icon = FileIcon.file(named: change.fileName)
         HStack(spacing: 6) {
             Image(systemName: icon.systemName).font(.system(size: 12)).foregroundStyle(icon.color).frame(width: 16)
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 6) {
-                    fileName
-                    if !change.directory.isEmpty {
-                        Text(change.directory).font(Theme.smallFont).foregroundStyle(Theme.mutedText).lineLimit(1).fixedSize()
-                    }
-                }
-                fileName
-            }
-            Spacer(minLength: 4)
-            Text(change.kind.label)
-                .font(.system(size: 10))
-                .foregroundStyle(VCSColors.color(for: change.kind).opacity(0.85))
-                .fixedSize()
-                .layoutPriority(2)
+            ChangeFileLabel(change: change)
         }
         .padding(.horizontal, 10)
         .frame(height: Theme.treeRowHeight)
@@ -272,6 +256,24 @@ private struct CommitFileRow: View {
                 Button("打开文件（当前版本）") { session.openFile(url, pinned: true) }
                 Button("在项目视图中显示") { session.reveal(url) }
             }
+            Divider()
+            Button("回滚这个变更…") {
+                pendingRevert = DestructiveConfirmation(
+                    id: "revert:" + commit.hash + ":" + change.path,
+                    title: "回滚 \(change.fileName) 在 \(commit.shortHash) 里的变更？",
+                    message: revertExplanation,
+                    buttonTitle: "回滚"
+                ) { history.revert(change, in: commit) }
+            }
+        }
+        .destructiveConfirmation($pendingRevert)
+    }
+
+    private var revertExplanation: String {
+        switch change.kind {
+        case .added: return "这次提交新增了这个文件，回滚会把它从工作区删掉。改动只在工作区，不会产生提交。"
+        case .deleted: return "这次提交删掉了这个文件，回滚会把它恢复到工作区。改动只在工作区，不会产生提交。"
+        default: return "会把这次提交对它的改动反向打回工作区，不产生提交。之后又改过同一处的话会失败。"
         }
     }
 }

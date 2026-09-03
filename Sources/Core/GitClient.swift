@@ -2,8 +2,9 @@ import Foundation
 
 /// 用系统 git 命令操作仓库。
 ///
-/// 读：仓库根、status、diff。写只有三类，都是用户在界面上明确点出来的：
-/// 提交（`add` + `commit --only`）、推送、回滚（`restore` / `rm`）。除此之外不碰仓库。
+/// 读：仓库根、status、diff、log。写只有几类，都是用户在界面上明确点出来的：
+/// 提交（`add` / `rm --cached` + `commit --only`）、推送、回滚工作区变更（`restore` / `rm`）、
+/// 反向打回历史提交里的一个变更（`apply --reverse`）。除此之外不碰仓库。
 public struct GitClient: Sendable {
     public static let searchPaths = ["/usr/local/bin/git", "/opt/homebrew/bin/git", "/usr/bin/git"]
 
@@ -100,6 +101,14 @@ public struct GitClient: Sendable {
         return output.text
     }
 
+    /// 一个文件在 HEAD 里的内容（编辑器的 gutter 变更标记拿它当基线）。HEAD 里没有这个文件（未跟踪、新增、还没提交）返回 nil。
+    public func headContent(path: String, repositoryRoot: URL) async -> String? {
+        guard let output = try? await run(["show", "HEAD:" + path], in: repositoryRoot) else { return nil }
+        // 与读工作区文件同一套猜编码（GB18030 的老文件也要能比），二进制的没有基线
+        if case .text(let text, _, _) = TextFileLoader.decode(output.standardOutput) { return text }
+        return nil
+    }
+
     // MARK: - 提交历史
 
     /// 当前分支的提交，新的在前。`skip` 用来翻页。仓库还没有提交时返回空数组。
@@ -125,6 +134,30 @@ public struct GitClient: Sendable {
         return try await run(arguments, in: repositoryRoot, acceptable: [0, 1]).text
     }
 
+    /// 回滚某次提交里的一个文件变更（IDEA 历史里的 Revert Selected Changes）：
+    /// 取出那次提交对这个文件的补丁，反向打到工作区。新增的文件会被删掉，删掉的会回来，改动会撤销。
+    ///
+    /// 只动工作区、不动索引，也不产生提交——回滚完就是一条普通的工作区变更，用户看过 diff 再决定提不提交。
+    /// 工作区在那之后又改过同一处的话 `apply` 会失败，错误原样显示。
+    public func revert(change: GitChange, in commit: GitCommit, repositoryRoot: URL) async throws {
+        var arguments = ["diff", "--binary", "--no-color", "--no-ext-diff", "--find-renames", commit.diffBase, commit.hash, "--", change.path]
+        if let original = change.originalPath { arguments.append(original) }
+        let patch = try await run(arguments, in: repositoryRoot, acceptable: [0, 1]).standardOutput
+        guard !patch.isEmpty else { throw GitRevertError.nothingToRevert }
+        // apply 只认文件或 stdin，我们不开 stdin，写个临时文件
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("agentidea-revert-\(UUID().uuidString).patch")
+        try patch.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        _ = try await run(["apply", "--reverse", "--whitespace=nowarn", file.path], in: repositoryRoot)
+    }
+
+    public enum GitRevertError: Error, LocalizedError, Equatable {
+        /// 这次提交对这个文件没有可打回去的补丁（比如只改了模式、或列表过期了）。
+        case nothingToRevert
+
+        public var errorDescription: String? { "这次提交没有改这个文件，没有可回滚的内容" }
+    }
+
     // MARK: - 写操作（提交与推送）
 
     /// 提交结果。
@@ -140,16 +173,46 @@ public struct GitClient: Sendable {
 
     /// 把选中的路径暂存并提交。
     ///
-    /// 分两步：`add -A -- <paths>` 让新增、修改、删除都进索引；再 `commit --only -- <paths>`，
-    /// 只提交这些路径——用户之前在终端里 `git add` 过的别的东西不会被顺手带进去。
+    /// 先把路径按「磁盘上还在不在」分两拨暂存，再 `commit --only -- <paths>` 只提交这些路径——
+    /// 用户之前在终端里 `git add` 过的别的东西不会被顺手带进去。
+    ///
+    /// - 磁盘上有的：`add -A --`，新增、修改都进索引。
+    /// - 磁盘上没有的（工作区删除、已暂存的删除、重命名的原路径）：`rm --cached --ignore-unmatch --`。
+    ///   不能一股脑交给 `add -A`：pathspec 既不在磁盘也不在索引里时（Agent 已经 `git mv` / `git rm` 过），
+    ///   `add` 会报 `pathspec '…' did not match any files` 直接失败；`rm --ignore-unmatch` 对这种情况静默跳过，
+    ///   对「删了文件还没暂存」的则正好把删除记进索引。
     public func commit(paths: [String], message: String, repositoryRoot: URL) async throws -> CommitResult {
         precondition(!paths.isEmpty, "没有要提交的路径")
         let unique = Array(Set(paths)).sorted()
-        _ = try await run(["add", "-A", "--"] + unique, in: repositoryRoot)
+        let (present, missing) = Self.partitionByPresence(unique, repositoryRoot: repositoryRoot)
+        if !present.isEmpty {
+            _ = try await run(["add", "-A", "--"] + present, in: repositoryRoot)
+        }
+        if !missing.isEmpty {
+            _ = try await run(["rm", "--cached", "--ignore-unmatch", "--quiet", "--"] + missing, in: repositoryRoot)
+        }
         _ = try await run(["commit", "--quiet", "--only", "-m", message, "--"] + unique, in: repositoryRoot)
         let hash = try await run(["rev-parse", "--short", "HEAD"], in: repositoryRoot).text
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return CommitResult(shortHash: hash, fileCount: unique.count)
+    }
+
+    /// 把路径分成「磁盘上有」与「磁盘上没有」两组，顺序保持。
+    ///
+    /// 用 `attributesOfItem`（lstat）而不是 `fileExists`：后者会跟着符号链接走，一个目标失效的链接会被当成不存在，
+    /// 进了 `rm --cached` 那一组就把好端端的链接从索引里删了。
+    static func partitionByPresence(_ paths: [String], repositoryRoot: URL, fileManager: FileManager = .default) -> (present: [String], missing: [String]) {
+        var present: [String] = []
+        var missing: [String] = []
+        for path in paths {
+            let absolute = repositoryRoot.appendingPathComponent(path).path
+            if (try? fileManager.attributesOfItem(atPath: absolute)) != nil {
+                present.append(path)
+            } else {
+                missing.append(path)
+            }
+        }
+        return (present, missing)
     }
 
     /// 回滚：把这些路径恢复到 HEAD 的样子（索引与工作区一起）。重命名要把新旧路径都传进来。

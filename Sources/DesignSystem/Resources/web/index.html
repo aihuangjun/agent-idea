@@ -9,6 +9,9 @@
       content="default-src 'self'; img-src 'self' file: https: data:; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'">
 <title>Agent IDEA</title>
 <link rel="stylesheet" href="hljs-idea-dark.css">
+<link rel="stylesheet" href="vendor/codemirror/codemirror.css">
+<link rel="stylesheet" href="vendor/codemirror/merge.css">
+<link rel="stylesheet" href="cm-idea-dark.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -16,6 +19,44 @@
 <script src="vendor/markdown-it.min.js"></script>
 <script src="vendor/highlight.min.js"></script>
 <script src="vendor/mermaid.min.js"></script>
+<!-- 编辑器：CodeMirror 5。mode 之间有依赖（htmlmixed 要 xml/javascript/css，jsx/vue 要 htmlmixed），顺序别乱。 -->
+<script src="vendor/codemirror/codemirror.js"></script>
+<script src="vendor/codemirror/addon/matchbrackets.js"></script>
+<script src="vendor/codemirror/addon/closebrackets.js"></script>
+<script src="vendor/codemirror/addon/active-line.js"></script>
+<!-- 可编辑的并排 diff：merge 插件要 diff_match_patch 全局 -->
+<script src="vendor/diff_match_patch.js"></script>
+<script src="vendor/codemirror/addon/merge.js"></script>
+<script src="vendor/codemirror/mode/xml.js"></script>
+<script src="vendor/codemirror/mode/javascript.js"></script>
+<script src="vendor/codemirror/mode/css.js"></script>
+<script src="vendor/codemirror/mode/htmlmixed.js"></script>
+<script src="vendor/codemirror/mode/jsx.js"></script>
+<script src="vendor/codemirror/mode/vue.js"></script>
+<script src="vendor/codemirror/mode/python.js"></script>
+<script src="vendor/codemirror/mode/shell.js"></script>
+<script src="vendor/codemirror/mode/swift.js"></script>
+<script src="vendor/codemirror/mode/markdown.js"></script>
+<script src="vendor/codemirror/mode/yaml.js"></script>
+<script src="vendor/codemirror/mode/go.js"></script>
+<script src="vendor/codemirror/mode/rust.js"></script>
+<script src="vendor/codemirror/mode/clike.js"></script>
+<script src="vendor/codemirror/mode/sql.js"></script>
+<script src="vendor/codemirror/mode/toml.js"></script>
+<script src="vendor/codemirror/mode/dockerfile.js"></script>
+<script src="vendor/codemirror/mode/properties.js"></script>
+<script src="vendor/codemirror/mode/diff.js"></script>
+<script src="vendor/codemirror/mode/ruby.js"></script>
+<script src="vendor/codemirror/mode/php.js"></script>
+<script src="vendor/codemirror/mode/lua.js"></script>
+<script src="vendor/codemirror/mode/perl.js"></script>
+<script src="vendor/codemirror/mode/r.js"></script>
+<script src="vendor/codemirror/mode/powershell.js"></script>
+<script src="vendor/codemirror/mode/cmake.js"></script>
+<script src="vendor/codemirror/mode/nginx.js"></script>
+<script src="vendor/codemirror/mode/protobuf.js"></script>
+<script src="vendor/codemirror/mode/groovy.js"></script>
+<script src="vendor/codemirror/mode/dart.js"></script>
 <script src="render.js"></script>
 </body>
 </html>

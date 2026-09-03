@@ -11,6 +11,8 @@ struct ProjectTreeView: View {
     @State private var scrollOnSelection = false
     /// 双击判定是输入层的事，放在视图里；一棵树共用一个，跨行才能判「同一行点了两下」。
     @State private var clicks = DoubleClickDetector(interval: NSEvent.doubleClickInterval)
+    /// 等确认的删除（右键菜单或 ⌫）。
+    @State private var pendingDelete: DestructiveConfirmation?
 
     init(session: ProjectSession) {
         self.session = session
@@ -20,7 +22,7 @@ struct ProjectTreeView: View {
     var body: some View {
         VStack(spacing: 0) {
             ToolWindowHeader(title: "项目") {
-                IconButton("magnifyingglass", help: "查找文件（⇧⌘O）", isActive: search.isActive, size: 22) {
+                IconButton("magnifyingglass", help: "查找文件（⌘F）", isActive: search.isActive, size: 22) {
                     if search.isActive { closeSearch() } else { search.activate() }
                 }
                 IconButton("scope", help: "定位当前打开的文件（⌥⌘L）", size: 22) {
@@ -73,7 +75,8 @@ struct ProjectTreeView: View {
                                 status: session.gitStatus(for: row.node),
                                 isSelected: session.selectedPath == row.id,
                                 isFocused: isFocused,
-                                onPress: { isFocused = true }
+                                onPress: { isFocused = true },
+                                onDelete: { requestDelete($0) }
                             )
                             .id(row.id)
                         }
@@ -104,10 +107,29 @@ struct ProjectTreeView: View {
                 session.perform(.toggle)
                 return .handled
             }
+            // ⌫ / fn⌫ 删除选中项（IDEA 的 Delete），先确认
+            .onKeyPress(.delete) { requestDeleteOfSelection() }
+            .onKeyPress(.deleteForward) { requestDeleteOfSelection() }
             .contentShape(Rectangle())
             .onTapGesture { isFocused = true }
             .onChange(of: session.revealRequests) { _, _ in scrollOnSelection = true }
+            .destructiveConfirmation($pendingDelete)
         }
+    }
+
+    private func requestDelete(_ node: FileNode) {
+        pendingDelete = DestructiveConfirmation(
+            id: "delete:" + node.id,
+            title: "删除 \(node.name)？",
+            message: node.isDirectory ? "目录和里面的全部内容会移到废纸篓。" : "文件会移到废纸篓。",
+            buttonTitle: "删除"
+        ) { session.delete(node) }
+    }
+
+    private func requestDeleteOfSelection() -> KeyPress.Result {
+        guard let node = session.selectedNode else { return .ignored }
+        requestDelete(node)
+        return .handled
     }
 }
 
@@ -268,6 +290,8 @@ struct TreeRow: View {
     let isFocused: Bool
     /// 行被按下：树把键盘焦点收回来。
     let onPress: () -> Void
+    /// 右键「删除…」：交给树去确认。
+    var onDelete: (FileNode) -> Void = { _ in }
     @State private var isHovering = false
     @State private var press: Press?
 
@@ -317,7 +341,7 @@ struct TreeRow: View {
             if isClick, press == .row { released() }
             press = nil
         }
-        .contextMenu { TreeContextMenu(session: session, node: node) }
+        .contextMenu { TreeContextMenu(session: session, node: node, requestDelete: onDelete) }
     }
 
     /// 按下：箭头区域直接展开/折叠；其余位置选中。
@@ -353,6 +377,7 @@ struct TreeRow: View {
 private struct TreeContextMenu: View {
     let session: ProjectSession
     let node: FileNode
+    let requestDelete: (FileNode) -> Void
 
     var body: some View {
         if !node.isDirectory {
@@ -364,6 +389,11 @@ private struct TreeContextMenu: View {
         }
         Button("在访达中显示") { Desktop.revealInFinder(node.url) }
         Button("用默认应用打开") { Desktop.openWithDefaultApp(node.url) }
+        if !node.isDirectory, TerminalLauncher.canRun(fileNamed: node.name) {
+            Button("在终端中运行") { session.saveAll { Desktop.runInTerminal(node.url) } }
+        }
+        Divider()
+        Button("删除…") { requestDelete(node) }
     }
 }
 
@@ -387,10 +417,4 @@ enum VCSColors {
         case .untracked: return Theme.vcsUntracked
         }
     }
-}
-
-/// 交给系统去做的两件事。放在视图层：模型不该 import AppKit 只为了调 NSWorkspace。
-enum Desktop {
-    static func revealInFinder(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-    static func openWithDefaultApp(_ url: URL) { NSWorkspace.shared.open(url) }
 }

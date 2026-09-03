@@ -1,0 +1,39 @@
+/* CodeMirror 主题：与 hljs-idea-dark.css 同一套 IntelliJ 深色配色，两边的 token 名不同、颜色要对齐。
+   这份文件是手写的，不是 vendor，升级 CodeMirror 不要覆盖它。 */
+.CodeMirror { height: 100%; font-family: var(--mono); font-size: var(--code-size); line-height: 1.6; }
+.cm-s-idea-dark.CodeMirror { background: var(--bg); color: #BCBEC4; }
+.cm-s-idea-dark .CodeMirror-gutters { background: var(--bg); border-right: 1px solid var(--border); }
+.cm-s-idea-dark .CodeMirror-linenumber { color: var(--text-3); padding: 0 14px 0 12px; }
+.cm-s-idea-dark .CodeMirror-lines { padding: 0; }
+.cm-s-idea-dark pre.CodeMirror-line, .cm-s-idea-dark pre.CodeMirror-line-like { padding: 0 12px 0 14px; }
+.cm-s-idea-dark .CodeMirror-cursor { border-left: 1.5px solid #DFE1E5; }
+/* 行号右侧的变更标记（IDEA 的 gutter）：改过蓝、新增绿，颜色与目录树的 VCS 色一致 */
+.cm-s-idea-dark .cm-changes { width: 6px; }
+.cm-s-idea-dark .cm-change-mark { width: 3px; height: 1.6em; margin-left: 1px; border-radius: 1px; }
+.cm-s-idea-dark .cm-change-mark.modified { background: #6C9EF8; }
+.cm-s-idea-dark .cm-change-mark.added { background: #5FAD65; }
+.cm-s-idea-dark .CodeMirror-selected, .cm-s-idea-dark .CodeMirror-focused .CodeMirror-selected { background: var(--selection); }
+.cm-s-idea-dark .CodeMirror-line::selection, .cm-s-idea-dark .CodeMirror-line > span::selection, .cm-s-idea-dark .CodeMirror-line > span > span::selection { background: var(--selection); }
+.cm-s-idea-dark .CodeMirror-activeline-background { background: rgba(255, 255, 255, 0.035); }
+.cm-s-idea-dark .CodeMirror-activeline .CodeMirror-linenumber { color: var(--text-2); }
+.cm-s-idea-dark .CodeMirror-matchingbracket { color: #FFEF28 !important; background: rgba(255, 255, 255, 0.12); }
+.cm-s-idea-dark .CodeMirror-nonmatchingbracket { color: #E55765 !important; }
+
+.cm-s-idea-dark .cm-comment { color: #7A7E85; }
+.cm-s-idea-dark .cm-keyword, .cm-s-idea-dark .cm-atom, .cm-s-idea-dark .cm-type, .cm-s-idea-dark .cm-variable-3 { color: #CF8E6D; }
+.cm-s-idea-dark .cm-string, .cm-s-idea-dark .cm-string-2 { color: #6AAB73; }
+.cm-s-idea-dark .cm-number { color: #2AACB8; }
+.cm-s-idea-dark .cm-def, .cm-s-idea-dark .cm-variable, .cm-s-idea-dark .cm-operator, .cm-s-idea-dark .cm-punctuation, .cm-s-idea-dark .cm-attribute { color: #BCBEC4; }
+.cm-s-idea-dark .cm-variable-2, .cm-s-idea-dark .cm-property, .cm-s-idea-dark .cm-qualifier { color: #C77DBB; }
+.cm-s-idea-dark .cm-builtin { color: #56A8F5; }
+.cm-s-idea-dark .cm-tag, .cm-s-idea-dark .cm-bracket { color: #D5B778; }
+.cm-s-idea-dark .cm-meta { color: #B3AE60; }
+.cm-s-idea-dark .cm-header { color: #CF8E6D; font-weight: 600; }
+.cm-s-idea-dark .cm-quote { color: #7A7E85; }
+.cm-s-idea-dark .cm-link, .cm-s-idea-dark .cm-url { color: #548AF7; }
+.cm-s-idea-dark .cm-em { font-style: italic; }
+.cm-s-idea-dark .cm-strong { font-weight: 600; }
+.cm-s-idea-dark .cm-hr { color: var(--text-3); }
+.cm-s-idea-dark .cm-error { color: #E55765; }
+.cm-s-idea-dark .cm-positive { color: #5FAD65; }
+.cm-s-idea-dark .cm-negative { color: #E55765; }

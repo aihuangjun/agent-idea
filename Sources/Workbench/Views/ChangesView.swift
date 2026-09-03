@@ -100,28 +100,9 @@ private struct ChangeRow: View {
     let clicks: DoubleClickDetector
     let change: GitChange
     @State private var isHovering = false
-    @State private var pendingAction: PendingAction?
+    @State private var pendingAction: DestructiveConfirmation?
 
     private var isActive: Bool { session.activeTab?.change?.path == change.path }
-
-    private var fileName: some View {
-        Text(change.fileName)
-            .font(Theme.uiFont)
-            .foregroundStyle(VCSColors.color(for: change.kind))
-            .strikethrough(change.kind == .deleted)
-            .lineLimit(1)
-            .truncationMode(.tail)
-    }
-
-    @ViewBuilder
-    private var secondaryTexts: some View {
-        if !change.directory.isEmpty {
-            Text(change.directory).font(Theme.smallFont).foregroundStyle(Theme.mutedText).lineLimit(1).fixedSize()
-        }
-        if let original = change.originalPath {
-            Text("← \(original)").font(Theme.smallFont).foregroundStyle(Theme.mutedText).lineLimit(1).fixedSize()
-        }
-    }
 
     var body: some View {
         let icon = FileIcon.file(named: change.fileName)
@@ -134,21 +115,7 @@ private struct ChangeRow: View {
             ))
             .toggleStyle(.checkbox).controlSize(.small).labelsHidden()
             Image(systemName: icon.systemName).font(.system(size: 12)).foregroundStyle(icon.color).frame(width: 16)
-            // 放得下就带目录名（和重命名前的路径），放不下就只留文件名——目录名被截成一两个字母比没有更难看
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 6) {
-                    fileName
-                    secondaryTexts
-                }
-                fileName
-            }
-            Spacer(minLength: 4)
-            // 状态字永远完整显示；空间不够时先截目录、再截文件名
-            Text(change.kind.label)
-                .font(.system(size: 10))
-                .foregroundStyle(VCSColors.color(for: change.kind).opacity(0.85))
-                .fixedSize()
-                .layoutPriority(2)
+            ChangeFileLabel(change: change)
         }
         .padding(.trailing, 10)
         .frame(height: Theme.treeRowHeight)
@@ -168,45 +135,32 @@ private struct ChangeRow: View {
                 Button("在项目视图中显示") { session.reveal(url) }
             }
             Divider()
-            if change.kind == .untracked {
-                Button("删除…") { pendingAction = .delete(change) }
-            } else {
-                Button("回滚…") { pendingAction = .rollback(change) }
+            if change.kind != .untracked {
+                Button("回滚…") {
+                    pendingAction = DestructiveConfirmation(
+                        id: "rollback:" + change.path,
+                        title: "回滚 \(change.fileName)？",
+                        message: change.kind == .added
+                            ? "这是一个新增的文件，回滚会把它从 git 和磁盘上一起删掉。"
+                            : "会把它恢复到 HEAD 的样子，本地改动会丢失。",
+                        buttonTitle: "回滚"
+                    ) { commit.rollback(change) }
+                }
+            }
+            if commit.canDelete(change) {
+                Button("删除…") {
+                    pendingAction = DestructiveConfirmation(
+                        id: "delete:" + change.path,
+                        title: "删除 \(change.fileName)？",
+                        message: change.kind == .untracked
+                            ? "文件会移到废纸篓。"
+                            : "文件会移到废纸篓，git 里会显示为已删除；要不要提交这次删除由你决定。",
+                        buttonTitle: "删除"
+                    ) { commit.delete(change) }
+                }
             }
         }
-        .alert(item: $pendingAction) { action in
-            switch action {
-            case .rollback(let change):
-                return Alert(
-                    title: Text("回滚 \(change.fileName)？"),
-                    message: Text(change.kind == .added
-                        ? "这是一个新增的文件，回滚会把它从 git 和磁盘上一起删掉。"
-                        : "会把它恢复到 HEAD 的样子，本地改动会丢失。"),
-                    primaryButton: .destructive(Text("回滚")) { commit.rollback(change) },
-                    secondaryButton: .cancel(Text("取消"))
-                )
-            case .delete(let change):
-                return Alert(
-                    title: Text("删除 \(change.fileName)？"),
-                    message: Text("文件会移到废纸篓。"),
-                    primaryButton: .destructive(Text("删除")) { commit.deleteUntracked(change) },
-                    secondaryButton: .cancel(Text("取消"))
-                )
-            }
-        }
-    }
-}
-
-/// 右键菜单里要确认的危险操作。
-private enum PendingAction: Identifiable {
-    case rollback(GitChange)
-    case delete(GitChange)
-
-    var id: String {
-        switch self {
-        case .rollback(let change): return "rollback:" + change.path
-        case .delete(let change): return "delete:" + change.path
-        }
+        .destructiveConfirmation($pendingAction)
     }
 }
 
@@ -214,24 +168,15 @@ private enum PendingAction: Identifiable {
 private struct CommitPanel: View {
     @ObservedObject var commit: CommitController
     let branch: GitBranch
-    @FocusState private var messageFocused: Bool
+    @State private var messageFocused = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            ZStack(alignment: .topLeading) {
-                if commit.message.isEmpty {
-                    Text("提交信息").foregroundStyle(Theme.mutedText).padding(.horizontal, 6).padding(.vertical, 6)
-                        .allowsHitTesting(false)
-                }
-                TextEditor(text: $commit.message)
-                    .font(Theme.uiFont)
-                    .scrollContentBackground(.hidden)
-                    .padding(2)
-                    .focused($messageFocused)
-            }
-            .frame(minHeight: 64, maxHeight: 120)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Theme.editorBackground))
-            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(messageFocused ? Theme.accent : Theme.border, lineWidth: 1))
+            // 占位符由编辑框自己画在第一行文字的位置上，光标与提示对齐（见 PlainTextEditor）
+            PlainTextEditor(text: $commit.message, placeholder: "提交信息", isFocused: $messageFocused)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+                .background(RoundedRectangle(cornerRadius: 6).fill(Theme.editorBackground))
+                .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(messageFocused ? Theme.accent : Theme.border, lineWidth: 1))
 
             HStack(spacing: 8) {
                 Button("提交") { commit.commit(push: false) }
@@ -253,21 +198,7 @@ private struct CommitPanel: View {
             .controlSize(.small)
 
             if let status = commit.status {
-                HStack(alignment: .top, spacing: 6) {
-                    switch status {
-                    case .success(let text):
-                        Image(systemName: "checkmark.circle.fill").foregroundStyle(Theme.success)
-                        Text(text).foregroundStyle(Theme.secondaryText)
-                    case .failure(let text):
-                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.danger)
-                        Text(text).foregroundStyle(Theme.text).textSelection(.enabled)
-                    }
-                    Spacer()
-                    Button { commit.dismissStatus() } label: { Image(systemName: "xmark").font(.system(size: 9)) }
-                        .buttonStyle(.plain).foregroundStyle(Theme.mutedText)
-                }
-                .font(Theme.smallFont)
-                .lineLimit(4)
+                StatusLine(status: status) { commit.dismissStatus() }
             }
         }
         .padding(10)

@@ -43,8 +43,13 @@ import Testing
     #expect((json?["rows"] as? [Any])?.count == 2)
     #expect(json?["emptyReason"] == nil)
 
-    let markdown = RenderPayload(.markdown(path: "/p/a.md", markdown: "# x", documentDirectory: URL(fileURLWithPath: "/p/"), showsSource: false))
+    let markdown = RenderPayload(.markdown(path: "/p/a.md", markdown: "# x", documentDirectory: URL(fileURLWithPath: "/p/"), view: .preview))
     let markdownJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(markdown)) as? [String: Any]
     #expect(markdownJSON?["view"] as? String == "preview")
+    #expect(markdownJSON?["editable"] as? Bool == false)
+    let editable = RenderPayload(.code(path: "/p/a.py", text: "x", language: "python", editable: true, cursor: EditorCursor(line: 2, ch: 3)))
+    let editableJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(editable)) as? [String: Any]
+    #expect(editableJSON?["editable"] as? Bool == true)
+    #expect((editableJSON?["cursor"] as? [String: Any])?["line"] as? Int == 2)
     #expect(markdownJSON?["docDir"] as? String == "file:///p/")
 }

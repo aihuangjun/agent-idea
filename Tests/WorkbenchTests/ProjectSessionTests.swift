@@ -178,11 +178,13 @@ private func gitRunner(root: String, status: @escaping @Sendable () -> String, e
         let build = FileNode(url: directory.appendingPathComponent(".build"), name: ".build", isDirectory: true)
         #expect(session.gitStatus(for: build) == .ignored)
 
+        // 文件还在磁盘上：diff 是可编辑的（文档 + 基线），不是 git 的 diff 文本
         session.openDiff(session.changeGroups.tracked[0])
         await waitUntil { session.activeContent != .loading && session.activeContent != nil }
-        guard case .diff(let diff, let language) = session.activeContent else { Issue.record("应是 diff 内容"); return }
-        #expect(diff.addedCount == 1 && diff.removedCount == 1)
-        #expect(language.highlightID == "swift")
+        let tab = try #require(session.activeTab)
+        let documentID = try #require(session.documentID(for: tab))
+        #expect(session.activeContent == .editableDiff(documentID: documentID))
+        #expect(session.contents[documentID]?.text == "x")
         #expect(session.change(for: directory.appendingPathComponent("a.swift"))?.kind == .modified)
     }
 }
@@ -230,6 +232,9 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
 @Test @MainActor func commitStagesOnlySelectedPathsThenPushes() async throws {
     try await withTemporaryDirectory { directory in
         let root = directory.resolvingSymlinksInPath().path
+        // 磁盘上有的路径才走 add；这两个文件要真的在
+        try "a".write(to: directory.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try "b".write(to: directory.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
         let committed = Locked(false)
         let runner = gitRunner(root: root, status: {
             committed.value
@@ -301,7 +306,7 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         workbench.openProject(directory)
         let session = try #require(workbench.active)
         await waitUntil { session.changeGroups.total == 1 }
-        session.openDiff(session.changeGroups.untracked[0], pinned: true)
+        session.openDiff(try #require(session.changeGroups.untracked.first), pinned: true)
         #expect(session.tabs.count == 1)
 
         clean.value = true
@@ -326,21 +331,87 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         let byPath = Dictionary(uniqueKeysWithValues: session.gitSnapshot.changes.map { ($0.path, $0) })
 
         // 开着 m.txt 的 diff 标签，回滚后应被关掉
-        session.openDiff(byPath["m.txt"]!, pinned: true)
-        commit.rollback(byPath["m.txt"]!)
+        session.openDiff(try #require(byPath["m.txt"]), pinned: true)
+        commit.rollback(try #require(byPath["m.txt"]))
         await waitUntil { !runner.calls(startingWith: "restore").isEmpty && session.tabs.isEmpty }
         #expect(runner.calls(startingWith: "restore").last == ["restore", "--source=HEAD", "--staged", "--worktree", "--", "m.txt"])
 
-        commit.rollback(byPath["new.txt"]!)
+        commit.rollback(try #require(byPath["new.txt"]))
         await waitUntil { runner.calls(startingWith: "restore").count == 2 }
         #expect(runner.calls(startingWith: "restore").last == ["restore", "--source=HEAD", "--staged", "--worktree", "--", "new.txt", "old.txt"])
 
-        commit.rollback(byPath["a.txt"]!)
+        commit.rollback(try #require(byPath["a.txt"]))
         await waitUntil { !runner.calls(startingWith: "rm").isEmpty }
         #expect(runner.calls(startingWith: "rm").last == ["rm", "-f", "-q", "--", "a.txt"])
 
-        commit.deleteUntracked(byPath["junk.txt"]!)
+        commit.delete(try #require(byPath["junk.txt"]))
         #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("junk.txt").path))
+    }
+}
+
+/// 变更列表里删已跟踪的文件：进废纸篓，开着的文件标签与 diff 标签都关掉；「已删除」的变更没有东西可删。
+@Test @MainActor func deletingTrackedChangeTrashesFileAndClosesTabs() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        let file = directory.appendingPathComponent("m.txt")
+        try "x".write(to: file, atomically: true, encoding: .utf8)
+        let runner = gitRunner(root: root, status: {
+            "# branch.head main\u{0}1 .M N... 100644 100644 100644 a b m.txt\u{0}1 .D N... 100644 100644 000000 a a gone.txt\u{0}"
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.changeGroups.total == 2 }
+        let commit = try #require(session.commit)
+        let byPath = Dictionary(uniqueKeysWithValues: session.gitSnapshot.changes.map { ($0.path, $0) })
+        #expect(!commit.canDelete(try #require(byPath["gone.txt"])))
+
+        session.openFile(file, pinned: true)
+        session.openDiff(try #require(byPath["m.txt"]), pinned: true)
+        #expect(session.tabs.count == 2)
+        commit.delete(try #require(byPath["m.txt"]))
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(session.tabs.isEmpty)
+        #expect(commit.status == nil)
+    }
+}
+
+/// 目录树里删除：文件与目录都进废纸篓，目录下开着的标签一起关，选中挪到父节点，树立刻刷新。
+@Test @MainActor func deletingTreeNodesTrashesAndUpdatesTree() async throws {
+    try await withTemporaryDirectory { directory in
+        let sub = directory.appendingPathComponent("sub")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        let inner = sub.appendingPathComponent("inner.txt")
+        try "i".write(to: inner, atomically: true, encoding: .utf8)
+        let top = directory.appendingPathComponent("top.txt")
+        try "t".write(to: top, atomically: true, encoding: .utf8)
+        let workbench = makeWorkbench(in: directory, git: nil)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+
+        session.openFile(top, pinned: true)
+        let topNode = try #require(session.rows.first { $0.node.name == "top.txt" }?.node)
+        session.select(topNode.id)
+        session.delete(topNode)
+        #expect(!FileManager.default.fileExists(atPath: top.path))
+        #expect(session.tabs.isEmpty)
+        #expect(session.selectedPath == nil)
+        #expect(!session.rows.contains { $0.node.name == "top.txt" })
+
+        session.expand(sub.path)
+        session.openFile(inner, pinned: true)
+        let innerNode = try #require(session.rows.first { $0.node.name == "inner.txt" }?.node)
+        session.select(innerNode.id)
+        let subNode = try #require(session.rows.first { $0.node.name == "sub" }?.node)
+        session.delete(subNode)
+        #expect(!FileManager.default.fileExists(atPath: sub.path))
+        #expect(session.tabs.isEmpty)
+        #expect(session.selectedPath == nil)
+        #expect(!session.rows.contains { $0.node.name == "sub" || $0.node.name == "inner.txt" })
+
+        // 项目根不能删
+        session.delete(FileNode(url: directory, name: "root", isDirectory: true))
+        #expect(FileManager.default.fileExists(atPath: directory.path))
     }
 }
 
@@ -379,10 +450,14 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
 @Test func tabContentMapsToRenderPayload() {
     let url = URL(fileURLWithPath: "/p/docs/a.md")
     var tab = EditorTab(kind: .file(url), isPreview: false)
-    tab.markdownShowsSource = true
+    tab.markdownView = .source
+    tab.cursor = EditorCursor(line: 1, ch: 0)
     let markdown = TabContent.markdown(text: "# x", encoding: "UTF-8", lineCount: 1, modified: nil)
     #expect(markdown.renderContent(for: tab, diffMode: .unified)
-        == .markdown(path: "/p/docs/a.md", markdown: "# x", documentDirectory: URL(fileURLWithPath: "/p/docs/"), showsSource: true))
+        == .markdown(path: "/p/docs/a.md", markdown: "# x", documentDirectory: URL(fileURLWithPath: "/p/docs/"), view: .source, editable: false, cursor: EditorCursor(line: 1, ch: 0)))
+    // 有草稿画草稿，可编辑时走编辑器
+    #expect(markdown.renderContent(for: tab, diffMode: .unified, draft: "# y", editable: true)
+        == .markdown(path: "/p/docs/a.md", markdown: "# y", documentDirectory: URL(fileURLWithPath: "/p/docs/"), view: .source, editable: true, cursor: EditorCursor(line: 1, ch: 0)))
 
     let change = GitChange(path: "new.txt", kind: .untracked)
     let diffTab = EditorTab(kind: .diff(change), isPreview: true)

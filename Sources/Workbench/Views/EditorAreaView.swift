@@ -54,8 +54,10 @@ private struct EmptyEditorView: View {
                 shortcut("项目视图", "⌘1")
                 shortcut("提交视图", "⌘0")
                 shortcut("提交历史", "⌘9")
-                shortcut("查找文件", "⇧⌘O")
+                shortcut("查找文件", "⌘F")
                 shortcut("定位当前文件", "⌥⌘L")
+                shortcut("后退 / 前进", "⌥← / ⌥→")
+                shortcut("保存", "⌘S")
                 shortcut("打开项目", "⌘O")
                 shortcut("关闭标签", "⌘W")
             }
@@ -86,7 +88,7 @@ private struct TabBar: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
                     ForEach(session.tabs) { tab in
-                        TabItem(session: session, clicks: clicks, tab: tab, isActive: tab.id == session.activeTabID).id(tab.id)
+                        TabItem(session: session, clicks: clicks, tab: tab, isActive: tab.id == session.activeTabID, isModified: session.isModified(tab)).id(tab.id)
                     }
                 }
             }
@@ -105,6 +107,7 @@ private struct TabItem: View {
     let clicks: DoubleClickDetector
     let tab: EditorTab
     let isActive: Bool
+    let isModified: Bool
     @State private var isHovering = false
 
     var body: some View {
@@ -124,17 +127,19 @@ private struct TabItem: View {
                     .padding(.horizontal, 4).padding(.vertical, 1)
                     .background(Capsule().fill(Theme.vcsModified.opacity(0.15)))
             }
+            // 改过没保存：不悬停时显示一个点代替关闭按钮（关掉会自动保存）
             Button {
                 session.closeTab(tab.id)
             } label: {
-                Image(systemName: "xmark").font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(Theme.secondaryText)
+                Image(systemName: isModified && !isHovering ? "circle.fill" : "xmark")
+                    .font(.system(size: isModified && !isHovering ? 7 : 9, weight: .bold))
+                    .foregroundStyle(isModified && !isHovering ? Theme.accent : Theme.secondaryText)
                     .frame(width: 16, height: 16)
                     .background(Circle().fill(isHovering ? Theme.hover : .clear))
             }
             .buttonStyle(.plain)
-            .opacity(isHovering || isActive ? 1 : 0)
-            .help("关闭（⌘W）")
+            .opacity(isHovering || isActive || isModified ? 1 : 0)
+            .help(isModified ? "已修改，⌘S 保存；关闭会自动保存" : "关闭（⌘W）")
         }
         .padding(.leading, 12)
         .padding(.trailing, 6)
@@ -160,6 +165,11 @@ private struct TabItem: View {
                 Button("在项目视图中显示") { session.reveal(url) }
                 Button("在访达中显示") { Desktop.revealInFinder(url) }
                 Button("用默认应用打开") { Desktop.openWithDefaultApp(url) }
+                if TerminalLauncher.canRun(fileNamed: url.lastPathComponent) {
+                    Divider()
+                    // 先把没保存的写回去，跑的才是编辑器里看到的那份
+                    Button("在终端中运行") { session.saveAll { Desktop.runInTerminal(url) } }
+                }
             }
         }
     }
@@ -173,8 +183,18 @@ private struct EditorHeader: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            // 后退 / 前进（⌥← / ⌥→）
+            HStack(spacing: 0) {
+                IconButton("chevron.left", help: "后退（⌥←）", size: 22) { session.goBack() }.disabled(!session.canGoBack)
+                IconButton("chevron.right", help: "前进（⌥→）", size: 22) { session.goForward() }.disabled(!session.canGoForward)
+            }
+            .padding(.leading, -4)
             if let tab = session.activeTab {
                 Breadcrumb(session: session, tab: tab)
+                if session.isModified(tab), session.isDiskNewer(tab) {
+                    Label("磁盘上的文件已被改动，保存会覆盖它", systemImage: "exclamationmark.triangle.fill")
+                        .font(Theme.smallFont).foregroundStyle(Theme.warning).lineLimit(1)
+                }
                 Spacer()
                 controls(for: tab)
             }
@@ -199,16 +219,18 @@ private struct EditorHeader: View {
             }
         } else if case .markdown = session.activeContent {
             Picker("", selection: Binding(
-                get: { tab.markdownShowsSource ? 1 : 0 },
-                set: { _ in session.toggleMarkdownSource() }
+                get: { tab.markdownView },
+                set: { session.setMarkdownView($0) }
             )) {
-                Text("预览").tag(0)
-                Text("源码").tag(1)
+                ForEach(MarkdownView.allCases, id: \.self) { Text($0.label).tag($0) }
             }
             .pickerStyle(.segmented)
             .controlSize(.small)
-            .frame(width: 110)
+            .frame(width: 160)
         } else if case .code = session.activeContent {
+            if !session.isEditable(tab) {
+                Text("只读（文件太大）").font(Theme.smallFont).foregroundStyle(Theme.mutedText)
+            }
             Toggle("自动换行", isOn: $preferences.wordWrap)
                 .toggleStyle(.checkbox).controlSize(.small).font(Theme.smallFont)
             if let url = tab.fileURL, let change = session.change(for: url) {

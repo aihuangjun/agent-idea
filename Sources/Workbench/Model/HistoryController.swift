@@ -3,7 +3,7 @@ import Foundation
 
 /// 提交历史工具窗口的状态：分页拉 `git log`，选中一条时列出它改了哪些文件。
 ///
-/// 只认识 git 与仓库根；打开 diff 标签是会话的事，视图直接调会话。
+/// 只认识 git 与仓库根；打开 diff 标签是会话的事，视图直接调会话。回滚了历史里的变更会通过 `onRepositoryChanged` 通知会话刷新。
 @MainActor
 final class HistoryController: ObservableObject {
     nonisolated static let pageSize = 100
@@ -19,6 +19,11 @@ final class HistoryController: ObservableObject {
     @Published private(set) var filesError: [String: String] = [:]
     /// 当前 HEAD，由会话在每次 git 状态刷新后写入；与 `loadedHead` 不同才需要重拉。
     var currentHead = ""
+    /// 最近一次回滚的结果，显示在文件列表下面。
+    @Published private(set) var status: OperationStatus?
+    @Published private(set) var isReverting = false
+    /// 工作区被改了（回滚之后）：会话据此刷新树、git 状态与开着的文件。
+    var onRepositoryChanged: (@MainActor () -> Void)?
 
     private let git: GitClient
     private let repositoryRoot: URL
@@ -109,5 +114,29 @@ final class HistoryController: ObservableObject {
         guard !commits.isEmpty else { return }
         let current = commits.firstIndex { $0.id == selectedCommitID } ?? (offset > 0 ? -1 : commits.count)
         select(commits[min(commits.count - 1, max(0, current + offset))])
+    }
+
+    // MARK: - 回滚
+
+    func dismissStatus() { status = nil }
+
+    /// 把某次提交里一个文件的变更反向打回工作区（IDEA 的 Revert Selected Changes）。不产生提交。
+    func revert(_ change: GitChange, in commit: GitCommit) {
+        guard !isReverting else { return }
+        isReverting = true
+        status = nil
+        Task { [weak self] in
+            guard let self else { return }
+            defer { isReverting = false }
+            do {
+                try await git.revert(change: change, in: commit, repositoryRoot: repositoryRoot)
+                status = .success("已回滚 \(change.fileName)（\(commit.shortHash)），改动在工作区里，未提交")
+                Log.info("git", "回滚 \(commit.shortHash) 里的 \(change.path)")
+            } catch {
+                status = .failure("回滚失败：\(error.userFacingDescription)")
+                Log.warn("git", "回滚 \(commit.shortHash) 里的 \(change.path) 失败：\(error)")
+            }
+            onRepositoryChanged?()
+        }
     }
 }

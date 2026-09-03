@@ -38,6 +38,14 @@ final class ProjectSession: ObservableObject, Identifiable {
     @Published private(set) var tabs: [EditorTab] = []
     @Published private(set) var activeTabID: String?
     @Published private(set) var contents: [String: TabContent] = [:]
+    /// 改了还没保存的文本，按标签 id（规则见 `DraftStore`）。
+    @Published private(set) var draftStore = DraftStore()
+    /// 开着的文件在 HEAD 里的内容，按标签 id；编辑器据此画行号旁的变更标记。HEAD 里没有的不在这里。
+    private(set) var baseTexts: [String: String] = [:]
+    /// 基线是按哪个 HEAD 取的；HEAD 变了整个重取。
+    private var baseTextsHead = ""
+    /// 后退 / 前进的历史，元素是标签 id。
+    @Published private(set) var navigation = NavigationHistory<String>()
     /// 顶部一条可关闭的提示。
     @Published private(set) var banner: String?
 
@@ -62,6 +70,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     private(set) var isActive = false
     private var watcher: ChangeWatcher?
     private var gitTask: Task<Void, Never>?
+    /// 正在按历史后退/前进：这次切换不再记进历史。
+    private var isNavigating = false
 
     var activeTab: EditorTab? {
         guard let activeTabID else { return nil }
@@ -95,11 +105,19 @@ final class ProjectSession: ObservableObject, Identifiable {
             if let repositoryRoot = self.project.repositoryRoot {
                 let controller = CommitController(git: git, repositoryRoot: repositoryRoot)
                 controller.onRepositoryChanged = { [weak self] affected in
-                    for change in affected { self?.closeTab(EditorTab.id(forDiff: change)) }
-                    self?.refreshAll()
+                    guard let self else { return }
+                    for change in affected {
+                        // 文件被删掉了（删除、回滚新增）：先把编辑它的标签（文件标签、可编辑的 diff 标签）连草稿一起丢掉，
+                        // 再关剩下的 diff 标签——顺序反了的话关 diff 标签会把草稿写回去，文件就从废纸篓外面复活了
+                        if let url = self.url(for: change), !self.fileExists(url) { self.closeTabs(under: url) }
+                        self.closeTab(EditorTab.id(forDiff: change))
+                    }
+                    self.refreshAll()
                 }
                 self.commit = controller
-                self.history = HistoryController(git: git, repositoryRoot: repositoryRoot)
+                let history = HistoryController(git: git, repositoryRoot: repositoryRoot)
+                history.onRepositoryChanged = { [weak self] in self?.refreshAll() }
+                self.history = history
                 self.refreshGit()
             } else {
                 Log.info("git", "\(project.name) 不在 git 仓库里")
@@ -107,8 +125,9 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
     }
 
-    /// 项目被关掉：停监听、停任务。
+    /// 项目被关掉：没保存的写回去，停监听、停任务。
     func tearDown() {
+        saveAll()
         gitTask?.cancel()
         history?.cancel()
         search.cancel()
@@ -208,6 +227,31 @@ final class ProjectSession: ObservableObject, Identifiable {
         return parent == project.root.path ? nil : parent
     }
 
+    /// 树上选中的节点（⌫ 删除、菜单操作用）。
+    var selectedNode: FileNode? {
+        guard let selectedPath else { return nil }
+        return rows.first { $0.id == selectedPath }?.node
+    }
+
+    /// 删除一个文件或目录：进废纸篓（不是 rm，删错了能找回来），关掉它（以及目录下）开着的标签，选中挪到父节点。
+    /// 目录树与 FSEvents 会随后自己刷新；这里立刻刷一次，不用等去抖。
+    func delete(_ node: FileNode) {
+        guard node.url.path != project.root.path else { return }
+        do {
+            try Trash.move(node.url)
+            Log.info("project", "已删除 \(node.url.path)")
+        } catch {
+            banner = "删除失败：\(error.userFacingDescription)"
+            Log.warn("project", "删除 \(node.url.path) 失败：\(error)")
+            return
+        }
+        closeTabs(under: node.url)
+        if selectedPath == node.id || (selectedPath?.hasPrefix(node.url.path + "/") ?? false) {
+            selectedPath = parentPath(of: node.id)
+        }
+        refreshAll()
+    }
+
     // MARK: - 标签页
 
     /// 打开一个文件。`pinned == false` 复用预览标签（变更列表单击、Markdown 链接），`true` 固定。
@@ -241,7 +285,10 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
         rememberScrollOfActiveTab()
         if incoming.isPreview, let previewIndex = tabs.firstIndex(where: { $0.isPreview }) {
-            contents[tabs[previewIndex].id] = nil
+            // 预览标签被顶掉。它不会有草稿：一改就固定了（见 applyEdit）
+            let replaced = tabs[previewIndex].id
+            contents[replaced] = nil
+            navigation.remove(replaced)
             tabs[previewIndex] = incoming
         } else if let activeIndex = tabs.firstIndex(where: { $0.id == activeTabID }) {
             tabs.insert(incoming, at: activeIndex + 1)
@@ -249,6 +296,7 @@ final class ProjectSession: ObservableObject, Identifiable {
             tabs.append(incoming)
         }
         activeTabID = incoming.id
+        recordNavigation(incoming.id)
         renderActiveTab()
     }
 
@@ -256,6 +304,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         guard tabID != activeTabID, tabs.contains(where: { $0.id == tabID }) else { return }
         rememberScrollOfActiveTab()
         activeTabID = tabID
+        recordNavigation(tabID)
         if let tab = activeTab {
             if let url = tab.fileURL { selectedPath = url.path }
             if contents[tab.id] == nil { tab.isDiff ? loadDiff(for: tab) : loadFile(for: tab) }
@@ -263,15 +312,63 @@ final class ProjectSession: ObservableObject, Identifiable {
         renderActiveTab()
     }
 
+    // MARK: - 后退 / 前进
+
+    private func recordNavigation(_ tabID: String) {
+        if !isNavigating { navigation.visit(tabID) }
+    }
+
+    var canGoBack: Bool { navigation.canGoBack }
+    var canGoForward: Bool { navigation.canGoForward }
+
+    func goBack() { navigate { $0.goBack() } }
+    func goForward() { navigate { $0.goForward() } }
+
+    private func navigate(_ step: (inout NavigationHistory<String>) -> String?) {
+        guard let target = step(&navigation), tabs.contains(where: { $0.id == target }) else { return }
+        isNavigating = true
+        activate(target)
+        isNavigating = false
+    }
+
     func pin(_ tabID: String) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
         tabs[index].isPreview = false
     }
 
+    /// 关标签。改过的先写回磁盘（IDEA 关编辑器不问、直接保存）；当前正在编辑的先把编辑器里最新的文字要过来。
     func closeTab(_ tabID: String) {
+        guard let tab = tabs.first(where: { $0.id == tabID }) else { return }
+        if tabID == activeTabID, isActive, isEditable(tab) {
+            rememberScroll(of: tabID) { [weak self] _ in self?.finishClosing(tabID) }
+        } else {
+            finishClosing(tabID)
+        }
+    }
+
+    /// `discardingDraft`：文件已经被删了，草稿不能再写回去——写了文件就从废纸篓外面复活了。
+    /// 文档（内容、基线、草稿）只在最后一个用它的标签关掉时才释放：文件标签与 diff 标签可能同时开着同一个文件。
+    private func finishClosing(_ tabID: String, discardingDraft: Bool = false) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
+        let documentID = documentID(for: tabs[index])
+        if let documentID {
+            // 文件已经不在磁盘上（外部删了）：关标签的自动保存不能凭空把它创建回来；显式 ⌘S 不受此限
+            let fileExists = EditorTab.fileURL(fromID: documentID).map { fileManager.fileExists(atPath: $0.path) } ?? false
+            if discardingDraft || !fileExists { draftStore.discard(documentID) } else { writeDraft(documentID) }
+        }
+        let document = documentID.flatMap { contents[$0] }
         tabs.remove(at: index)
         contents[tabID] = nil
+        navigation.remove(tabID)
+        if let documentID {
+            if tabs.contains(where: { self.documentID(for: $0) == documentID }) {
+                contents[documentID] = document
+            } else {
+                contents[documentID] = nil
+                baseTexts[documentID] = nil
+                draftStore.discard(documentID)
+            }
+        }
         if activeTabID == tabID {
             activeTabID = (tabs.indices.contains(index) ? tabs[index] : tabs.last)?.id
             renderActiveTab()
@@ -282,18 +379,25 @@ final class ProjectSession: ObservableObject, Identifiable {
         if let activeTabID { closeTab(activeTabID) }
     }
 
+    /// 文件或目录被删了：关掉编辑它（以及目录下文件）的标签——文件标签和可编辑的 diff 标签，草稿一并丢弃（不能写回去）。
+    func closeTabs(under url: URL) {
+        // 标签里的 URL 是解析过符号链接的（openFile），这里也解析一遍再比，/var 与 /private/var 才对得上
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        let prefix = path + "/"
+        for tab in tabs {
+            guard let file = documentURL(for: tab)?.path else { continue }
+            if file == path || file.hasPrefix(prefix) { finishClosing(tab.id, discardingDraft: true) }
+        }
+    }
+
     func closeOtherTabs(_ tabID: String) {
-        for tab in tabs where tab.id != tabID { contents[tab.id] = nil }
-        tabs = tabs.filter { $0.id == tabID }
-        activeTabID = tabID
-        renderActiveTab()
+        // 走 closeTab 而不是直接 finishClosing：当前正在编辑的那个要先把编辑器里的最后几笔要回来再写盘
+        for tab in tabs where tab.id != tabID { closeTab(tab.id) }
+        if activeTabID != tabID { activate(tabID) }
     }
 
     func closeAllTabs() {
-        tabs = []
-        contents = [:]
-        activeTabID = nil
-        renderActiveTab()
+        for tab in tabs { closeTab(tab.id) }
     }
 
     func selectNextTab(offset: Int) {
@@ -301,11 +405,20 @@ final class ProjectSession: ObservableObject, Identifiable {
         activate(tabs[(index + offset + tabs.count) % tabs.count].id)
     }
 
-    func toggleMarkdownSource() {
-        guard let index = tabs.firstIndex(where: { $0.id == activeTabID }) else { return }
-        tabs[index].markdownShowsSource.toggle()
-        tabs[index].scrollTop = 0
-        renderActiveTab()
+    /// Markdown 标签换一种看法（预览 → 源码 → 分栏）。先把编辑器里的文字要回来再重画，否则改动会丢。
+    func cycleMarkdownView() {
+        guard let tab = activeTab else { return }
+        setMarkdownView(tab.markdownView.next)
+    }
+
+    func setMarkdownView(_ view: MarkdownView) {
+        guard let id = activeTabID else { return }
+        rememberScroll(of: id) { [weak self] _ in
+            guard let self, let index = self.tabs.firstIndex(where: { $0.id == id }) else { return }
+            self.tabs[index].markdownView = view
+            self.tabs[index].scrollTop = 0
+            self.renderActiveTab()
+        }
     }
 
     private func rememberScrollOfActiveTab() {
@@ -313,13 +426,113 @@ final class ProjectSession: ObservableObject, Identifiable {
         rememberScroll(of: id)
     }
 
-    /// 问 WebView 当前滚到哪，记到那个标签上；记完之后可以接着做点别的（比如重读文件）。
+    /// 问 WebView 当前的状态（滚到哪、编辑器里的文字与光标），记到那个标签上；记完之后可以接着做点别的（比如重读文件）。
+    /// **重画当前标签之前必须先走这里**，不然编辑器里还没送过来的那几笔就没了。
     private func rememberScroll(of tabID: String, then continuation: @escaping @MainActor (EditorTab) -> Void = { _ in }) {
-        renderer.currentScrollTop { [weak self] top in
+        renderer.currentState { [weak self] state in
             guard let self, let index = self.tabs.firstIndex(where: { $0.id == tabID }) else { return }
-            self.tabs[index].scrollTop = top
+            self.tabs[index].scrollTop = state.scrollTop
+            if let cursor = state.cursor { self.tabs[index].cursor = cursor }
+            if let text = state.text, let url = self.documentURL(for: self.tabs[index]) { self.applyEdit(path: url.path, text: text) }
             continuation(self.tabs[index])
         }
+    }
+
+    // MARK: - 编辑与保存
+
+    /// 草稿与写盘的规则在 `DraftStore`；这里只管时机：什么时候向编辑器要最新文字、写完刷 git。
+    /// 键是**文档 id**（= 文件标签的 id）：同一个文件的文件标签与 diff 标签共用一份草稿。
+    var drafts: [String: String] { draftStore.drafts }
+
+    /// 一个标签编辑的是哪个文档：文件标签就是自己；工作区 diff 标签是那条变更对应的文件（已删除的没有）。历史 diff 不可编辑。
+    func documentID(for tab: EditorTab) -> String? {
+        switch tab.kind {
+        case .file: return tab.id
+        case .diff(let change):
+            guard change.kind != .deleted, let url = url(for: change) else { return nil }
+            return EditorTab.id(forFile: url.resolvingSymlinksInPath().standardizedFileURL)
+        case .commitDiff: return nil
+        }
+    }
+
+    func documentURL(for tab: EditorTab) -> URL? {
+        documentID(for: tab).flatMap(EditorTab.fileURL(fromID:))
+    }
+
+    func isEditable(_ tab: EditorTab) -> Bool {
+        guard let documentID = documentID(for: tab) else { return false }
+        return DraftStore.isEditable(contents[documentID])
+    }
+
+    func isModified(_ tab: EditorTab) -> Bool {
+        documentID(for: tab).map(draftStore.isModified) ?? false
+    }
+
+    /// 磁盘上的文件比读进来时新（别人改过了）。改过还没保存的标签上要提醒一句。
+    func isDiskNewer(_ tab: EditorTab) -> Bool {
+        guard let documentID = documentID(for: tab), let url = EditorTab.fileURL(fromID: documentID) else { return false }
+        return DraftStore.isDiskNewer(at: url, than: contents[documentID]?.modificationDate, fileManager: fileManager)
+    }
+
+    /// 编辑器里的文字变了。只认开着的、可编辑的文档；一改预览标签就固定下来（IDEA 也这样），免得被下一次单击顶掉。
+    func applyEdit(path: String, text: String) {
+        let id = EditorTab.id(forFile: URL(fileURLWithPath: path))
+        let users = tabs.filter { documentID(for: $0) == id }
+        guard !users.isEmpty, DraftStore.isEditable(contents[id]), let saved = contents[id]?.text else { return }
+        if draftStore.apply(text: text, to: id, saved: saved) {
+            for tab in users { pin(tab.id) }
+        }
+    }
+
+    /// 保存当前标签（⌘S）。先把编辑器里最新的文字要过来再写。
+    func saveActiveTab() {
+        guard let id = activeTabID, let tab = activeTab, let documentID = documentID(for: tab) else { return }
+        if isActive {
+            rememberScroll(of: id) { [weak self] _ in self?.writeDraft(documentID) }
+        } else {
+            writeDraft(documentID)
+        }
+    }
+
+    /// 保存所有改过的标签：手头已有的草稿立刻落盘；正在编辑的那个再向编辑器要一次最新文字补写，写完调 `completion`
+    /// （比如「在终端中运行」要等文件真的落盘再跑）。退出时只有同步那一段来得及跑，停手不到 300ms 的最后几笔可能不在。
+    func saveAll(then completion: @escaping @MainActor () -> Void = {}) {
+        writeAllDrafts()
+        guard isActive, let id = activeTabID, let tab = activeTab, isEditable(tab) else {
+            completion()
+            return
+        }
+        // 强引用自己：关项目时会话已经从列表里摘掉了，弱引用会在编辑器把文字送回来之前被释放
+        renderer.currentState { state in
+            if let index = self.tabs.firstIndex(where: { $0.id == id }) {
+                self.tabs[index].scrollTop = state.scrollTop
+                if let cursor = state.cursor { self.tabs[index].cursor = cursor }
+            }
+            if let text = state.text, let url = self.documentURL(for: tab) { self.applyEdit(path: url.path, text: text) }
+            self.writeAllDrafts()
+            completion()
+        }
+    }
+
+    private func writeAllDrafts() {
+        for id in draftStore.drafts.keys { writeDraft(id) }
+    }
+
+    /// 把一个文档的草稿写回磁盘。没有草稿就什么都不做。
+    @discardableResult
+    func writeDraft(_ documentID: String) -> Bool {
+        guard let url = EditorTab.fileURL(fromID: documentID), let content = contents[documentID] else { return false }
+        do {
+            guard let saved = try draftStore.write(documentID, to: url, content: content, fileManager: fileManager) else { return false }
+            contents[documentID] = saved
+        } catch {
+            banner = "保存 \(url.lastPathComponent) 失败：\(error.userFacingDescription)"
+            Log.warn("editor", "保存 \(url.path) 失败：\(error)")
+            return false
+        }
+        Log.info("editor", "已保存 \(url.path)")
+        refreshGit()
+        return true
     }
 
     // MARK: - 内容加载
@@ -330,6 +543,7 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     private func loadFile(for tab: EditorTab) {
         guard let url = tab.fileURL else { return }
+        fetchBaseText(documentID: tab.id)
         let fileManager = self.fileManager
         let size = (try? fileManager.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
         if size <= Self.synchronousReadLimit {
@@ -345,6 +559,30 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
     }
 
+    /// 取一个文档的 HEAD 内容。到了以后当前正显示它的话直接送进编辑器（不重画）。
+    private func fetchBaseText(documentID: String) {
+        guard let git, let repositoryRoot = project.repositoryRoot, let url = EditorTab.fileURL(fromID: documentID),
+              let relative = project.repositoryRelativePath(of: url) else { return }
+        Task { [weak self] in
+            let base = await git.headContent(path: relative, repositoryRoot: repositoryRoot)
+            guard let self, self.tabs.contains(where: { self.documentID(for: $0) == documentID }) else { return }
+            self.baseTexts[documentID] = base
+            if self.isActive, let tab = self.activeTab, self.documentID(for: tab) == documentID { self.renderer.setBase(path: url.path, text: base) }
+        }
+    }
+
+    /// 文档（文件的内容）没加载就同步读进来。只给不太大的文件用（可编辑上限之内）。
+    @discardableResult
+    private func ensureDocument(_ documentID: String) -> TabContent? {
+        if let existing = contents[documentID], existing != .loading { return existing }
+        guard let url = EditorTab.fileURL(fromID: documentID) else { return nil }
+        let size = (try? fileManager.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
+        guard size <= DraftStore.editableLimit else { return nil }
+        let loaded = FileContentLoader.load(url, fileManager: fileManager)
+        contents[documentID] = loaded
+        return loaded
+    }
+
     /// 加载完成后回填。标签在加载期间被关掉了就丢弃；是当前标签就立刻画。
     private func store(_ content: TabContent, for tabID: String) {
         guard tabs.contains(where: { $0.id == tabID }) else { return }
@@ -353,9 +591,22 @@ final class ProjectSession: ObservableObject, Identifiable {
     }
 
     /// 两种 diff 标签（工作区变更、历史提交）都从这里加载。
+    /// 工作区变更且文件还在、是文本、不太大 → 可编辑的 diff（文档 + HEAD 基线）；否则静态的 git diff。
     private func loadDiff(for tab: EditorTab) {
         guard let change = tab.diffChange, let git, let repositoryRoot = project.repositoryRoot else {
             contents[tab.id] = .message(title: "没有 git", detail: "这个项目不在 git 仓库里，或者本机没有 git。")
+            return
+        }
+        if let documentID = documentID(for: tab), DraftStore.isEditable(ensureDocument(documentID)) {
+            contents[tab.id] = .loading
+            Task { [weak self] in
+                // 先等基线到了再画，免得先闪一下「整个文件都是新增」
+                guard let self, let url = EditorTab.fileURL(fromID: documentID), let relative = self.project.repositoryRelativePath(of: url) else { return }
+                if self.baseTexts[documentID] == nil {
+                    self.baseTexts[documentID] = await git.headContent(path: relative, repositoryRoot: repositoryRoot)
+                }
+                self.store(.editableDiff(documentID: documentID), for: tab.id)
+            }
             return
         }
         let commit = tab.commitDiff?.commit
@@ -376,11 +627,34 @@ final class ProjectSession: ObservableObject, Identifiable {
             return
         }
         guard let content = contents[tab.id], content != .loading else { return }
-        renderer.render(RenderPayload(
-            content.renderContent(for: tab, diffMode: preferences.diffMode),
-            scrollTop: tab.scrollTop,
-            wrap: preferences.wordWrap
-        ))
+        let documentID = documentID(for: tab)
+        let rendered: RenderPayload.Content
+        if case .editableDiff(let documentID) = content, let change = tab.change, let url = EditorTab.fileURL(fromID: documentID),
+           let document = ensureDocument(documentID) {
+            rendered = FileContentLoader.editableDiff(
+                change: change, document: document, draft: draftStore[documentID], base: baseTexts[documentID],
+                filePath: url.path, cursor: tab.cursor, mode: preferences.diffMode
+            )
+        } else {
+            rendered = content.renderContent(
+                for: tab, diffMode: preferences.diffMode,
+                draft: documentID.flatMap { draftStore[$0] }, editable: isEditable(tab), base: documentID.flatMap { baseTexts[$0] }
+            )
+        }
+        renderer.render(RenderPayload(rendered, scrollTop: tab.scrollTop, wrap: preferences.wordWrap))
+    }
+
+    /// 状态栏右侧那几格。可编辑的 diff 显示的是它编辑的那个文档的（行数、编码、语言）。
+    var activeStatusSummary: [String] {
+        guard let tab = activeTab, let content = contents[tab.id] else { return [] }
+        if case .editableDiff(let documentID) = content { return contents[documentID]?.statusSummary ?? [] }
+        return content.statusSummary
+    }
+
+    /// 重画当前标签但先把编辑器里的状态要回来（切 diff 并排/单列这种「同一标签换个画法」的场合）。
+    func rerenderActiveTab() {
+        guard isActive, let id = activeTabID else { return }
+        rememberScroll(of: id) { [weak self] _ in self?.renderActiveTab() }
     }
 
     // MARK: - Git 状态
@@ -422,6 +696,11 @@ final class ProjectSession: ObservableObject, Identifiable {
         // 有了新提交（或切了分支）才重拉历史；工作区文件改动不影响 log。控制器自己比对 HEAD 去重
         history?.currentHead = snapshot.branch.headOID
         history?.refreshIfLoaded()
+        // HEAD 变了，编辑器的变更标记 / 可编辑 diff 的基线也要换
+        if baseTextsHead != snapshot.branch.headOID {
+            baseTextsHead = snapshot.branch.headOID
+            for documentID in Set(tabs.compactMap(documentID(for:))) { fetchBaseText(documentID: documentID) }
+        }
         // 搜索索引跳过 git 忽略的路径。闭包里只放值类型，能拿到后台去跑；忽略集变了已建的索引作废
         if let prefix = project.repositoryRelativePath(of: project.root) {
             let index = gitIndex
@@ -439,9 +718,12 @@ final class ProjectSession: ObservableObject, Identifiable {
                 closeTab(tab.id)
                 continue
             }
+            // 可编辑的 diff 不靠 git 的 diff 文本，变更种类没变就不用重载（重载会把编辑器整个重建）
+            if fresh == change, case .editableDiff = contents[tab.id] { continue }
             if fresh != change, let index = tabs.firstIndex(where: { $0.id == tab.id }) {
                 var replaced = EditorTab(kind: .diff(fresh), isPreview: tab.isPreview)
                 replaced.scrollTop = tab.scrollTop
+                replaced.cursor = tab.cursor
                 tabs[index] = replaced
             }
             contents[tab.id] = nil
@@ -477,15 +759,28 @@ final class ProjectSession: ObservableObject, Identifiable {
     }
 
     /// 开着的文件在磁盘上变了就重读；当前显示的那个重渲染但保持滚动位置——Agent 正在改的文件用户多半正盯着看。
+    /// 改过还没保存的不动它（用户的改动优先），标题条上会提示磁盘上的已经不一样了。
     private func reloadOpenFilesIfChanged() {
-        for tab in tabs {
-            guard let url = tab.fileURL, let content = contents[tab.id], content != .loading else { continue }
+        let activeDocument = activeTab.flatMap(documentID(for:))
+        for documentID in Set(tabs.compactMap(documentID(for:))) where !draftStore.isModified(documentID) {
+            guard let url = EditorTab.fileURL(fromID: documentID), let content = contents[documentID], content != .loading else { continue }
             let modified = (try? fileManager.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
             guard FileContentLoader.isStale(content, modifiedOnDisk: modified, exists: fileManager.fileExists(atPath: url.path)) else { continue }
-            if tab.id == activeTabID, isActive {
-                rememberScroll(of: tab.id) { [weak self] current in self?.loadFile(for: current) }
+            if documentID == activeDocument, isActive, let activeTabID {
+                // 先问编辑器：刚敲的几笔可能还没送过来，问完要是有草稿就不重读了
+                rememberScroll(of: activeTabID) { [weak self] current in
+                    guard let self, !self.draftStore.isModified(documentID) else { return }
+                    if current.fileURL != nil {
+                        // 文件标签：走 loadFile，大文件（只读）也能异步重读；ensureDocument 只管可编辑上限之内的
+                        self.loadFile(for: current)
+                    } else {
+                        self.contents[documentID] = nil
+                        self.ensureDocument(documentID)
+                        if self.activeTabID == activeTabID { self.renderActiveTab() }
+                    }
+                }
             } else {
-                contents[tab.id] = nil
+                contents[documentID] = nil
             }
         }
     }

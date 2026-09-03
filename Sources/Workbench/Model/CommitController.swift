@@ -6,18 +6,13 @@ import Foundation
 /// 只认识 git 与仓库根，不认识标签页和目录树；做完一件事通过 `onRepositoryChanged` 通知会话去刷新。
 @MainActor
 final class CommitController: ObservableObject {
-    enum Status: Equatable {
-        case success(String)
-        case failure(String)
-    }
-
     @Published var message = ""
     /// 不勾选（不提交）的路径。默认全选，新出现的变更自动算勾上。
     @Published private(set) var excludedPaths: Set<String> = []
     @Published private(set) var isCommitting = false
     @Published private(set) var isPushing = false
     /// 最近一次操作的结果或错误，显示在提交面板底部。
-    @Published private(set) var status: Status?
+    @Published private(set) var status: OperationStatus?
 
     private let git: GitClient
     private let repositoryRoot: URL
@@ -110,10 +105,10 @@ final class CommitController: ObservableObject {
     // MARK: - 回滚与删除
 
     /// 回滚一条变更到 HEAD。修改/删除/重命名/冲突 → restore；新增（已在索引）→ 连文件一起删。
-    /// 未跟踪文件不在 git 里、没有可回滚的目标，走 `deleteUntracked`。
+    /// 未跟踪文件不在 git 里、没有可回滚的目标，走 `delete`。
     func rollback(_ change: GitChange) {
         guard change.kind != .untracked else {
-            deleteUntracked(change)
+            delete(change)
             return
         }
         Task { [weak self] in
@@ -134,17 +129,21 @@ final class CommitController: ObservableObject {
         }
     }
 
-    /// 删除一个未跟踪文件：进废纸篓，不是 rm——IDEA 的删除能从本地历史找回来，这里用废纸篓兜底。
-    func deleteUntracked(_ change: GitChange) {
+    /// 能不能删：磁盘上还有文件才行（「已删除」的变更没有东西可删）。
+    func canDelete(_ change: GitChange) -> Bool { change.kind != .deleted }
+
+    /// 删除一条变更对应的文件：进废纸篓，不是 rm——IDEA 的删除能从本地历史找回来，这里用废纸篓兜底。
+    /// 已跟踪的文件删掉之后 git 会把它显示成「已删除」，要不要提交这次删除由用户决定；未跟踪的删掉就没了。
+    func delete(_ change: GitChange) {
+        guard canDelete(change) else { return }
         do {
-            try Self.trash(repositoryRoot.appendingPathComponent(change.path))
+            try Trash.move(repositoryRoot.appendingPathComponent(change.path))
+            Log.info("git", "已删除 \(change.path)")
         } catch {
             status = .failure("删除失败：\(error.userFacingDescription)")
+            Log.warn("git", "删除 \(change.path) 失败：\(error)")
         }
         onRepositoryChanged?([change])
     }
-
-    nonisolated private static func trash(_ url: URL) throws {
-        try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-    }
 }
+
