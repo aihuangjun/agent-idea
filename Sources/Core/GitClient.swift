@@ -221,6 +221,21 @@ public struct GitClient: Sendable {
         _ = try await run(["restore", "--source=HEAD", "--staged", "--worktree", "--"] + Array(Set(paths)).sorted(), in: repositoryRoot)
     }
 
+    /// 重命名 / 移动一个已跟踪的文件或目录（`git mv`）：git 负责搬磁盘上的文件，索引里同步记成重命名，
+    /// status 才会显示成一条「重命名」而不是「删除 + 未跟踪」。未跟踪的路径 git 会拒绝，调用方退回普通的搬文件。
+    public func move(from oldPath: String, to newPath: String, repositoryRoot: URL) async throws {
+        _ = try await run(["mv", "--", oldPath, newPath], in: repositoryRoot)
+    }
+
+    /// `git mv` 失败是不是「git 不认这个路径」——未跟踪的文件、里面没有已跟踪文件的目录，
+    /// 以及不分大小写的文件系统上目录只改大小写（git 把目标当成已存在的目录、想搬进它自己，报 Invalid argument）。
+    /// 这几种可以放心退回普通搬文件；别的（index.lock 被占、目标已存在）不能，否则文件搬了、索引没动。
+    public static func refusedBecauseUntracked(_ error: Error) -> Bool {
+        guard let error = error as? ShellCommandError else { return false }
+        let message = error.message.lowercased()
+        return message.contains("not under version control") || message.contains("source directory is empty") || message.contains("invalid argument")
+    }
+
     /// 回滚一个「新增」（在索引里、不在 HEAD 里）的文件：从索引和工作区一起删掉。IDEA 对 Added 的回滚也是删文件。
     public func removeAdded(path: String, repositoryRoot: URL) async throws {
         _ = try await run(["rm", "-f", "-q", "--", path], in: repositoryRoot)

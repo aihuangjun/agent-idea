@@ -100,10 +100,10 @@ public struct AgentIDEARootScene: Scene {
                 Divider()
                 // IDEA 的 F7 / ⇧F7。焦点在 WebView 里时页面自己处理（render.js），这里管焦点在别处的情况
                 Button("下一处变更") { workbench.active?.navigateChange(.next) }
-                    .keyboardShortcut(Self.f7, modifiers: [])
+                    .keyboardShortcut(.f7, modifiers: [])
                     .disabled(!(workbench.active.map { $0.canNavigateChanges && $0.changePosition.hasNext } ?? false))
                 Button("上一处变更") { workbench.active?.navigateChange(.previous) }
-                    .keyboardShortcut(Self.f7, modifiers: .shift)
+                    .keyboardShortcut(.f7, modifiers: .shift)
                     .disabled(!(workbench.active.map { $0.canNavigateChanges && $0.changePosition.hasPrevious } ?? false))
                 Divider()
                 Button("刷新") { workbench.active?.refreshAll() }
@@ -141,9 +141,6 @@ public struct AgentIDEARootScene: Scene {
             }
         }
     }
-
-    /// F7 作为菜单键：SwiftUI 没有现成的常量，按 AppKit 的功能键字符构造（NSMenuItem 的 keyEquivalent 就是这个字符）。
-    private static let f7 = KeyEquivalent(Character(Unicode.Scalar(UInt32(NSF7FunctionKey))!))
 
     private static func revealLogs() {
         let directory = AppPaths.logDirectory

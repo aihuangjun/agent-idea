@@ -13,6 +13,8 @@ struct ProjectTreeView: View {
     @State private var clicks = DoubleClickDetector(interval: NSEvent.doubleClickInterval)
     /// 等确认的删除（右键菜单或 ⌫）。
     @State private var pendingDelete: DestructiveConfirmation?
+    /// 正在重命名的节点（右键菜单或 ⇧F6），对话框以 sheet 弹出。
+    @State private var renaming: FileNode?
 
     init(session: ProjectSession) {
         self.session = session
@@ -76,7 +78,8 @@ struct ProjectTreeView: View {
                                 isSelected: session.selectedPath == row.id,
                                 isFocused: isFocused,
                                 onPress: { isFocused = true },
-                                onDelete: { requestDelete($0) }
+                                onDelete: { requestDelete($0) },
+                                onRename: { renaming = $0 }
                             )
                             .id(row.id)
                         }
@@ -110,10 +113,19 @@ struct ProjectTreeView: View {
             // ⌫ / fn⌫ 删除选中项（IDEA 的 Delete），先确认
             .onKeyPress(.delete) { requestDeleteOfSelection() }
             .onKeyPress(.deleteForward) { requestDeleteOfSelection() }
+            // ⇧F6 重命名选中项（IDEA 的 Rename）
+            .onKeyPress(phases: .down) { press in
+                guard press.key == .f6, press.modifiers.contains(.shift), let node = session.selectedNode else { return .ignored }
+                renaming = node
+                return .handled
+            }
             .contentShape(Rectangle())
             .onTapGesture { isFocused = true }
             .onChange(of: session.revealRequests) { _, _ in scrollOnSelection = true }
             .destructiveConfirmation($pendingDelete)
+            .sheet(item: $renaming) { node in
+                RenameSheet(node: node) { session.renameProblem(for: node, newName: $0) } commit: { session.rename(node, to: $0) }
+            }
         }
     }
 
@@ -138,19 +150,21 @@ private struct FileSearchBar: View {
     @ObservedObject var search: FileSearchController
     let open: (FileSearchMatch) -> Void
     let close: () -> Void
-    @FocusState private var isFieldFocused: Bool
+    @State private var isFieldFocused = false
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Theme.mutedText)
-            TextField("查找文件名或路径", text: $search.query)
-                .textFieldStyle(.plain)
-                .font(Theme.uiFont)
-                .focused($isFieldFocused)
-                .onSubmit { if let match = search.selectedResult { open(match) } }
-                .onKeyPress(.upArrow) { search.moveSelection(by: -1); return .handled }
-                .onKeyPress(.downArrow) { search.moveSelection(by: 1); return .handled }
-                .onKeyPress(.escape) { close(); return .handled }
+            // NSTextField 直包：⌘F / 点放大镜时要从 WebView 手里把焦点抢过来，SwiftUI 的 FocusState 做不到
+            FocusedTextField(text: $search.query, placeholder: "查找文件名或路径", focusRequests: search.focusRequests) { key in
+                switch key {
+                case .up: search.moveSelection(by: -1)
+                case .down: search.moveSelection(by: 1)
+                case .submit: if let match = search.selectedResult { open(match) }
+                case .cancel: close()
+                }
+                return true
+            } onFocusChange: { isFieldFocused = $0 }
             if search.isIndexing {
                 ProgressView().controlSize(.mini).help("正在建索引…")
             } else if !search.query.isEmpty {
@@ -167,8 +181,6 @@ private struct FileSearchBar: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
-        .onAppear { isFieldFocused = true }
-        .onChange(of: search.focusRequests) { _, _ in isFieldFocused = true }
     }
 }
 
@@ -292,6 +304,8 @@ struct TreeRow: View {
     let onPress: () -> Void
     /// 右键「删除…」：交给树去确认。
     var onDelete: (FileNode) -> Void = { _ in }
+    /// 右键「重命名…」：交给树弹对话框。
+    var onRename: (FileNode) -> Void = { _ in }
     @State private var isHovering = false
     @State private var press: Press?
 
@@ -341,7 +355,7 @@ struct TreeRow: View {
             if isClick, press == .row { released() }
             press = nil
         }
-        .contextMenu { TreeContextMenu(session: session, node: node, requestDelete: onDelete) }
+        .contextMenu { TreeContextMenu(session: session, node: node, requestDelete: onDelete, requestRename: onRename) }
     }
 
     /// 按下：箭头区域直接展开/折叠；其余位置选中。
@@ -378,6 +392,7 @@ private struct TreeContextMenu: View {
     let session: ProjectSession
     let node: FileNode
     let requestDelete: (FileNode) -> Void
+    let requestRename: (FileNode) -> Void
 
     var body: some View {
         if !node.isDirectory {
@@ -393,6 +408,7 @@ private struct TreeContextMenu: View {
             Button("在终端中运行") { session.saveAll { Desktop.runInTerminal(node.url) } }
         }
         Divider()
+        Button("重命名…") { requestRename(node) }
         Button("删除…") { requestDelete(node) }
     }
 }

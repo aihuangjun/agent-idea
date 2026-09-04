@@ -36,6 +36,12 @@ struct DraftStore: Equatable {
         drafts[id] = nil
     }
 
+    /// 文件改了名：草稿跟着换键。
+    mutating func move(_ id: String, to newID: String) {
+        guard let draft = drafts.removeValue(forKey: id) else { return }
+        drafts[newID] = draft
+    }
+
     /// 把一个标签的草稿写回磁盘（原编码、原行尾、原子写）。没有草稿返回 nil；写成功返回换上新文本的内容，草稿删掉。
     mutating func write(_ id: String, to url: URL, content: TabContent, fileManager: FileManager = .default) throws -> TabContent? {
         guard let draft = drafts[id], let original = content.text, let encoding = content.encodingName else { return nil }

@@ -100,6 +100,16 @@ public struct FlattenedTree: Sendable {
     /// 把全部子节点缓存作废（⌘R 手动刷新）。展开状态保留，下一次 `rows(root:)` 前按需重列。
     public mutating func invalidateAll() { children.removeAll() }
 
+    /// 一个节点改了名（或挪了地方）：它和它下面的目录展开状态跟着换路径；这些目录的子节点缓存作废
+    /// （里面节点的 URL 还是旧的），父目录也要重列。都由下一次 `rows(root:)` 前的 `needsLoading` 补加载。
+    public mutating func rename(_ path: String, to newPath: String) {
+        expanded = Set(expanded.map { FileRename.rewrite($0, from: path, to: newPath) ?? $0 })
+        for key in children.keys where FileRename.rewrite(key, from: path, to: newPath) != nil {
+            children[key] = nil
+        }
+        children[(path as NSString).deletingLastPathComponent] = nil
+    }
+
     /// 从根开始按深度优先展开成可见行。根本身不出现在行里。
     /// 目录已展开但子节点还没加载时不产生子行——由调用方看到 `needsLoading` 去加载。
     public func rows(root: String) -> [Row] {

@@ -254,6 +254,102 @@ final class ProjectSession: ObservableObject, Identifiable {
         refreshAll()
     }
 
+    // MARK: - 重命名
+
+    /// 一个新名字能不能用（对话框边敲边检查）。`.unchanged` 也算不能用：对话框把按钮灰掉就行，不必报错。
+    func renameProblem(for node: FileNode, newName: String) -> FileRename.Problem? {
+        let parent = node.url.deletingLastPathComponent()
+        return FileRename.validate(newName, currentName: node.name) { name in
+            fileManager.fileExists(atPath: parent.appendingPathComponent(name).path)
+        }
+    }
+
+    /// 重命名文件或目录（IDEA 的 Rename，⇧F6）。先把没保存的都写盘（IDEA 重构前也先保存所有文档），
+    /// 在仓库里的走 `git mv`（status 显示成一条「重命名」，而不是「删除 + 未跟踪」），git 不认的（未跟踪、被忽略）直接搬；
+    /// 然后开着的标签、后退/前进历史、选中项、展开状态都换成新路径，最后刷 git。
+    func rename(_ node: FileNode, to newName: String) {
+        let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard node.url.path != project.root.path else { return }
+        if let problem = renameProblem(for: node, newName: name) {
+            if problem != .unchanged { banner = "重命名失败：\(problem.message)" }
+            return
+        }
+        let destination = node.url.deletingLastPathComponent().appendingPathComponent(name, isDirectory: node.isDirectory)
+        saveAll { [weak self] in
+            Task { [weak self] in await self?.move(node, to: destination) }
+        }
+    }
+
+    private func move(_ node: FileNode, to destination: URL) async {
+        // 未跟踪的文件 git mv 一定拒绝，不用白跑一趟；目录不看聚合状态（里面可能既有已跟踪的又有未跟踪的），交给 git 试
+        let isUntrackedFile = !node.isDirectory && gitStatus(for: node) == .change(.untracked)
+        if let git, let repositoryRoot = project.repositoryRoot, !isUntrackedFile, gitStatus(for: node) != .ignored,
+           let oldRelative = project.repositoryRelativePath(of: node.url), let newRelative = project.repositoryRelativePath(of: destination) {
+            do {
+                try await git.move(from: oldRelative, to: newRelative, repositoryRoot: repositoryRoot)
+                didRename(node.url, to: destination)
+                return
+            } catch {
+                // git 不认这个路径（未跟踪、目录里没有已跟踪文件）：退回普通的搬文件。git mv 搬之前把源和目标都检查过，不会搬到一半。
+                // 别的失败（Agent 正在跑 git、index.lock 被占）不能退回：文件搬了索引没动，status 会变成「删除 + 未跟踪」
+                guard GitClient.refusedBecauseUntracked(error) else {
+                    banner = "重命名失败：\(error.userFacingDescription)"
+                    Log.warn("project", "git mv \(oldRelative) 失败：\(error)")
+                    return
+                }
+                Log.info("project", "git mv \(oldRelative) 未成功，改为直接移动：\(error)")
+            }
+        }
+        do {
+            try fileManager.moveItem(at: node.url, to: destination)
+        } catch {
+            banner = "重命名失败：\(error.userFacingDescription)"
+            Log.warn("project", "重命名 \(node.url.path) 失败：\(error)")
+            return
+        }
+        didRename(node.url, to: destination)
+    }
+
+    /// 磁盘上已经搬好了：界面上所有指着旧路径的东西换到新路径。
+    private func didRename(_ oldURL: URL, to newURL: URL) {
+        Log.info("project", "已重命名 \(oldURL.path) → \(newURL.path)")
+        // 标签里的 URL 是解析过符号链接的（openFile），这里同样解析一遍再比，/var 与 /private/var 才对得上。
+        // 只解析父目录再把名字拼回去：磁盘已经搬完了，解析整条旧路径在不分大小写的文件系统上会得到新名字
+        // （a.txt → A.txt 时旧路径解析出来也是 A.txt），新旧一样就一个标签都换不到
+        let parent = oldURL.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
+        let resolvedOld = parent.appendingPathComponent(oldURL.lastPathComponent).path
+        let resolvedNew = parent.appendingPathComponent(newURL.lastPathComponent).path
+        // 文件标签换成新路径的标签：基线、草稿、滚动位置、光标都带过去；内容重读（扩展名变了语言也会变）。
+        // 草稿刚才已经写盘了，还留着的是写盘失败的，跟着换 id 别丢
+        var renamedTabIDs: [String: String] = [:]
+        for (index, tab) in tabs.enumerated() {
+            guard let url = tab.fileURL, let moved = FileRename.rewrite(url.path, from: resolvedOld, to: resolvedNew) else { continue }
+            var replaced = EditorTab(kind: .file(URL(fileURLWithPath: moved)), isPreview: tab.isPreview)
+            replaced.scrollTop = tab.scrollTop
+            replaced.cursor = tab.cursor
+            replaced.markdownView = tab.markdownView
+            tabs[index] = replaced
+            renamedTabIDs[tab.id] = replaced.id
+            contents[tab.id] = nil
+            baseTexts[replaced.id] = baseTexts.removeValue(forKey: tab.id)
+            draftStore.move(tab.id, to: replaced.id)
+            navigation.replace(tab.id, with: replaced.id)
+        }
+        if let activeTabID, let moved = renamedTabIDs[activeTabID] { self.activeTabID = moved }
+        // 工作区 diff 标签：变更的路径变了，git 刷新后会是另一条变更，直接关掉（草稿已经挪走，这里不会写回旧路径）
+        for tab in tabs {
+            guard let change = tab.change, let url = url(for: change),
+                  FileRename.rewrite(url.resolvingSymlinksInPath().standardizedFileURL.path, from: resolvedOld, to: resolvedNew) != nil else { continue }
+            finishClosing(tab.id)
+        }
+        if let selectedPath, let moved = FileRename.rewrite(selectedPath, from: oldURL.path, to: newURL.path) { self.selectedPath = moved }
+        tree.rename(oldURL.path, to: newURL.path)
+        recomputeRows()
+        search.applyChanges([oldURL.path, newURL.path])
+        if let tab = activeTab, tab.fileURL != nil, contents[tab.id] == nil { loadFile(for: tab) }
+        refreshGit()
+    }
+
     // MARK: - 标签页
 
     /// 打开一个文件。`pinned == false` 复用预览标签（变更列表单击、Markdown 链接），`true` 固定。
@@ -568,7 +664,8 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     private func loadFile(for tab: EditorTab) {
         guard let url = tab.fileURL else { return }
-        fetchBaseText(documentID: tab.id)
+        // 已有基线（重读、重命名后）不再取：HEAD 变了 apply(snapshot) 会整个重取
+        if baseTexts[tab.id] == nil { fetchBaseText(documentID: tab.id) }
         let fileManager = self.fileManager
         let size = (try? fileManager.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
         if size <= Self.synchronousReadLimit {
@@ -588,8 +685,10 @@ final class ProjectSession: ObservableObject, Identifiable {
     private func fetchBaseText(documentID: String) {
         guard let git, let repositoryRoot = project.repositoryRoot, let url = EditorTab.fileURL(fromID: documentID),
               let relative = project.repositoryRelativePath(of: url) else { return }
+        // 重命名过的文件 HEAD 里是原来的路径
+        let headPath = change(for: url)?.originalPath ?? relative
         Task { [weak self] in
-            let base = await git.headContent(path: relative, repositoryRoot: repositoryRoot)
+            let base = await git.headContent(path: headPath, repositoryRoot: repositoryRoot)
             guard let self, self.tabs.contains(where: { self.documentID(for: $0) == documentID }) else { return }
             self.baseTexts[documentID] = base
             if self.isActive, let tab = self.activeTab, self.documentID(for: tab) == documentID { self.renderer.setBase(path: url.path, text: base) }
@@ -628,7 +727,8 @@ final class ProjectSession: ObservableObject, Identifiable {
                 // 先等基线到了再画，免得先闪一下「整个文件都是新增」
                 guard let self, let url = EditorTab.fileURL(fromID: documentID), let relative = self.project.repositoryRelativePath(of: url) else { return }
                 if self.baseTexts[documentID] == nil {
-                    self.baseTexts[documentID] = await git.headContent(path: relative, repositoryRoot: repositoryRoot)
+                    // 重命名过的变更 HEAD 里是原来的路径
+                    self.baseTexts[documentID] = await git.headContent(path: change.originalPath ?? relative, repositoryRoot: repositoryRoot)
                 }
                 self.store(.editableDiff(documentID: documentID), for: tab.id)
             }

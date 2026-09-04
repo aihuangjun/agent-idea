@@ -39,6 +39,11 @@ public struct NavigationHistory<Element: Equatable>: Equatable {
         return entries[index]
     }
 
+    /// 某个地方换了名字（文件重命名后标签 id 变了）：历史里的记录跟着换，位置不动。
+    public mutating func replace(_ element: Element, with replacement: Element) {
+        entries = entries.map { $0 == element ? replacement : $0 }
+    }
+
     /// 某个地方没了：抹掉它的每一条记录，相邻的重复项合并。
     public mutating func remove(_ element: Element) {
         var kept: [Element] = []

@@ -475,3 +475,236 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
     #expect(Updater.describe(Updater.UpdateError.checksumMismatch).contains("校验"))
     #expect(Updater.shellQuoted("/Applications/It's.app") == "'/Applications/It'\\''s.app'")
 }
+
+/// 目录树里重命名（没有 git）：目录连同里面开着的标签、展开状态、选中项一起换到新路径；内容与光标位置不丢。
+@Test @MainActor func renamingDirectoryMovesTabsSelectionAndExpansion() async throws {
+    try await withTemporaryDirectory { directory in
+        let sub = directory.appendingPathComponent("sub")
+        try FileManager.default.createDirectory(at: sub.appendingPathComponent("deep"), withIntermediateDirectories: true)
+        let inner = sub.appendingPathComponent("deep/inner.md")
+        try "# hi".write(to: inner, atomically: true, encoding: .utf8)
+        let other = directory.appendingPathComponent("other.txt")
+        try "o".write(to: other, atomically: true, encoding: .utf8)
+        let workbench = makeWorkbench(in: directory, git: nil)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+
+        session.openFile(other, pinned: true)
+        session.openFile(inner, pinned: true)
+        session.expand(sub.path)
+        session.expand(sub.appendingPathComponent("deep").path)
+        let innerNode = try #require(session.rows.first { $0.node.name == "inner.md" }?.node)
+        session.select(innerNode.id)
+        let subNode = try #require(session.rows.first { $0.node.name == "sub" }?.node)
+
+        session.rename(subNode, to: "renamed")
+        let renamedInner = directory.appendingPathComponent("renamed/deep/inner.md")
+        await waitUntil { FileManager.default.fileExists(atPath: renamedInner.path) && session.tabs.count == 2 && session.tabs[1].fileURL?.lastPathComponent == "inner.md" }
+        #expect(!FileManager.default.fileExists(atPath: inner.path))
+        let movedTab = try #require(session.tabs.last)
+        #expect(movedTab.fileURL?.path == renamedInner.resolvingSymlinksInPath().path)
+        #expect(session.activeTabID == movedTab.id, "当前标签跟着换 id")
+        #expect(session.contents[movedTab.id]?.text == "# hi", "内容按新路径重读")
+        #expect(session.tabs.first?.fileURL?.lastPathComponent == "other.txt", "别的标签不动")
+        #expect(session.selectedPath == renamedInner.path)
+        #expect(session.rows.map(\.node.name).filter { $0 != "recent.json" } == ["renamed", "deep", "inner.md", "other.txt"], "展开状态跟着换、目录重列")
+        #expect(session.canGoBack, "后退历史里的旧 id 换成了新 id")
+        session.goBack()
+        #expect(session.activeTab?.fileURL?.lastPathComponent == "other.txt")
+        session.goForward()
+        #expect(session.activeTabID == movedTab.id)
+    }
+}
+
+/// 在仓库里的文件走 `git mv`（git 负责搬文件）；没保存的改动先写盘；名字不合法不动磁盘、给提示。
+@Test @MainActor func renamingTrackedFileUsesGitMvAndSavesDraftFirst() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        let file = directory.appendingPathComponent("a.txt")
+        try "x\n".write(to: file, atomically: true, encoding: .utf8)
+        try "t".write(to: directory.appendingPathComponent("taken.txt"), atomically: true, encoding: .utf8)
+        let moves = Locked<[[String]]>([])
+        let runner = gitRunner(root: root, status: { "# branch.head main\u{0}" }, extra: { arguments in
+            guard arguments.first == "mv" else { return nil }
+            moves.value.append(arguments)
+            // 假 git 不碰磁盘，这里替它把文件搬过去
+            try? FileManager.default.moveItem(atPath: root + "/" + arguments[2], toPath: root + "/" + arguments[3])
+            return shellOutput("")
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.commit != nil }
+
+        session.openFile(file, pinned: true)
+        session.applyEdit(path: file.resolvingSymlinksInPath().path, text: "edited\n")
+        #expect(!session.drafts.isEmpty)
+        let node = try #require(session.rows.first { $0.node.name == "a.txt" }?.node)
+
+        session.rename(node, to: "taken.txt")
+        #expect(session.banner?.contains("已经有这个名字") == true)
+        #expect(moves.value.isEmpty)
+        session.rename(node, to: "a.txt")
+        #expect(moves.value.isEmpty, "名字没变什么都不做")
+
+        session.rename(node, to: "b.swift")
+        let renamed = directory.appendingPathComponent("b.swift")
+        await waitUntil { session.tabs.first?.fileURL?.lastPathComponent == "b.swift" }
+        #expect(moves.value == [["mv", "--", "a.txt", "b.swift"]])
+        #expect(try String(contentsOf: renamed, encoding: .utf8) == "edited\n", "改动先写盘再搬")
+        #expect(session.drafts.isEmpty)
+        if case .code(_, let language, _, _, _) = try #require(session.contents[session.tabs[0].id]) {
+            #expect(language.highlightID == "swift", "扩展名变了语言跟着变")
+        } else {
+            Issue.record("内容应该已经按新路径重读")
+        }
+        #expect(!session.rows.contains { $0.node.name == "a.txt" })
+    }
+}
+
+/// git 不认的路径（未跟踪）：git mv 会拒绝，退回普通搬文件；未跟踪的文件根本不去问 git。
+@Test @MainActor func renamingUntrackedFileFallsBackToPlainMove() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        try "n".write(to: directory.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("dir"), withIntermediateDirectories: true)
+        try "d".write(to: directory.appendingPathComponent("dir/f.txt"), atomically: true, encoding: .utf8)
+        let runner = gitRunner(root: root, status: { "# branch.head main\u{0}? new.txt\u{0}? dir/f.txt\u{0}" }, extra: { arguments in
+            arguments.first == "mv" ? shellOutput("", status: 128, stderr: "fatal: not under version control") : nil
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.changeGroups.total == 2 }
+
+        let fileNode = try #require(session.rows.first { $0.node.name == "new.txt" }?.node)
+        session.rename(fileNode, to: "moved.txt")
+        await waitUntil { FileManager.default.fileExists(atPath: directory.appendingPathComponent("moved.txt").path) }
+        #expect(runner.calls(startingWith: "mv").isEmpty, "未跟踪的文件不问 git")
+
+        let dirNode = try #require(session.rows.first { $0.node.name == "dir" }?.node)
+        session.rename(dirNode, to: "dir2")
+        await waitUntil { FileManager.default.fileExists(atPath: directory.appendingPathComponent("dir2/f.txt").path) }
+        #expect(runner.calls(startingWith: "mv") == [["mv", "--", "dir", "dir2"]], "目录先交给 git 试，被拒绝后自己搬")
+        #expect(session.banner == nil)
+    }
+}
+
+/// 只改大小写（a.txt → A.txt）：不分大小写的文件系统上旧路径搬完后解析出来就是新名字，标签照样得换 id，
+/// 之后再从树上打开同一个文件不能出现第二个标签（两份草稿会互相覆盖）。
+@Test @MainActor func renamingOnlyCaseStillRemapsTabs() async throws {
+    try await withTemporaryDirectory { directory in
+        let file = directory.appendingPathComponent("a.txt")
+        try "x".write(to: file, atomically: true, encoding: .utf8)
+        let workbench = makeWorkbench(in: directory, git: nil)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        session.openFile(file, pinned: true)
+        let node = try #require(session.rows.first { $0.node.name == "a.txt" }?.node)
+
+        session.rename(node, to: "A.txt")
+        await waitUntil { session.tabs.first?.title == "A.txt" }
+        #expect(session.tabs.count == 1)
+        #expect(session.tabs[0].id == EditorTab.id(forFile: directory.appendingPathComponent("A.txt").resolvingSymlinksInPath()))
+        #expect(session.contents[session.tabs[0].id]?.text == "x")
+        session.openFile(directory.appendingPathComponent("A.txt"), pinned: true)
+        #expect(session.tabs.count == 1, "同一个文件不能开出第二个标签")
+    }
+}
+
+/// 同一个文件既开着文件标签又开着工作区 diff 标签：重命名后文件标签换 id、草稿跟着走，diff 标签关掉，旧文档释放干净。
+@Test @MainActor func renamingFileWithFileAndDiffTabsOpen() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        let file = directory.appendingPathComponent("m.txt")
+        try "x\n".write(to: file, atomically: true, encoding: .utf8)
+        let runner = gitRunner(root: root, status: { "# branch.head main\u{0}1 .M N... 100644 100644 100644 a b m.txt\u{0}" }, extra: { arguments in
+            switch arguments.first {
+            case "show": return shellOutput("head\n")
+            case "mv":
+                try? FileManager.default.moveItem(atPath: root + "/" + arguments[2], toPath: root + "/" + arguments[3])
+                return shellOutput("")
+            default: return nil
+            }
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.changeGroups.total == 1 }
+        let change = try #require(session.gitSnapshot.changes.first)
+
+        session.openFile(file, pinned: true)
+        session.openDiff(change, pinned: true)
+        let fileID = session.tabs[0].id, diffID = session.tabs[1].id
+        await waitUntil { session.contents[diffID] != nil && session.contents[diffID] != .loading && session.baseTexts[fileID] != nil }
+        session.applyEdit(path: file.resolvingSymlinksInPath().path, text: "draft\n")
+        let node = try #require(session.rows.first { $0.node.name == "m.txt" }?.node)
+
+        session.rename(node, to: "n.txt")
+        await waitUntil { session.tabs.count == 1 && session.tabs[0].title == "n.txt" }
+        let newID = session.tabs[0].id
+        #expect(session.tabs[0].fileURL == nil || session.tabs[0].change == nil, "diff 标签已关")
+        #expect(session.drafts.isEmpty, "草稿先写盘再搬")
+        #expect(try String(contentsOf: directory.appendingPathComponent("n.txt"), encoding: .utf8) == "draft\n")
+        #expect(session.baseTexts[newID] == "head\n", "基线带过去")
+        #expect(session.contents[fileID] == nil && session.baseTexts[fileID] == nil && session.drafts[fileID] == nil, "旧文档释放干净")
+        #expect(session.activeTabID == newID)
+    }
+}
+
+/// 变更列表里点一条「重命名」打开可编辑 diff（文件标签没开着）：基线要取 HEAD 里的原路径，否则整个文件显示成新增。
+@Test @MainActor func editableDiffOfRenamedChangeUsesOriginalPathAsBase() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        try "x\n".write(to: directory.appendingPathComponent("new.txt"), atomically: true, encoding: .utf8)
+        let shown = Locked<[String]>([])
+        let runner = gitRunner(root: root, status: { "# branch.head main\u{0}2 R. N... 100644 100644 100644 a a R100 new.txt\u{0}old.txt\u{0}" }, extra: { arguments in
+            guard arguments.first == "show" else { return nil }
+            shown.value.append(arguments[1])
+            return arguments[1] == "HEAD:old.txt" ? shellOutput("head\n") : shellOutput("", status: 128, stderr: "fatal: path 'new.txt' does not exist")
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.changeGroups.total == 1 }
+        let change = try #require(session.gitSnapshot.changes.first)
+        #expect(change.kind == .renamed && change.originalPath == "old.txt")
+
+        session.openDiff(change, pinned: true)
+        let documentID = try #require(session.documentID(for: session.tabs[0]))
+        await waitUntil { session.baseTexts[documentID] != nil }
+        #expect(session.baseTexts[documentID] == "head\n")
+        #expect(shown.value == ["HEAD:old.txt"])
+    }
+}
+
+/// git mv 因为别的原因失败（index.lock 被占）：不能退回普通搬文件——文件搬了索引没动。报 banner，磁盘不动。
+/// 普通搬文件失败（源文件已经没了）同样报 banner。
+@Test @MainActor func renamingReportsFailuresWithoutMovingFiles() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        let tracked = directory.appendingPathComponent("t.txt")
+        try "t".write(to: tracked, atomically: true, encoding: .utf8)
+        try "u".write(to: directory.appendingPathComponent("u.txt"), atomically: true, encoding: .utf8)
+        let runner = gitRunner(root: root, status: { "# branch.head main\u{0}? u.txt\u{0}" }, extra: { arguments in
+            arguments.first == "mv" ? shellOutput("", status: 128, stderr: "fatal: Unable to create '.git/index.lock': File exists.") : nil
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.changeGroups.total == 1 }
+
+        let node = try #require(session.rows.first { $0.node.name == "t.txt" }?.node)
+        session.rename(node, to: "t2.txt")
+        await waitUntil { session.banner != nil }
+        #expect(session.banner?.contains("index.lock") == true)
+        #expect(FileManager.default.fileExists(atPath: tracked.path) && !FileManager.default.fileExists(atPath: directory.appendingPathComponent("t2.txt").path))
+
+        session.dismissBanner()
+        let untracked = try #require(session.rows.first { $0.node.name == "u.txt" }?.node)
+        try FileManager.default.removeItem(at: untracked.url)
+        session.rename(untracked, to: "u2.txt")
+        await waitUntil { session.banner != nil }
+        #expect(session.banner?.hasPrefix("重命名失败") == true)
+    }
+}
