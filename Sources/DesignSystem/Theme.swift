@@ -50,8 +50,8 @@ public enum Theme {
     public static let vcsUntracked = Color(hex: 0x5FAD65)
     /// 删除：灰 #868A91，配删除线
     public static let vcsDeleted = Color(hex: 0x868A91)
-    /// 重命名：青 #4DBB94
-    public static let vcsRenamed = Color(hex: 0x4DBB94)
+    /// 重命名 / 移动：IDEA 没有单独的颜色，按「修改」显示成蓝（0.6.0 前是青绿 #4DBB94，与新增的绿放一起像两种绿）。
+    public static let vcsRenamed = vcsModified
     /// 冲突：红 #E55765
     public static let vcsConflicted = Color(hex: 0xE55765)
     /// 忽略：灰 #6F737A（比删除更暗一点，且不带删除线）
@@ -66,6 +66,7 @@ public enum Theme {
     public static let iconYellow = Color(hex: 0xD5B778)
     public static let iconPurple = Color(hex: 0xC77DBB)
     public static let iconBlue = Color(hex: 0x56A8F5)
+    public static let iconTeal = Color(hex: 0x4DBB94)
 
     // MARK: - 字体
 

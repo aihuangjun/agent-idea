@@ -31,7 +31,11 @@ struct StatusBarView: View {
                 Text("无 git").foregroundStyle(Theme.mutedText)
             }
             if let banner = session.banner {
-                Text(banner).foregroundStyle(Theme.warning).lineLimit(1)
+                // 出错的提示黄色；带「撤销」这种动作的是普通通知，用正文色
+                Text(banner).foregroundStyle(session.bannerAction == nil ? Theme.warning : Theme.text).lineLimit(1)
+                if let action = session.bannerAction {
+                    Button(action.title) { action.perform() }.buttonStyle(.plain).foregroundStyle(Theme.accent)
+                }
                 Button { session.dismissBanner() } label: { Image(systemName: "xmark").font(.system(size: 9)) }.buttonStyle(.plain)
             }
             Spacer()

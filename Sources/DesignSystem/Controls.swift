@@ -138,7 +138,7 @@ public enum FileIcon {
         "Java": Descriptor(systemName: "cup.and.saucer", color: Theme.iconOrange),
         "Kotlin": Descriptor(systemName: "cup.and.saucer", color: Theme.iconOrange),
         "Scala": Descriptor(systemName: "cup.and.saucer", color: Theme.iconOrange),
-        "Go": Descriptor(systemName: "g.square", color: Theme.vcsRenamed),
+        "Go": Descriptor(systemName: "g.square", color: Theme.iconTeal),
         "Rust": Descriptor(systemName: "gearshape", color: Theme.iconOrange),
         "C": Descriptor(systemName: "c.square", color: Theme.vcsModified),
         "C++": Descriptor(systemName: "c.square", color: Theme.vcsModified),

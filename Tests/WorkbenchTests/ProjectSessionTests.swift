@@ -708,3 +708,96 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         #expect(session.banner?.hasPrefix("重命名失败") == true)
     }
 }
+
+/// 拖拽移动（IDEA 的 Move）：文件搬进另一个目录，开着的标签换到新路径，目标目录展开并选中新位置；
+/// 拖回原目录什么都不做，拖进自己的子目录报错不动磁盘；仓库里的走 git mv。
+@Test @MainActor func movingNodesIntoAnotherDirectory() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("dst/deep"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("src"), withIntermediateDirectories: true)
+        let file = directory.appendingPathComponent("src/a.txt")
+        try "a".write(to: file, atomically: true, encoding: .utf8)
+        let moves = Locked<[[String]]>([])
+        let runner = gitRunner(root: root, status: { "# branch.head main\u{0}" }, extra: { arguments in
+            guard arguments.first == "mv" else { return nil }
+            moves.value.append(arguments)
+            try? FileManager.default.moveItem(atPath: root + "/" + arguments[2], toPath: root + "/" + arguments[3])
+            return shellOutput("")
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.commit != nil }
+        session.expand(directory.appendingPathComponent("src").path)
+        session.openFile(file, pinned: true)
+        let node = try #require(session.node(atPath: file.path))
+
+        #expect(session.moveProblem(for: node, into: directory.appendingPathComponent("src")) == .sameDirectory)
+        session.move(node, into: directory.appendingPathComponent("src"))
+        #expect(session.banner == nil)
+        let srcNode = try #require(session.node(atPath: directory.appendingPathComponent("src").path))
+        session.move(srcNode, into: directory.appendingPathComponent("src"))
+        #expect(session.banner?.contains("自己") == true)
+        session.dismissBanner()
+
+        let target = directory.appendingPathComponent("dst/deep")
+        #expect(session.moveProblem(for: node, into: target) == nil)
+        session.move(node, into: target)
+        let moved = target.appendingPathComponent("a.txt")
+        await waitUntil { session.tabs.first?.fileURL?.path == moved.resolvingSymlinksInPath().path }
+        #expect(moves.value == [["mv", "--", "src/a.txt", "dst/deep/a.txt"]])
+        #expect(FileManager.default.fileExists(atPath: moved.path) && !FileManager.default.fileExists(atPath: file.path))
+        #expect(session.selectedPath == moved.path)
+        #expect(session.rows.map(\.node.name).filter { $0 != "recent.json" } == ["dst", "deep", "a.txt", "src"], "目标目录展开、源目录清空")
+        #expect(session.tree.isExpanded(target.path))
+        #expect(session.contents[session.tabs[0].id]?.text == "a")
+        #expect(session.revealRequests == 1, "树要滚到新位置")
+
+        // 不弹确认，状态栏给「撤销」：撤销把它搬回去（同样走 git mv），再给一次「撤销」当重做
+        #expect(session.banner == "已移动 a.txt 到 dst/deep/")
+        let undo = try #require(session.bannerAction)
+        #expect(undo.title == "撤销")
+        undo.perform()
+        await waitUntil { FileManager.default.fileExists(atPath: file.path) }
+        await waitUntil { session.banner == "已移动 a.txt 到 src/" }
+        #expect(moves.value.last == ["mv", "--", "dst/deep/a.txt", "src/a.txt"])
+        #expect(session.tabs.first?.fileURL?.path == file.resolvingSymlinksInPath().path)
+        #expect(session.selectedPath == file.path)
+        let redo = try #require(session.bannerAction)
+
+        // 撤销之前文件被换掉了（删了再建一个同名的）：不能把别人搬走
+        try FileManager.default.removeItem(at: file)
+        try "impostor".write(to: file, atomically: true, encoding: .utf8)
+        let movesBefore = moves.value.count
+        redo.perform()
+        await waitUntil { session.banner?.hasPrefix("不能撤销") == true }
+        #expect(moves.value.count == movesBefore)
+        #expect(session.bannerAction == nil)
+        #expect(try String(contentsOf: file, encoding: .utf8) == "impostor")
+    }
+}
+
+/// 拖放校验看的是磁盘上的真实关系：目标失效的同名符号链接也算「已存在」；目标目录是指到源目录里面的链接也算「拖进自己」。
+@Test @MainActor func moveProblemSeesSymlinks() async throws {
+    try await withTemporaryDirectory { directory in
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("src"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("dst"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("src/inner"), withIntermediateDirectories: true)
+        try "a".write(to: directory.appendingPathComponent("src/a.txt"), atomically: true, encoding: .utf8)
+        try FileManager.default.createSymbolicLink(at: directory.appendingPathComponent("dst/a.txt"), withDestinationURL: directory.appendingPathComponent("nowhere"))
+        try FileManager.default.createSymbolicLink(at: directory.appendingPathComponent("alias"), withDestinationURL: directory.appendingPathComponent("src/inner"))
+        let workbench = makeWorkbench(in: directory, git: nil)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        session.expand(directory.appendingPathComponent("src").path)
+        let file = try #require(session.node(atPath: directory.appendingPathComponent("src/a.txt").path))
+        let src = try #require(session.node(atPath: directory.appendingPathComponent("src").path))
+
+        #expect(session.moveProblem(for: file, into: directory.appendingPathComponent("dst")) == .exists, "失效的同名链接也占着这个名字")
+        #expect(session.moveProblem(for: src, into: directory.appendingPathComponent("alias")) == .intoItself, "alias 指到 src 里面")
+        #expect(session.moveProblem(for: file, into: directory.appendingPathComponent("alias")) == nil)
+        #expect(session.renameProblem(for: file, newName: "b.txt") == nil)
+        #expect(session.renameProblem(for: session.node(atPath: directory.appendingPathComponent("dst").path)!, newName: "alias") == .exists, "改成已有链接的名字")
+    }
+}

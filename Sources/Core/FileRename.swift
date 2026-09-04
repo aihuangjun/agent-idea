@@ -42,6 +42,30 @@ public enum FileRename {
         return name.startIndex..<name.index(name.startIndex, offsetBy: stem.count)
     }
 
+    /// 拖到另一个目录（IDEA 的 Move）做不了的原因。
+    public enum MoveProblem: Equatable, Sendable {
+        case sameDirectory
+        case intoItself
+        case exists
+
+        public var message: String {
+            switch self {
+            case .sameDirectory: return "已经在这个目录里了"
+            case .intoItself: return "不能移到自己或自己的子目录里"
+            case .exists: return "目标目录下已经有同名的文件"
+            }
+        }
+    }
+
+    /// 把 `sourcePath` 搬进 `destinationDirectory`（都是绝对路径）行不行。`destinationExists` 由调用方看磁盘。
+    public static func validateMove(_ sourcePath: String, into destinationDirectory: String, destinationExists: (String) -> Bool) -> MoveProblem? {
+        let parent = (sourcePath as NSString).deletingLastPathComponent
+        if destinationDirectory == parent { return .sameDirectory }
+        if destinationDirectory == sourcePath || destinationDirectory.hasPrefix(sourcePath + "/") { return .intoItself }
+        if destinationExists((destinationDirectory as NSString).appendingPathComponent((sourcePath as NSString).lastPathComponent)) { return .exists }
+        return nil
+    }
+
     /// `path` 是 `oldPath` 本身或它下面的东西时，换成新路径；否则 nil。
     public static func rewrite(_ path: String, from oldPath: String, to newPath: String) -> String? {
         if path == oldPath { return newPath }

@@ -46,8 +46,18 @@ final class ProjectSession: ObservableObject, Identifiable {
     private var baseTextsHead = ""
     /// 后退 / 前进的历史，元素是标签 id。
     @Published private(set) var navigation = NavigationHistory<String>()
-    /// 顶部一条可关闭的提示。
-    @Published private(set) var banner: String?
+    /// 状态栏里一条可关闭的提示。换了内容就把附带的动作清掉（动作只属于设它时的那条）。
+    @Published private(set) var banner: String? {
+        didSet { if banner != oldValue { bannerAction = nil } }
+    }
+    /// 提示旁边的一个动作（「撤销」）。
+    @Published private(set) var bannerAction: BannerAction?
+    private var bannerTimeout: Task<Void, Never>?
+
+    struct BannerAction {
+        let title: String
+        let perform: @MainActor () -> Void
+    }
     /// 当前正文里前面 / 后面还有没有变更可跳（页面报上来的，见 `setChangePosition`）。
     @Published private(set) var changePosition = ContentRenderer.ChangePosition()
 
@@ -144,7 +154,22 @@ final class ProjectSession: ObservableObject, Identifiable {
         if active { renderActiveTab() }
     }
 
-    func dismissBanner() { banner = nil }
+    func dismissBanner() {
+        bannerTimeout?.cancel()
+        banner = nil
+    }
+
+    /// 一条过一会儿自己消失的提示，可带一个动作。出错的提示不走这里，那些要用户自己关。
+    private func notify(_ text: String, action: BannerAction? = nil, timeout: TimeInterval = 8) {
+        bannerTimeout?.cancel()
+        banner = text
+        bannerAction = action
+        bannerTimeout = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            guard !Task.isCancelled, let self, self.banner == text else { return }
+            self.banner = nil
+        }
+    }
 
     // MARK: - 目录树
 
@@ -259,9 +284,13 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 一个新名字能不能用（对话框边敲边检查）。`.unchanged` 也算不能用：对话框把按钮灰掉就行，不必报错。
     func renameProblem(for node: FileNode, newName: String) -> FileRename.Problem? {
         let parent = node.url.deletingLastPathComponent()
-        return FileRename.validate(newName, currentName: node.name) { name in
-            fileManager.fileExists(atPath: parent.appendingPathComponent(name).path)
-        }
+        return FileRename.validate(newName, currentName: node.name) { name in entryExists(parent.appendingPathComponent(name).path) }
+    }
+
+    /// 目录里有没有这个名字的条目。用 lstat 语义（`attributesOfItem`）而不是 `fileExists`：后者会跟着符号链接走，
+    /// 一个目标失效的链接会被当成不存在，搬过去才报「已存在」。
+    private func entryExists(_ path: String) -> Bool {
+        (try? fileManager.attributesOfItem(atPath: path)) != nil
     }
 
     /// 重命名文件或目录（IDEA 的 Rename，⇧F6）。先把没保存的都写盘（IDEA 重构前也先保存所有文档），
@@ -276,11 +305,69 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
         let destination = node.url.deletingLastPathComponent().appendingPathComponent(name, isDirectory: node.isDirectory)
         saveAll { [weak self] in
-            Task { [weak self] in await self?.move(node, to: destination) }
+            Task { [weak self] in await self?.move(node, to: destination, verb: "重命名") }
         }
     }
 
-    private func move(_ node: FileNode, to destination: URL) async {
+    /// 能不能把一个节点拖进某个目录（拖动经过时光标就据此变成「不允许」）。
+    func moveProblem(for node: FileNode, into directory: URL) -> FileRename.MoveProblem? {
+        guard node.url.path != project.root.path else { return .intoItself }
+        if let problem = FileRename.validateMove(node.url.path, into: directory.path, destinationExists: entryExists) { return problem }
+        // 目标目录可能是个符号链接，指到源目录里面去了：按真实路径再查一次自包含。搬的是链接本身时源不解析（只解析它的父目录）
+        let realSource = node.url.deletingLastPathComponent().resolvingSymlinksInPath().appendingPathComponent(node.name).path
+        let realDestination = directory.resolvingSymlinksInPath().path
+        if realDestination == realSource || realDestination.hasPrefix(realSource + "/") { return .intoItself }
+        return nil
+    }
+
+    /// 把文件或目录搬进另一个目录（IDEA 的 Move：目录树里拖拽）。搬法与重命名一样（先保存、git mv 或 moveItem、界面换路径）。
+    /// 不弹确认：像访达一样松手就搬，状态栏给一条「已移动 … 撤销」。
+    func move(_ node: FileNode, into directory: URL) {
+        if let problem = moveProblem(for: node, into: directory) {
+            if problem != .sameDirectory { banner = "移动失败：\(problem.message)" }
+            return
+        }
+        let destination = directory.appendingPathComponent(node.name, isDirectory: node.isDirectory)
+        saveAll { [weak self] in
+            Task { [weak self] in
+                guard let self, await self.move(node, to: destination, verb: "移动") else { return }
+                self.offerUndo(of: node, movedTo: destination)
+            }
+        }
+    }
+
+    /// 搬完之后的「撤销」：把它搬回原来的目录。撤销本身也是一次移动，也能再撤销（相当于重做）。
+    /// 记下搬过去的那个文件的身份（inode）：这几秒里它要是被删了、改名了，或者别的东西占了这个路径，撤销就不能再搬。
+    private func offerUndo(of node: FileNode, movedTo destination: URL) {
+        let target = project.projectRelativeComponents(of: destination.deletingLastPathComponent()).joined(separator: "/")
+        let moved = FileNode(url: destination, name: node.name, isDirectory: node.isDirectory, isSymlink: node.isSymlink)
+        let identity = fileIdentity(destination.path)
+        notify("已移动 \(node.name) 到 \(target.isEmpty ? "项目根目录" : target + "/")", action: BannerAction(title: "撤销") { [weak self] in
+            guard let self else { return }
+            self.dismissBanner()
+            guard identity != nil, self.fileIdentity(destination.path) == identity else {
+                self.banner = "不能撤销：\(node.name) 已经不在 \(target.isEmpty ? "项目根目录" : target + "/") 了"
+                return
+            }
+            self.move(moved, into: node.url.deletingLastPathComponent())
+        })
+    }
+
+    /// 一个目录项的身份（设备号 + inode），lstat 语义。不存在返回 nil。
+    private func fileIdentity(_ path: String) -> [Int]? {
+        guard let attributes = try? fileManager.attributesOfItem(atPath: path),
+              let device = attributes[.systemNumber] as? Int, let inode = attributes[.systemFileNumber] as? Int else { return nil }
+        return [device, inode]
+    }
+
+    /// 树上某个路径对应的节点（拖放时剪贴板上只有路径）。
+    func node(atPath path: String) -> FileNode? {
+        rows.first { $0.id == path }?.node
+    }
+
+    /// 真正搬。返回搬成功了没有。
+    @discardableResult
+    private func move(_ node: FileNode, to destination: URL, verb: String) async -> Bool {
         // 未跟踪的文件 git mv 一定拒绝，不用白跑一趟；目录不看聚合状态（里面可能既有已跟踪的又有未跟踪的），交给 git 试
         let isUntrackedFile = !node.isDirectory && gitStatus(for: node) == .change(.untracked)
         if let git, let repositoryRoot = project.repositoryRoot, !isUntrackedFile, gitStatus(for: node) != .ignored,
@@ -288,14 +375,14 @@ final class ProjectSession: ObservableObject, Identifiable {
             do {
                 try await git.move(from: oldRelative, to: newRelative, repositoryRoot: repositoryRoot)
                 didRename(node.url, to: destination)
-                return
+                return true
             } catch {
                 // git 不认这个路径（未跟踪、目录里没有已跟踪文件）：退回普通的搬文件。git mv 搬之前把源和目标都检查过，不会搬到一半。
                 // 别的失败（Agent 正在跑 git、index.lock 被占）不能退回：文件搬了索引没动，status 会变成「删除 + 未跟踪」
                 guard GitClient.refusedBecauseUntracked(error) else {
-                    banner = "重命名失败：\(error.userFacingDescription)"
+                    banner = "\(verb)失败：\(error.userFacingDescription)"
                     Log.warn("project", "git mv \(oldRelative) 失败：\(error)")
-                    return
+                    return false
                 }
                 Log.info("project", "git mv \(oldRelative) 未成功，改为直接移动：\(error)")
             }
@@ -303,11 +390,12 @@ final class ProjectSession: ObservableObject, Identifiable {
         do {
             try fileManager.moveItem(at: node.url, to: destination)
         } catch {
-            banner = "重命名失败：\(error.userFacingDescription)"
-            Log.warn("project", "重命名 \(node.url.path) 失败：\(error)")
-            return
+            banner = "\(verb)失败：\(error.userFacingDescription)"
+            Log.warn("project", "\(verb) \(node.url.path) 失败：\(error)")
+            return false
         }
         didRename(node.url, to: destination)
+        return true
     }
 
     /// 磁盘上已经搬好了：界面上所有指着旧路径的东西换到新路径。
@@ -316,9 +404,9 @@ final class ProjectSession: ObservableObject, Identifiable {
         // 标签里的 URL 是解析过符号链接的（openFile），这里同样解析一遍再比，/var 与 /private/var 才对得上。
         // 只解析父目录再把名字拼回去：磁盘已经搬完了，解析整条旧路径在不分大小写的文件系统上会得到新名字
         // （a.txt → A.txt 时旧路径解析出来也是 A.txt），新旧一样就一个标签都换不到
-        let parent = oldURL.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
-        let resolvedOld = parent.appendingPathComponent(oldURL.lastPathComponent).path
-        let resolvedNew = parent.appendingPathComponent(newURL.lastPathComponent).path
+        let oldParent = oldURL.deletingLastPathComponent(), newParent = newURL.deletingLastPathComponent()
+        let resolvedOld = oldParent.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent(oldURL.lastPathComponent).path
+        let resolvedNew = newParent.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent(newURL.lastPathComponent).path
         // 文件标签换成新路径的标签：基线、草稿、滚动位置、光标都带过去；内容重读（扩展名变了语言也会变）。
         // 草稿刚才已经写盘了，还留着的是写盘失败的，跟着换 id 别丢
         var renamedTabIDs: [String: String] = [:]
@@ -344,6 +432,12 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
         if let selectedPath, let moved = FileRename.rewrite(selectedPath, from: oldURL.path, to: newURL.path) { self.selectedPath = moved }
         tree.rename(oldURL.path, to: newURL.path)
+        if oldParent.path != newParent.path {
+            // 搬到别的目录：像 IDEA 那样在新位置露出来（展开目标目录、滚过去），选中它
+            tree.reveal(newURL.path, root: project.root.path)
+            revealRequests += 1
+            selectedPath = newURL.path
+        }
         recomputeRows()
         search.applyChanges([oldURL.path, newURL.path])
         if let tab = activeTab, tab.fileURL != nil, contents[tab.id] == nil { loadFile(for: tab) }

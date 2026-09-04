@@ -15,6 +15,8 @@ struct ProjectTreeView: View {
     @State private var pendingDelete: DestructiveConfirmation?
     /// 正在重命名的节点（右键菜单或 ⇧F6），对话框以 sheet 弹出。
     @State private var renaming: FileNode?
+    /// 拖拽正经过哪一行、那一行会把东西交给哪个目录：接收目录那一行画高亮。
+    @State private var dropTarget = DropTargetState()
 
     init(session: ProjectSession) {
         self.session = session
@@ -68,7 +70,11 @@ struct ProjectTreeView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        RootRow(name: session.project.name, path: session.project.root.path)
+                        RootRow(
+                            name: session.project.name, path: session.project.root.path,
+                            isDropTarget: dropTarget.directory == session.project.root.path,
+                            dropTarget: dropTarget(row: session.project.root.path, into: session.project.root)
+                        )
                         ForEach(session.rows) { row in
                             TreeRow(
                                 session: session,
@@ -79,7 +85,9 @@ struct ProjectTreeView: View {
                                 isFocused: isFocused,
                                 onPress: { isFocused = true },
                                 onDelete: { requestDelete($0) },
-                                onRename: { renaming = $0 }
+                                onRename: { renaming = $0 },
+                                isDropTarget: row.node.isDirectory && dropTarget.directory == row.id,
+                                dropTarget: dropTarget(row: row.id, into: row.node.isDirectory ? row.node.url : row.node.url.deletingLastPathComponent())
                             )
                             .id(row.id)
                         }
@@ -127,6 +135,21 @@ struct ProjectTreeView: View {
                 RenameSheet(node: node) { session.renameProblem(for: node, newName: $0) } commit: { session.rename(node, to: $0) }
             }
         }
+    }
+
+    /// 一行作为拖放目标：拖到目录上进那个目录，拖到文件上进文件所在的目录（IDEA 一样）。
+    /// 松手就搬，不弹确认（访达也不问），状态栏给「撤销」。
+    private func dropTarget(row: String, into directory: URL) -> TreeDropTarget {
+        TreeDropTarget(
+            check: { path in session.node(atPath: path).map { session.moveProblem(for: $0, into: directory) == nil } ?? false },
+            drop: { path in
+                dropTarget.clear(row: row)
+                if let node = session.node(atPath: path) { session.move(node, into: directory) }
+            },
+            targeted: { isTargeted in
+                if isTargeted { dropTarget.enter(row: row, directory: directory.path) } else { dropTarget.clear(row: row) }
+            }
+        )
     }
 
     private func requestDelete(_ node: FileNode) {
@@ -263,10 +286,50 @@ private struct FileSearchRow: View {
     }
 }
 
-/// 树最上面那一行：项目名。
+/// 拖拽正经过哪一行、要交给哪个目录。
+///
+/// 「离开」只能撤掉自己那一行建立的状态：两个相邻文件行代表同一个父目录时，AppKit 可能先报新行进入、再报旧行离开，
+/// 只按目录比对的话旧行的离开会把新行刚点亮的高亮清掉。
+struct DropTargetState: Equatable {
+    private(set) var row: String?
+    private(set) var directory: String?
+
+    mutating func enter(row: String, directory: String) {
+        self.row = row
+        self.directory = directory
+    }
+
+    mutating func clear(row: String) {
+        guard self.row == row else { return }
+        self.row = nil
+        directory = nil
+    }
+}
+
+/// 一行作为拖放目标要知道的事：来源能不能放、放了怎么办、拖着经过时告诉树高亮哪个目录。
+struct TreeDropTarget {
+    let check: (String) -> Bool
+    let drop: (String) -> Void
+    let targeted: (Bool) -> Void
+}
+
+/// 拖着东西经过时接收目录那一行的样子：访达式的圆角描边加淡淡的底色。
+private struct DropTargetHighlight: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 4)
+            .strokeBorder(Theme.accent, lineWidth: 1.5)
+            .background(RoundedRectangle(cornerRadius: 4).fill(Theme.accent.opacity(0.18)))
+            .padding(.horizontal, 3)
+            .padding(.vertical, 0.5)
+    }
+}
+
+/// 树最上面那一行：项目名。往上面拖东西 = 移到项目根目录。
 private struct RootRow: View {
     let name: String
     let path: String
+    let isDropTarget: Bool
+    let dropTarget: TreeDropTarget
 
     var body: some View {
         HStack(spacing: 6) {
@@ -280,6 +343,8 @@ private struct RootRow: View {
         }
         .padding(.horizontal, 10)
         .frame(height: Theme.treeRowHeight)
+        .overlay { if isDropTarget { DropTargetHighlight() } }
+        .overlay(TreeRowInteraction(dropCheck: dropTarget.check, drop: dropTarget.drop, onTargetChange: dropTarget.targeted))
     }
 }
 
@@ -306,6 +371,10 @@ struct TreeRow: View {
     var onDelete: (FileNode) -> Void = { _ in }
     /// 右键「重命名…」：交给树弹对话框。
     var onRename: (FileNode) -> Void = { _ in }
+    /// 拖着东西经过时这一行（目录）会接收：画高亮。由树算好传进来（文件行代表的是它所在的目录，高亮的是那个目录的行）。
+    let isDropTarget: Bool
+    /// 拖放到这一行上。
+    let dropTarget: TreeDropTarget
     @State private var isHovering = false
     @State private var press: Press?
 
@@ -314,6 +383,7 @@ struct TreeRow: View {
 
     private var node: FileNode { row.node }
     private var indent: CGFloat { CGFloat(row.depth) * 16 + 8 }
+    private var icon: FileIcon.Descriptor { node.isDirectory ? FileIcon.folder : FileIcon.file(named: node.name) }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -328,7 +398,6 @@ struct TreeRow: View {
                     Spacer().frame(width: 12)
                 }
             }
-            let icon = node.isDirectory ? FileIcon.folder : FileIcon.file(named: node.name)
             Image(systemName: icon.systemName)
                 .font(.system(size: 12))
                 .foregroundStyle(status == .ignored ? Theme.vcsIgnored : icon.color)
@@ -347,14 +416,26 @@ struct TreeRow: View {
         .padding(.trailing, 6)
         .frame(height: Theme.treeRowHeight)
         .background(rowBackground)
+        .overlay { if isDropTarget { DropTargetHighlight() } }
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        .onPress { location in
-            press = pressed(at: location)
-        } release: { isClick in
-            if isClick, press == .row { released() }
-            press = nil
-        }
+        .overlay(TreeRowInteraction(
+            press: { press = pressed(at: $0) },
+            release: { isClick in
+                if isClick, press == .row { released() }
+                press = nil
+            },
+            dragPath: node.id,
+            dragPreview: TreeRowInteraction.DragPreview(
+                title: node.name, systemImage: icon.systemName,
+                tint: NSColor(status == .ignored ? Theme.vcsIgnored : icon.color), leadingInset: indent + 4 + 12 + 4
+            ),
+            dropCheck: dropTarget.check,
+            drop: dropTarget.drop,
+            onTargetChange: dropTarget.targeted,
+            // 折叠的目录：拖着东西在上面停一会儿就展开，好往里面的子目录放
+            springLoad: node.isDirectory && !row.isExpanded ? { session.expand(node.id) } : nil
+        ))
         .contextMenu { TreeContextMenu(session: session, node: node, requestDelete: onDelete, requestRename: onRename) }
     }
 

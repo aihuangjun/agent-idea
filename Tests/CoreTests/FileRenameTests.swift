@@ -66,3 +66,28 @@ import TestSupport
     #expect(history.current == "b")
     #expect(history.goBack() == "c")
 }
+
+@Test func moveValidation() {
+    func check(_ source: String, into destination: String, existing: Set<String> = []) -> FileRename.MoveProblem? {
+        FileRename.validateMove(source, into: destination) { existing.contains($0) }
+    }
+    #expect(check("/r/a/x.txt", into: "/r/a") == .sameDirectory)
+    #expect(check("/r/a", into: "/r/a") == .intoItself)
+    #expect(check("/r/a", into: "/r/a/b") == .intoItself)
+    #expect(check("/r/a", into: "/r/ab") == nil, "同前缀不算子目录")
+    #expect(check("/r/a/x.txt", into: "/r/b", existing: ["/r/b/x.txt"]) == .exists)
+    #expect(check("/r/a/x.txt", into: "/r/b") == nil)
+}
+
+@Test func flattenedTreeRenameRelistsNewParentToo() {
+    var tree = FlattenedTree()
+    let node = { (path: String, directory: Bool) in FileNode(url: URL(fileURLWithPath: path), name: (path as NSString).lastPathComponent, isDirectory: directory) }
+    tree.setChildren([node("/r/a", true), node("/r/b", true)], for: "/r")
+    tree.setChildren([node("/r/a/x.txt", false)], for: "/r/a")
+    tree.setChildren([], for: "/r/b")
+    tree.expand("/r/a")
+    tree.expand("/r/b")
+    tree.rename("/r/a/x.txt", to: "/r/b/x.txt")
+    #expect(!tree.hasLoaded("/r/a") && !tree.hasLoaded("/r/b"), "新旧父目录都重列")
+    #expect(tree.hasLoaded("/r"))
+}
