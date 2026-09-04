@@ -26,9 +26,11 @@ import Testing
 
 @Test func updatePolicy() {
     let manifest = UpdateManifest(version: "0.2.0", fileName: "AgentIDEA-0.2.0.dmg", sizeBytes: 1_048_576, sha256: "x", downloadURL: URL(string: "https://api.github.com/x")!)
-    #expect(UpdatePolicy.hasUpdate(manifest: manifest, currentVersion: "0.1.0"))
-    #expect(!UpdatePolicy.hasUpdate(manifest: manifest, currentVersion: "0.2.0"))
-    #expect(!UpdatePolicy.hasUpdate(manifest: manifest, currentVersion: "garbage"))
+    #expect(UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.1.0", channel: .release)))
+    #expect(!UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.2.0", channel: .release)))
+    #expect(!UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.3.0", channel: .debug)))
+    #expect(UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.2.0", channel: .debug)), "同版本号的本地构建要能升到正式包")
+    #expect(!UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "garbage", channel: .debug)))
     #expect(manifest.displaySize == "1.0 MB")
 
     let now = Date()
@@ -67,7 +69,7 @@ import Testing
     #expect(manifest.sha256 == "6cd87900b78412e26015a2d9c59c7a737ae422869325b5c6301a21348a8965e7")
     #expect(manifest.downloadURL.absoluteString == "https://api.github.com/repos/o/r/releases/assets/2")
     #expect(manifest.notes == "- 提交历史\n- 查找文件")
-    #expect(UpdatePolicy.hasUpdate(manifest: manifest, currentVersion: "0.1.0"))
+    #expect(UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.1.0")))
 
     // 没有 dmg 附件、附件没有摘要：都不能当成可更新
     let noDmg = GitHubRelease(tagName: "v9.0.0", body: nil, assets: [release.assets[0]])

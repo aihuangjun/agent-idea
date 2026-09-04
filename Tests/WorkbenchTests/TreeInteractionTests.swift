@@ -158,7 +158,7 @@ import TestSupport
         send(.leftMouseDown, at: rowPoint(1))
         #expect(session.selectedPath == directory.appendingPathComponent("top.txt").path, "按下就该选中")
         send(.leftMouseUp, at: rowPoint(1))
-        await settle(0.05)
+        // 打开是在松开时同步做的，这里不用等；也不能等——并发跑的别的测试会把主线程占住，一等就超过双击间隔
         #expect(session.tabs.isEmpty, "一下不打开")
 
         // 同一行在双击间隔内再点一下：打开
