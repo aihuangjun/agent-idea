@@ -65,6 +65,7 @@ scripts/fetch_vendor.sh         # 仅升级前端离线依赖时（需联网）
 - **在终端中运行**：`Core/TerminalLauncher` 生成 `~/.agentidea/run/<名字>-<hash>.command`（进目录、跑脚本、打印退出码），视图层 `Desktop.runInTerminal` 用 `NSWorkspace.open` 交给终端。不走 AppleScript（要自动化权限）。
 - **签名**：`build_app.sh` 优先用钥匙串里的「AgentIDEA Local」证书，没有就 adhoc。`release.sh` 会核对产物的指定要求里确实是那张证书（钥匙串锁着时 find-identity 找得到、codesign 却签不成，会静默退回 adhoc）。
 - **发布走 GitHub Releases**：`scripts/release.sh` 打 tag `v$VERSION`、`gh release create` 上传 dmg；应用读 `releases/latest` 接口，用附件的 `digest`（sha256）校验下载。tag 前缀在脚本与 `Core/AppDistribution.swift` 各有一份（bash 引不到 Swift），架构测试核对。私有仓库下载附件要走附件的 API 地址 + `Accept: application/octet-stream`，302 到对象存储时必须摘掉 Authorization（`Updater.RedirectSanitizer`）。
+- **退出必须由 `AppDelegate.applicationShouldTerminate` 自己答 `.terminateNow`**：交给 SwiftUI 默认实现时 `NSApp.terminate` 会既不退出也不返回（0.6.2 前「立即重启」按钮没反应）；sheet 还挂着时 terminate 还会被直接取消，所以 `Updater.relaunch` 先把 `phase` 置回 `.idle`、下一轮事件循环再 terminate。验证这条要真起进程：`open -g -n --env … .build/AgentIDEA.app` 起一个后台实例（`open` 会把环境变量传给新实例，临时钩子里记得 `unsetenv`，否则重启脚本拉起的新实例会再触发一次，无限循环），看日志里旧实例退出后有没有新的「启动」。
 - **更新器访问私有仓库**：token 依次取 `~/.agentidea/github_token`、`GITHUB_TOKEN`/`GH_TOKEN`、`gh auth token`。GUI 应用不继承 shell 的 PATH，所以 gh / git 都按固定路径找（`ExecutableLocator`）。
 - **主题色两份**：`Theme.swift` 与 `web/style.css` 顶部变量，架构测试核对几个关键色。
 

@@ -199,6 +199,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MainActor.assumeIsolated { workbench?.saveAll() }
     }
 
+    /// 自己回答「能不能退出」：交给 SwiftUI 的默认实现时，更新后「立即重启」调 `NSApp.terminate` 会石沉大海——
+    /// 既不退出也不返回（它答 terminateLater 之后没了下文；sheet 挂着时则直接取消）。这个应用没有文档要问，
+    /// 没保存的草稿在 `applicationWillTerminate` 里写盘，可以直接答应（0.6.2 修的）。
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { .terminateNow }
+
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated { workbench?.saveAll() }
     }

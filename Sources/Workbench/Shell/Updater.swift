@@ -85,14 +85,14 @@ final class Updater: ObservableObject {
     }
 
     /// 退出自己并拉起新版本：起一个小脚本盯着本进程退出，再由它 open 新版本。
+    /// 本进程一直不退（退出被取消了）就什么都不做：这时 `open` 只会把还活着的旧实例激活一下，等它真退出时就没人拉新的了。
     func relaunch() {
         let script = """
         #!/bin/bash
-        for _ in $(seq 1 100); do
-          kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null || break
+        for _ in $(seq 1 600); do
+          kill -0 \(ProcessInfo.processInfo.processIdentifier) 2>/dev/null || { open \(Self.shellQuoted(installedAppURL.path)); break; }
           sleep 0.1
         done
-        open \(Self.shellQuoted(installedAppURL.path))
         rm -f "$0"
         """
         do {
@@ -105,7 +105,15 @@ final class Updater: ObservableObject {
             phase = .failed("无法重启：\(error.localizedDescription)")
             return
         }
-        NSApp.terminate(nil)
+        // 先把对话框收掉、下一轮事件循环再退出：sheet 还挂在窗口上时 `terminate` 会被 AppKit 直接取消并立即返回，
+        // 按钮看起来就像没反应（0.6.2 修的；实测收掉 sheet 后 0.4s 内退出）。
+        phase = .idle
+        DispatchQueue.main.async { [weak self] in
+            NSApp.terminate(nil)
+            // 走到这里说明退出被取消了（别的 sheet、模态窗口……），别让人干等
+            Log.warn("update", "退出被取消，没能自动重启")
+            self?.phase = .failed("新版本已经装好，但没能自动退出。请手动退出应用后重新打开。")
+        }
     }
 
     // MARK: - 具体步骤
