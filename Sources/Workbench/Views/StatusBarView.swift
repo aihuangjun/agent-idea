@@ -20,7 +20,7 @@ struct StatusBarView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .help("当前分支。点击打开提交视图")
+                .toolTip("当前分支。点击打开提交视图")
                 if session.changeGroups.total > 0 {
                     Text("\(session.changeGroups.total) 个变更").foregroundStyle(Theme.vcsModified)
                 }
@@ -44,7 +44,7 @@ struct StatusBarView: View {
             }
             if preferences.zoom != 1 {
                 Button { preferences.resetZoom() } label: { Text("\(Int((preferences.zoom * 100).rounded()))%") }
-                    .buttonStyle(.plain).help("点击恢复 100%")
+                    .buttonStyle(.plain).toolTip("点击恢复 100%")
             }
         }
         .font(Theme.smallFont)

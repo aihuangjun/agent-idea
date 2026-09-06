@@ -9,11 +9,22 @@ public struct GitSyncResult: Equatable, Sendable {
     public let upstream: String
     public let pulled: Int
     public let replayed: Int
+    /// `--autostash` 收起来的改动放回工作区时冲突了。
+    ///
+    /// rebase 本身成功了（git 把这算警告，退出码仍是 0），但用户没提交的改动只剩在 stash 里、
+    /// 工作区带着冲突标记——不特意说一声的话，界面会显示「同步成功」，用户的改动就这么不见了。
+    public let autostashConflicted: Bool
 
-    public init(upstream: String, pulled: Int, replayed: Int) {
+    public init(upstream: String, pulled: Int, replayed: Int, autostashConflicted: Bool = false) {
         self.upstream = upstream
         self.pulled = pulled
         self.replayed = replayed
+        self.autostashConflicted = autostashConflicted
+    }
+
+    /// git 有没有在说「autostash 放不回去」。环境里固定了 `LC_ALL=C`，这句话是稳定的英文。
+    public static func mentionsAutostashConflict(_ output: String) -> Bool {
+        output.contains("Applying autostash resulted in conflicts")
     }
 
     /// 上游没有新东西时不跑 rebase：本地什么都没动。
@@ -21,6 +32,10 @@ public struct GitSyncResult: Equatable, Sendable {
 
     /// 给用户看的一句话。
     public var summary: String {
+        if autostashConflicted {
+            return "已从 \(upstream) 拉取 \(pulled) 个提交，但你没提交的改动放回工作区时冲突了："
+                + "改动还留在 git stash 里（git stash list），工作区带着冲突标记，请在终端里处理"
+        }
         switch (pulled, replayed) {
         case (0, 0): return "已经是最新的（\(upstream)）"
         case (0, let ahead): return "已经是最新的，本地领先 \(upstream) \(ahead) 个提交"
@@ -36,6 +51,10 @@ public enum GitSyncError: Error, LocalizedError, Equatable {
     case unborn
     /// 当前分支没有跟踪远程分支（也包括游离 HEAD）。
     case noUpstream(branch: String)
+    /// 仓库正停在一次 rebase 中途（用户自己在终端里开的）。
+    case rebaseInProgress
+    /// `rev-list --left-right --count` 的输出看不懂，不知道落后 / 领先几个提交。
+    case unreadableDivergence(String)
     /// rebase 没走完（多半是冲突）。`recovered` 表示已经 `rebase --abort` 回到同步前的样子。
     case rebaseFailed(message: String, recovered: Bool)
 
@@ -45,6 +64,10 @@ public enum GitSyncError: Error, LocalizedError, Equatable {
             return "仓库还没有任何提交，没有可同步的分支"
         case .noUpstream(let branch):
             return "\(branch) 没有跟踪远程分支，先 git push -u 建立上游再同步"
+        case .rebaseInProgress:
+            return "仓库正停在一次 rebase 中途，先在终端里 git rebase --continue 或 --abort，再来同步"
+        case .unreadableDivergence(let output):
+            return "看不懂 git 报的落后 / 领先提交数（\(output)），没敢动仓库"
         case .rebaseFailed(let message, let recovered):
             let tail = recovered ? "已经回到同步前的状态，请在终端里处理" : "仓库可能停在 rebase 中途，请在终端里处理"
             return "rebase 没能走完（\(message)）。\(tail)"

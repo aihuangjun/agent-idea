@@ -140,7 +140,7 @@ private struct TabItem: View {
             }
             .buttonStyle(.plain)
             .opacity(isHovering || isActive || isModified ? 1 : 0)
-            .help(isModified ? "已修改，⌘S 保存；关闭会自动保存" : "关闭（⌘W）")
+            .toolTip(isModified ? "已修改，⌘S 保存；关闭会自动保存" : "关闭（⌘W）")
         }
         .padding(.leading, 12)
         .padding(.trailing, 6)

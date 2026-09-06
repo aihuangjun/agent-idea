@@ -263,37 +263,65 @@ public struct GitClient: Sendable {
         _ = try await run(["fetch", "--prune"], in: repositoryRoot)
     }
 
-    /// 本地相对上游落后 / 领先几个提交。
+    /// 本地相对上游落后 / 领先几个提交。看不懂 git 的输出就报错——把它当成 0/0 会静悄悄地跳过 rebase，
+    /// 界面显示「已经是最新的」而其实还落后着。
     public func divergence(from upstream: String, repositoryRoot: URL) async throws -> (behind: Int, ahead: Int) {
         let output = try await run(["rev-list", "--left-right", "--count", upstream + "...HEAD"], in: repositoryRoot)
-        return GitRevListCount.parse(output.text) ?? (0, 0)
+        guard let counts = GitRevListCount.parse(output.text) else {
+            throw GitSyncError.unreadableDivergence(output.text.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return counts
+    }
+
+    /// 仓库是不是正停在一次 rebase 中途。问 git 要路径（`--git-path`）而不是自己拼 `.git/`：
+    /// worktree、`.git` 是文件的情形拼不对。
+    public func isRebaseInProgress(repositoryRoot: URL) async -> Bool {
+        for name in ["rebase-merge", "rebase-apply"] {
+            guard let output = try? await run(["rev-parse", "--git-path", name], in: repositoryRoot) else { continue }
+            let path = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else { continue }
+            let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : repositoryRoot.appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: url.path) { return true }
+        }
+        return false
     }
 
     /// 与远程同步（IDEA 的 Update Project）：`fetch` 之后把上游的新提交 rebase 到本地分支下面。
     ///
+    /// - 仓库已经停在一次 rebase 中途（用户自己在终端里开的）时直接拒绝：出错时我们会 `--abort`，
+    ///   那会把他解了一半的冲突一起扔掉。
     /// - 上游没有新提交就不跑 rebase，本地一动不动。
-    /// - 工作区有没提交的改动时靠 `--autostash` 收起再放回来，不用先手动 stash。
-    /// - rebase 中途出问题（冲突、autostash 放不回去）一律 `--abort` 回到同步前的样子再报错：
-    ///   这个应用没有解冲突的界面，把仓库停在 rebase 中途只会让用户更难办。
+    /// - 工作区有没提交的改动时靠 `--autostash` 收起再放回来，不用先手动 stash。放不回去时 git 只当警告
+    ///   （退出码还是 0），改动留在 stash 里、工作区带冲突标记，这种情况要在结果里说明白。
+    /// - rebase 没走完一律 `--abort` 回到同步前的样子再报错：这个应用没有解冲突的界面，
+    ///   把仓库停在 rebase 中途只会让用户更难办。只收拾这一次自己留下的：进来时确认过没有别的 rebase 在跑。
     public func syncWithRemote(repositoryRoot: URL) async throws -> GitSyncResult {
         guard await hasHead(repositoryRoot: repositoryRoot) else { throw GitSyncError.unborn }
+        guard !(await isRebaseInProgress(repositoryRoot: repositoryRoot)) else { throw GitSyncError.rebaseInProgress }
         guard let upstream = await upstreamBranch(repositoryRoot: repositoryRoot) else {
             throw GitSyncError.noUpstream(branch: await currentBranch(repositoryRoot: repositoryRoot))
         }
         try await fetch(repositoryRoot: repositoryRoot)
         let counts = try await divergence(from: upstream, repositoryRoot: repositoryRoot)
-        let result = GitSyncResult(upstream: upstream, pulled: counts.behind, replayed: counts.ahead)
-        guard result.didRebase else { return result }
+        guard counts.behind > 0 else {
+            return GitSyncResult(upstream: upstream, pulled: 0, replayed: counts.ahead)
+        }
         do {
-            _ = try await run(["rebase", "--autostash", upstream], in: repositoryRoot)
+            let output = try await run(["rebase", "--autostash", upstream], in: repositoryRoot)
+            let said = output.text + "\n" + output.standardError
+            return GitSyncResult(upstream: upstream, pulled: counts.behind, replayed: counts.ahead,
+                                 autostashConflicted: GitSyncResult.mentionsAutostashConflict(said))
         } catch is CancellationError {
             // 取消是调用方的事（关项目、退出），不是失败；rebase 被 SIGTERM 打断的话 git 自己会收尾
             throw CancellationError()
         } catch {
-            let recovered = (try? await run(["rebase", "--abort"], in: repositoryRoot)) != nil
+            // rebase 在建起中间状态之前就退出的（上游引用没了这类）什么都没动，不用 abort，也不该吓唬用户
+            var recovered = true
+            if await isRebaseInProgress(repositoryRoot: repositoryRoot) {
+                recovered = (try? await run(["rebase", "--abort"], in: repositoryRoot)) != nil
+            }
             throw GitSyncError.rebaseFailed(message: error.userFacingDescription, recovered: recovered)
         }
-        return result
     }
 
     // MARK: - 推送

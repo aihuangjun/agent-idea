@@ -140,7 +140,7 @@ private struct ProjectTab: View {
             }
             .buttonStyle(.plain)
             .opacity(isHovering || isActive ? 1 : 0)
-            .help("关闭项目")
+            .toolTip("关闭项目")
         }
         .padding(.leading, 12)
         .padding(.trailing, 6)
@@ -152,7 +152,7 @@ private struct ProjectTab: View {
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .onTapGesture { workbench.activate(session.id) }
-        .help(session.project.root.path)
+        .toolTip(session.project.root.path)
         .contextMenu {
             Button("关闭项目") { workbench.closeProject(session.id) }
             Button("在访达中显示") { Desktop.revealInFinder(session.project.root) }

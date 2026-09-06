@@ -186,7 +186,9 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
                 return upstream.value.map { shellOutput($0 + "\n") } ?? shellOutput("", status: 128, stderr: "fatal: no upstream")
             case "rev-parse" where arguments.contains("--abbrev-ref"): return shellOutput("main\n")
             case "rev-parse": return shellOutput(head.value)
-            case "status": return shellOutput("# branch.oid \(head.value)\u{0}# branch.head main\u{0}")
+            case "status":
+                let tracking = upstream.value.map { "# branch.upstream \($0)\u{0}" } ?? ""
+                return shellOutput("# branch.oid \(head.value)\u{0}# branch.head main\u{0}" + tracking)
             case "rev-list": return shellOutput("2\t0")
             case "rebase":
                 // rebase 之后 HEAD 变了：新的 log 才拉得到同事的提交
@@ -213,15 +215,55 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
         #expect(session.banner == "已从 origin/main 拉取 2 个提交")
         // 同步完整体刷新一遍，历史也重拉了
         await waitUntil { runner.calls(startingWith: "log").count > logsBefore }
+        await waitUntil { session.gitSnapshot.branch.headOID == "2222222222222222" }
         #expect(session.gitSnapshot.branch.headOID == "2222222222222222")
 
-        // 没有上游：报在状态栏，历史照样刷新（提交历史的刷新按钮退回本地刷新）
+        // 没有上游：同步按钮灰掉，提交历史的刷新按钮退回本地刷新，不留一条要用户手动关的错误
         upstream.value = nil
         session.dismissBanner()
-        let logsBeforeFailure = runner.calls(startingWith: "log").count
+        session.refreshGit()
+        await waitUntil { session.gitSnapshot.branch.upstream == nil }
+        #expect(!session.canSyncWithRemote)
+        let logsBeforeLocal = runner.calls(startingWith: "log").count
+        let fetchesBefore = runner.calls(startingWith: "fetch").count
+        history.refresh()
+        await waitUntil { runner.calls(startingWith: "log").count > logsBeforeLocal }
+        #expect(runner.calls(startingWith: "fetch").count == fetchesBefore, "没有上游就别联网")
+        #expect(session.banner == nil)
+    }
+}
+
+
+/// 同步前先把编辑器里的草稿写盘：rebase 会重写工作区的文件，草稿不在 git 眼里，
+/// 既进不了 --autostash，拉下来之后也不会被重读，下一次 ⌘S 就会盖掉同事的改动。
+@Test @MainActor func syncWithRemoteSavesDraftsFirst() async throws {
+    try await withTemporaryDirectory { directory in
+        let file = directory.appendingPathComponent("a.txt")
+        try "磁盘上的\n".write(to: file, atomically: true, encoding: .utf8)
+        let runner = FakeCommandRunner { arguments, _ in
+            switch arguments.first {
+            case "rev-parse" where arguments.contains("--show-toplevel"): return shellOutput(directory.path + "\n")
+            case "rev-parse" where arguments.contains("@{upstream}"): return shellOutput("origin/main\n")
+            case "rev-parse" where arguments.contains("--git-path"): return shellOutput("/nonexistent/rebase-merge")
+            case "rev-parse": return shellOutput("aaaa1111")
+            case "status": return shellOutput("# branch.oid aaaa1111\u{0}# branch.head main\u{0}# branch.upstream origin/main\u{0}")
+            case "rev-list": return shellOutput("0\t0")
+            default: return shellOutput("")
+            }
+        }
+        let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
+        let session = ProjectSession(root: directory, git: git, renderer: ContentRenderer(),
+                                     preferences: ReadingPreferences(defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!))
+        session.setActive(true)
+        await waitUntil { session.canSyncWithRemote }
+
+        session.openFile(file, pinned: true)
+        await waitUntil { session.activeTab != nil }
+        session.applyEdit(path: file.path, text: "改过还没保存的\n")
+        #expect(!session.drafts.isEmpty)
+
         session.syncWithRemote()
-        await waitUntil { !session.isSyncingRemote && session.banner != nil }
-        #expect(session.banner?.contains("main 没有跟踪远程分支") == true)
-        await waitUntil { runner.calls(startingWith: "log").count > logsBeforeFailure }
+        #expect(try String(contentsOf: file, encoding: .utf8) == "改过还没保存的\n", "同步前草稿要落盘")
+        await waitUntil { !session.isSyncingRemote }
     }
 }

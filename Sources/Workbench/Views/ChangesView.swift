@@ -184,18 +184,23 @@ private struct CommitPanel: View {
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(messageFocused ? Theme.accent : Theme.border, lineWidth: 1))
 
             HStack(spacing: 8) {
+                // 两个都是蓝色主按钮、悬停反馈一样：它们是同一件事的两种收尾，不该一个蓝一个灰分出主次
                 Button("提交") { commit.commit(push: false) }
+                    .buttonStyle(AccentButtonStyle())
                     .disabled(!commit.canCommit)
                     .keyboardShortcut(.return, modifiers: .command)
+                    .toolTip("提交勾选的变更（⌘⏎）")
                 Button("提交并推送") { commit.commit(push: true) }
+                    .buttonStyle(AccentButtonStyle())
                     .disabled(!commit.canCommit)
+                    .toolTip("提交勾选的变更，然后推送到远端")
                 Spacer()
                 if commit.isCommitting || commit.isPushing {
                     ProgressView().controlSize(.small)
                     Text(commit.isPushing ? "推送中…" : "提交中…").font(Theme.smallFont).foregroundStyle(Theme.secondaryText)
                 } else if branch.ahead > 0 {
                     pushButton("推送 ↑\(branch.ahead)", color: Theme.accent)
-                        .help("把本地领先的 \(branch.ahead) 个提交推到远端")
+                        .toolTip("把本地领先的 \(branch.ahead) 个提交推到远端")
                 } else if branch.upstream == nil, !branch.isUnborn {
                     pushButton("推送（建上游）", color: Theme.secondaryText)
                 }

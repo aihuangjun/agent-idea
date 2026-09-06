@@ -73,7 +73,7 @@ private struct RecentRow: View {
                 Button { workbench.removeRecent(recent) } label: {
                     Image(systemName: "xmark").font(.system(size: 9, weight: .bold)).foregroundStyle(Theme.secondaryText)
                 }
-                .buttonStyle(.plain).help("从列表移除")
+                .buttonStyle(.plain).toolTip("从列表移除")
             }
         }
         .padding(.horizontal, 10)

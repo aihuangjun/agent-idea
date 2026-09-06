@@ -29,9 +29,7 @@ struct ProjectTreeView: View {
                 if session.isSyncingRemote {
                     ProgressView().controlSize(.mini).padding(.trailing, 4)
                 }
-                IconButton("arrow.down.backward", help: "与远程同步：git fetch + rebase（⌘T）", size: 22) {
-                    session.syncWithRemote()
-                }
+                IconButton("arrow.down.backward", help: syncHelp, size: 22) { session.syncWithRemote() }
                     .disabled(!session.canSyncWithRemote)
                 IconButton("magnifyingglass", help: "查找文件（⌘F）", isActive: search.isActive, size: 22) {
                     if search.isActive { closeSearch() } else { search.activate() }
@@ -56,6 +54,17 @@ struct ProjectTreeView: View {
             }
         }
         .background(Theme.panel)
+    }
+
+    /// 同步按钮的提示。不能同步时说清楚是为什么——按钮灰着，用户总得知道差什么。
+    private var syncHelp: String {
+        guard session.hasGit else { return "这个项目不在 git 仓库里" }
+        let branch = session.gitSnapshot.branch
+        if branch.isUnborn { return "仓库还没有提交，没有可同步的分支" }
+        guard let upstream = branch.upstream else {
+            return "\(branch.name) 没有跟踪远程分支，先 git push -u 建立上游"
+        }
+        return "与 \(upstream) 同步：git fetch + rebase（⌘T）"
     }
 
     /// 打开一条搜索结果：固定标签、关掉搜索、在树上定位——照 IDEA 的 Go to File。
@@ -196,7 +205,7 @@ private struct FileSearchBar: View {
                 return true
             } onFocusChange: { isFieldFocused = $0 }
             if search.isIndexing {
-                ProgressView().controlSize(.mini).help("正在建索引…")
+                ProgressView().controlSize(.mini).toolTip("正在建索引…")
             } else if !search.query.isEmpty {
                 Button { search.query = "" } label: {
                     Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundStyle(Theme.mutedText)

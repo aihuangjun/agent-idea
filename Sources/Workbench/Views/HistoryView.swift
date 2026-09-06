@@ -36,7 +36,9 @@ private struct HistoryBody: View {
                 }
                 // 刷新 = 与远程同步后再重拉：只重列本地的 log 看不到别人刚推上去的提交。
                 // 同步不了的仓库（没上游、还没有提交）退回本地刷新，按钮照样能用。
-                IconButton("arrow.clockwise", help: "与远程同步并刷新：git fetch + rebase", size: 22) {
+                IconButton("arrow.clockwise",
+                           help: session.canSyncWithRemote ? "与远程同步并刷新：git fetch + rebase" : "刷新（当前分支没有跟踪远程分支，只重列本地提交）",
+                           size: 22) {
                     if session.canSyncWithRemote { session.syncWithRemote() } else { history.refresh() }
                 }
                     .disabled(session.isSyncingRemote)

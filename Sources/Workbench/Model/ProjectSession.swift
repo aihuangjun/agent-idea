@@ -952,8 +952,12 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
     }
 
-    /// 能不能跟远程同步：有仓库、没在同步。
-    var canSyncWithRemote: Bool { hasGit && !isSyncingRemote }
+    /// 能不能跟远程同步：有仓库、当前分支有上游、没在同步。
+    /// 没有上游的仓库（还没 push 过、游离 HEAD）按钮直接灰掉，提交历史的刷新退回本地刷新，
+    /// 不要点一下弹一条要用户手动关掉的错误。
+    var canSyncWithRemote: Bool {
+        hasGit && !isSyncingRemote && !gitSnapshot.branch.isUnborn && gitSnapshot.branch.upstream != nil
+    }
 
     /// 与远程同步（IDEA 的 Update Project）：`git fetch` 之后把上游的新提交 rebase 到本地分支下面，
     /// 完了整体刷新（目录树、开着的文件、git 状态、已经打开的提交历史）。
@@ -961,6 +965,10 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 结果与失败都报在状态栏：成功的提示自己消失，失败的留着等用户看完关掉。
     func syncWithRemote() {
         guard let git, let repositoryRoot = project.repositoryRoot, !isSyncingRemote else { return }
+        // rebase 会重写工作区里的文件，先把没保存的写盘：留在编辑器里的草稿不在 git 眼里，
+        // 既进不了 --autostash，拉下来之后 reloadOpenFilesIfChanged 也不会碰改过的文档，
+        // 下一次 ⌘S 就会把同事的改动覆盖掉。IDEA 的 Update Project 同样先保存。
+        saveAll()
         isSyncingRemote = true
         // 刻意不在 tearDown 里取消：rebase 跑到一半被 SIGTERM 打断可能把仓库停在 rebase 中途，
         // 而这个应用没有解冲突的界面。任务只捕获弱引用，项目关了它自己会安静地跑完。
@@ -970,7 +978,12 @@ final class ProjectSession: ObservableObject, Identifiable {
                 Log.info("git", "同步远程：\(result.summary)")
                 guard let self else { return }
                 self.isSyncingRemote = false
-                self.notify(result.summary)
+                // autostash 没能放回去时改动只剩在 stash 里，这条提示不能几秒后自己溜走
+                if result.autostashConflicted {
+                    self.banner = result.summary
+                } else {
+                    self.notify(result.summary)
+                }
             } catch is CancellationError {
                 self?.isSyncingRemote = false
                 return

@@ -37,7 +37,38 @@ public struct ResizeHandle: View {
     }
 }
 
-/// 工具条 / 标签上的小图标按钮：悬停出底色，无边框。
+/// 悬停提示（AppKit 的 `NSView.toolTip`）。
+///
+/// SwiftUI 的 `.help()` 在我们这些 `.buttonStyle(.plain)` + 自定义 label 的按钮上不落地：
+/// 挂上去之后 NSView 层级里根本没有 `toolTip`，鼠标停多久都不出提示（`IconButtonTests` 守着这一点）。
+/// 这里往按钮背景塞一个铺满的空 NSView，只负责提示：`hitTest` 一律返回 nil，点击与悬停底色照旧归上面的
+/// SwiftUI 按钮（tooltip 走的是窗口的 tracking rect，不经过 hitTest）。
+public struct ToolTip: NSViewRepresentable {
+    let text: String
+
+    public init(_ text: String) { self.text = text }
+
+    public func makeNSView(context: Context) -> NSView {
+        let view = PassThrough()
+        view.toolTip = text
+        return view
+    }
+
+    public func updateNSView(_ nsView: NSView, context: Context) {
+        nsView.toolTip = text
+    }
+
+    final class PassThrough: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+}
+
+public extension View {
+    /// 悬停提示。用它，别用 SwiftUI 的 `.help()`——那个在这套自定义按钮上不出提示。
+    func toolTip(_ text: String) -> some View { background(ToolTip(text)) }
+}
+
+/// 工具条 / 标签上的小图标按钮：悬停出底色，无边框，鼠标停一下出提示。
 public struct IconButton: View {
     let systemName: String
     let help: String
@@ -70,7 +101,46 @@ public struct IconButton: View {
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
-        .help(help)
+        .toolTip(help)
+    }
+}
+
+/// 面板上的主按钮（提交、提交并推送）：IntelliJ 蓝填充，悬停提亮、按下压暗、禁用时整体变淡。
+///
+/// 不用系统的 `.borderedProminent`：它只给「默认按钮」上色，同一行里第二个按钮会是灰的
+/// （0.7.0 之前提交面板就是「提交」蓝、「提交并推送」灰，看着像两级功能）。
+public struct AccentButtonStyle: ButtonStyle {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        Content(configuration: configuration)
+    }
+
+    /// 不能叫 `Body`：那是 `ButtonStyle` 自己的关联类型，重名会让 `makeBody` 的返回类型自指。
+    private struct Content: View {
+        let configuration: Configuration
+        @State private var isHovering = false
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            configuration.label
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Color.white.opacity(isEnabled ? 1 : 0.55))
+                .padding(.horizontal, 12)
+                .frame(height: 24)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Theme.accent.opacity(isEnabled ? 1 : 0.35))
+                        // 悬停提亮、按下压暗，都叠在同一块蓝上，两个按钮的反馈完全一致
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(configuration.isPressed ? Color.black.opacity(0.18)
+                                      : (isHovering && isEnabled ? Color.white.opacity(0.14) : Color.clear))
+                        )
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 6))
+                .onHover { isHovering = $0 }
+        }
     }
 }
 
