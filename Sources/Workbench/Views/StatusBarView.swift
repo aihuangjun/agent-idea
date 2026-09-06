@@ -46,6 +46,12 @@ struct StatusBarView: View {
                 Button { preferences.resetZoom() } label: { Text("\(Int((preferences.zoom * 100).rounded()))%") }
                     .buttonStyle(.plain).toolTip("点击恢复 100%")
             }
+            // 外观的快捷入口：点一下在「跟随系统 → 浅色 → 深色」之间转，图标就是当前这一档
+            Button { preferences.theme = preferences.theme.next } label: {
+                Image(systemName: preferences.theme.symbolName).font(.system(size: 11))
+            }
+            .buttonStyle(.plain)
+            .toolTip("外观：\(preferences.theme.title)。点击切到\(preferences.theme.next.title)（也在「视图 → 外观」里）")
         }
         .font(Theme.smallFont)
         .foregroundStyle(Theme.secondaryText)

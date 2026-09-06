@@ -19,4 +19,11 @@ import Testing
     #expect(AppTheme.light.appearance?.isDark == false)
     #expect(AppTheme.dark.appearance?.isDark == true)
     #expect(AppTheme.allCases.map(\.title) == ["跟随系统", "浅色", "深色"])
+
+    // 状态栏那个按钮：图标是当前这一档，点一下转到下一档，转三下回到原点
+    #expect(AppTheme.allCases.map(\.symbolName) == ["circle.lefthalf.filled", "sun.max", "moon"])
+    #expect(AppTheme.system.next == .light)
+    #expect(AppTheme.light.next == .dark)
+    #expect(AppTheme.dark.next == .system)
+    #expect(AppTheme.allCases.allSatisfy { $0.next.next.next == $0 })
 }

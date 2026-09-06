@@ -115,6 +115,24 @@ public enum AppTheme: String, CaseIterable, Sendable {
         }
     }
 
+    /// 状态栏那个按钮的图标：浅色是太阳、深色是月亮、跟随系统是一半一半的圆。
+    public var symbolName: String {
+        switch self {
+        case .system: return "circle.lefthalf.filled"
+        case .light: return "sun.max"
+        case .dark: return "moon"
+        }
+    }
+
+    /// 点一下换到的下一档，按「跟随系统 → 浅色 → 深色 → 跟随系统」转。
+    public var next: AppTheme {
+        switch self {
+        case .system: return .light
+        case .light: return .dark
+        case .dark: return .system
+        }
+    }
+
     /// 给 `NSApp.appearance` 的值。跟随系统就是 nil（由系统的 appearance 决定）。
     public var appearance: NSAppearance? {
         switch self {
