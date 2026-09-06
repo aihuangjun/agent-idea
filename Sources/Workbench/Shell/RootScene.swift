@@ -29,6 +29,7 @@ public struct AgentIDEARootScene: Scene {
                 .environmentObject(workbench)
                 .environmentObject(workbench.preferences)
                 .onAppear {
+                    workbench.preferences.applyAppearance()
                     updater.checkInBackgroundIfDue()
                     workbench.restoreOpenProjects()
                     delegate.workbench = workbench
@@ -110,6 +111,15 @@ public struct AgentIDEARootScene: Scene {
                     .keyboardShortcut("r", modifiers: .command)
                     .disabled(workbench.active == nil)
                 Divider()
+                Picker("外观", selection: Binding(
+                    get: { workbench.preferences.theme },
+                    set: { workbench.preferences.theme = $0 }
+                )) {
+                    ForEach(AppTheme.allCases, id: \.self) { theme in
+                        Text(theme.title).tag(theme)
+                    }
+                }
+                Divider()
                 Button("放大") { workbench.preferences.zoomIn() }.keyboardShortcut("=", modifiers: .command)
                 Button("缩小") { workbench.preferences.zoomOut() }.keyboardShortcut("-", modifiers: .command)
                 Button("实际大小") { workbench.preferences.resetZoom() }.keyboardShortcut("0", modifiers: [.command, .option])
@@ -173,8 +183,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         let build = BuildIdentity.current
         Log.start(banner: "Agent IDEA \(build.display) 启动，配置目录 \(AppPaths.configurationDirectory.path)")
-        // 整个应用固定深色：标题栏、菜单、弹窗跟着走，不然窗口内容是深的、系统控件是浅的。
-        NSApp.appearance = NSAppearance(named: .darkAqua)
+        // 外观由用户选（视图 → 外观），窗口起来之前先按存下来的值定好，
+        // 免得深色偏好的用户先看见一帧浅色。跟随系统时不设，交给系统。
+        NSApp.appearance = (AppTheme(rawValue: UserDefaults.standard.string(forKey: "appearance") ?? "") ?? .dark).appearance
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 800])
         // 抓一份登录 shell 的环境给 git 用（push 要靠 SSH_AUTH_SOCK 和 PATH 里的凭据助手）
         Task.detached(priority: .utility) { await LoginShellEnvironment.load() }

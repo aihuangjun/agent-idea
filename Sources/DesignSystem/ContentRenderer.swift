@@ -100,13 +100,16 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     private var lastPayload: RenderPayload?
     private var shellURL: URL?
     private var zoom: Double = 1
+    /// 页面当前是浅色还是深色。页面重载（内容进程被回收）后要补发。
+    private var isLightTheme = false
     private let messageProxy = ScriptMessageProxy()
 
     override public init() {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
         webView = CursorRestoringWebView(frame: .zero, configuration: configuration)
-        // 页面自己的底色是深色，但页面加载完成前 WKWebView 是白的，会闪一下
+        // 页面加载完成前 WKWebView 会先画自己的底色（白），深色下会闪一下；关掉它，
+        // 透出宿主的 editorBackground（动态色，两个主题各自对得上）
         webView.setValue(false, forKey: "drawsBackground")
         super.init()
 
@@ -171,6 +174,15 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         return EditorCursor(line: line, ch: ch)
     }
 
+    /// 切页面的浅色 / 深色。外壳那半边由 `NSApp.appearance` 管，这里管 WebView 里的正文。
+    public func setTheme(light: Bool) {
+        guard isLightTheme != light else { return }
+        isLightTheme = light
+        // 页面还没就绪：记下来，markReadyAndFlush 会补发
+        guard isReady else { return }
+        webView.evaluateJavaScript("window.ide.setTheme('\(light ? "light" : "dark")')")
+    }
+
     public func setZoom(_ zoom: Double) {
         self.zoom = zoom
         guard isReady else { return }
@@ -215,6 +227,10 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         isReady = true
         if isFirstSignal, zoom != 1 {
             webView.evaluateJavaScript("window.ide.setZoom(\(zoom))")
+        }
+        // 页面每次都是从深色起步（style.css 的默认），浅色要在画正文之前补上，否则会闪一下深色
+        if isFirstSignal, isLightTheme {
+            webView.evaluateJavaScript("window.ide.setTheme('light')")
         }
         if isFirstSignal, isRecoveringFromCrash, let onShellReloaded {
             // 让宿主重画：它手里有最新的草稿；这里存的 lastPayload 是崩溃前上一次渲染的样子

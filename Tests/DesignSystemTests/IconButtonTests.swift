@@ -33,3 +33,29 @@ import Testing
     defer { plainWindow.orderOut(nil) }
     #expect(toolTips(in: plain).isEmpty)
 }
+
+/// 主题色是动态色：同一个 `Theme.x` 在浅色 / 深色 appearance 下解析出不同的值，
+/// 而且转回 `NSColor`（`FocusedTextField`、`PlainTextEditor`、窗口背景都这么用）之后仍然是动态的。
+@Test @MainActor func themeColorsResolvePerAppearance() {
+    let light = NSAppearance(named: .aqua)!
+    let dark = NSAppearance(named: .darkAqua)!
+
+    func resolve(_ color: Color, in appearance: NSAppearance) -> NSColor {
+        var resolved = NSColor.black
+        appearance.performAsCurrentDrawingAppearance {
+            resolved = NSColor(color).usingColorSpace(.sRGB) ?? .black
+        }
+        return resolved
+    }
+
+    for (color, name) in [(Theme.editorBackground, "editorBackground"), (Theme.panel, "panel"), (Theme.text, "text")] {
+        let inLight = resolve(color, in: light)
+        let inDark = resolve(color, in: dark)
+        #expect(inLight != inDark, "\(name) 在两种外观下应该是不同的颜色")
+    }
+    // 浅色的编辑器底色是白、文字是深的；深色反过来
+    #expect(resolve(Theme.editorBackground, in: light).brightnessComponent > 0.9)
+    #expect(resolve(Theme.editorBackground, in: dark).brightnessComponent < 0.2)
+    #expect(resolve(Theme.text, in: light).brightnessComponent < 0.3)
+    #expect(resolve(Theme.text, in: dark).brightnessComponent > 0.8)
+}

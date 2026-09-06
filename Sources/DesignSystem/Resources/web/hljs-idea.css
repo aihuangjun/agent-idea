@@ -1,0 +1,28 @@
+/* highlight.js 的配色：照 IntelliJ 新版 UI。颜色全部走 style.css 顶部的 --syn-* 变量，
+   深色 / 浅色各一套，这里只管把 token 映射到变量上。
+   这份文件是手写的，不是 vendor，升级 highlight.js 不要覆盖它。 */
+.hljs { color: var(--syn-text); background: transparent; }
+.hljs-comment, .hljs-quote { color: var(--syn-comment); }
+.hljs-doctag { color: var(--syn-doctag); }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-symbol, .hljs-type { color: var(--syn-keyword); }
+.hljs-string, .hljs-char.escape_ { color: var(--syn-string); }
+.hljs-number { color: var(--syn-number); }
+.hljs-regexp { color: var(--syn-regexp); }
+.hljs-title.function_, .hljs-title.function_.invoke__, .hljs-built_in { color: var(--syn-function); }
+.hljs-title.class_, .hljs-title.class_.inherited__, .hljs-title { color: var(--syn-class); }
+.hljs-attr, .hljs-attribute, .hljs-variable, .hljs-template-variable, .hljs-property, .hljs-selector-class, .hljs-selector-id, .hljs-selector-attr, .hljs-selector-pseudo { color: var(--syn-attr); }
+.hljs-tag, .hljs-name { color: var(--syn-tag); }
+.hljs-tag .hljs-attr { color: var(--syn-text); }
+.hljs-tag .hljs-string { color: var(--syn-string); }
+.hljs-meta, .hljs-meta .hljs-keyword { color: var(--syn-meta); }
+.hljs-meta .hljs-string { color: var(--syn-string); }
+.hljs-section { color: var(--syn-keyword); font-weight: 600; }
+.hljs-bullet { color: var(--syn-keyword); }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 600; }
+.hljs-link { color: var(--link); text-decoration: underline; }
+.hljs-code { color: var(--syn-string); }
+.hljs-punctuation, .hljs-operator { color: var(--syn-text); }
+.hljs-params { color: var(--syn-text); }
+.hljs-addition { color: var(--add-fg); }
+.hljs-deletion { color: var(--del-fg); }

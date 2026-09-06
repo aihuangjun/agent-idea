@@ -8,6 +8,9 @@ import UniformTypeIdentifiers
 struct WorkbenchView: View {
     @EnvironmentObject private var workbench: WorkbenchModel
     @State private var isDropTargeted = false
+    /// 外壳的颜色由 `NSApp.appearance` + `Theme` 的动态色自动跟着走；WebView 里的正文得我们自己告诉它。
+    /// 观察 `colorScheme` 而不是偏好：选「跟随系统」时系统换深浅也要跟上。
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(spacing: 0) {
@@ -40,6 +43,8 @@ struct WorkbenchView: View {
             return true
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentIDEAOpenProject)) { _ in chooseProject() }
+        .onAppear { workbench.renderer.setTheme(light: colorScheme == .light) }
+        .onChange(of: colorScheme) { _, scheme in workbench.renderer.setTheme(light: scheme == .light) }
         .navigationTitle("Agent IDEA")
     }
 
@@ -117,7 +122,7 @@ private struct ProjectTab: View {
 
     var body: some View {
         HStack(spacing: 5) {
-            Image(systemName: "folder.fill").foregroundStyle(Color(hex: 0x8C9CB8)).font(.system(size: 10.5))
+            Image(systemName: "folder.fill").foregroundStyle(Theme.folderIcon).font(.system(size: 10.5))
             Text(session.project.name)
                 .font(.system(size: 12, weight: isActive ? .semibold : .regular))
                 .foregroundStyle(isActive ? Theme.text : Theme.secondaryText)

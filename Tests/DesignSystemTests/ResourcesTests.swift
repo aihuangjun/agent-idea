@@ -6,7 +6,7 @@ import Testing
 @Test func webShellAndAssetsShip() throws {
     let shell = try #require(WebResources.shellURL)
     let web = shell.deletingLastPathComponent()
-    for name in ["render.js", "style.css", "hljs-idea-dark.css", "vendor/markdown-it.min.js", "vendor/highlight.min.js", "vendor/mermaid.min.js"] {
+    for name in ["render.js", "style.css", "hljs-idea.css", "vendor/markdown-it.min.js", "vendor/highlight.min.js", "vendor/mermaid.min.js"] {
         #expect(FileManager.default.fileExists(atPath: web.appendingPathComponent(name).path), "缺 \(name)")
     }
     let html = try String(contentsOf: shell, encoding: .utf8)

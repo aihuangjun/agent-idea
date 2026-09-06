@@ -1,6 +1,6 @@
 #!/bin/bash
 # 下载渲染层依赖到 DesignSystem 的 web 资源目录。产物提交进仓库：运行与构建都不联网。
-# 只在升级依赖版本时执行（需联网）。highlight.js 的深色主题是自己写的（hljs-idea-dark.css），不在这里。
+# 只在升级依赖版本时执行（需联网）。highlight.js 的配色是自己写的（hljs-idea.css，深浅两套走 CSS 变量），不在这里。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 WEB="Sources/DesignSystem/Resources/web"

@@ -323,3 +323,29 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     )
     #expect(noBase as? String == "null")
 }
+
+/// 浅色主题：`setTheme` 之后根元素带上 light、CSS 变量与语法色换成浅色那一套，正文重画出来还在。
+/// 只起一个 WebView：切换前后的值在同一页里前后读两次（多起几个 WKWebView 会把主线程占住，
+/// 并行跑的其它 `@MainActor` 测试会跟着超时）。
+@Test @MainActor func lightThemeSwapsTheStylesheetVariables() async throws {
+    let readBackground = "getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()"
+    let result = try await renderAndInspect(
+        RenderPayload(.markdown(path: "/x/a.md", markdown: "# 标题\n\n```swift\nlet answer = 42\n```\n",
+                                documentDirectory: URL(fileURLWithPath: "/x/"), view: .preview)),
+        snapshotName: "markdown-light",
+        prepare: "window.__before = \(readBackground); window.ide.setTheme('light')",
+        settle: 0.4,
+        inspect: """
+        [window.__before, \(readBackground), document.documentElement.className,
+         getComputedStyle(document.querySelector('.hljs-keyword')).color,
+         document.querySelectorAll('article.md pre').length].join('|')
+        """
+    ) as? String
+    let parts = (result ?? "").split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+    try #require(parts.count == 5, "拿到的是 \(result ?? "nil")")
+    #expect(parts[0].uppercased() == "#1E1F22", "默认是深色")
+    #expect(parts[1].uppercased() == "#FFFFFF", "切完是浅色的底")
+    #expect(parts[2] == "light", "根元素挂上 light")
+    #expect(parts[3] == "rgb(0, 51, 179)", "语法色也换成浅色那一套（IntelliJ Light 的关键字深蓝）")
+    #expect(parts[4] == "1", "切主题之后正文得还在")
+}

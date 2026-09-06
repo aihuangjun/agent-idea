@@ -30,7 +30,7 @@ scripts/fetch_vendor.sh         # 仅升级前端离线依赖时（需联网）
 - **executable target 里一行逻辑都不放**——SwiftPM 测不了它。
 - **`runModal()` 只允许出现在 `WorkbenchView` 选目录那一处**，别处会让测试整体挂住（有架构测试守着）。
 - **模型测试用假的 `CommandRunning`**，不真起 git；只有 `realGitEndToEnd` 一条真跑系统 git，找不到 git 时跳过。
-- **测试是并行跑的，别在 `@MainActor` 测试里死转 run loop**：离屏合成事件之后要等，就用「转 10ms → `await Task.yield()`」的循环并带上提前退出的条件（`ToolTipClickTests.settle`、`TreeInteractionTests` 的 `settle`）。一口气 `RunLoop.main.run` 半秒会把别的 `@MainActor` 测试饿住，表现是一批 `waitUntil` 莫名超时——单独跑又都过。
+- **测试是并行跑的，别在 `@MainActor` 测试里死转 run loop**：离屏合成事件之后要等，就用「转 10ms → `await Task.yield()`」的循环并带上提前退出的条件（`ToolTipClickTests.settle`、`TreeInteractionTests` 的 `settle`）。一口气 `RunLoop.main.run` 半秒会把别的 `@MainActor` 测试饿住，表现是一批 `waitUntil` 莫名超时——单独跑又都过。同理别为了一条用例多起 WKWebView（`RenderTests` 的浅色那条把切换前后的值在同一页里读两次）。各测试文件里的 `waitUntil` 默认等 10 秒也是为这个：条件一成立就返回，等得宽只影响真失败的用例。
 - **正文渲染与编辑都在 WebView 里**（代码、Markdown、diff、图片；可编辑的代码 / Markdown 源码用 CodeMirror 5，只读的走静态视图）。契约的 Swift 事实源是 `DesignSystem/RenderPayload`（键名只在它的 `encode` 里出现一次），render.js 顶部注释是另一份，改一边必须改另一边；`DesignSystemTests` 会真起 WKWebView 渲染一遍核对。
 
 ## 几个容易踩的点
@@ -71,7 +71,7 @@ scripts/fetch_vendor.sh         # 仅升级前端离线依赖时（需联网）
 - **发布走 GitHub Releases**：`scripts/release.sh` 打 tag `v$VERSION`、`gh release create` 上传 dmg；应用读 `releases/latest` 接口，用附件的 `digest`（sha256）校验下载。tag 前缀在脚本与 `Core/AppDistribution.swift` 各有一份（bash 引不到 Swift），架构测试核对。私有仓库下载附件要走附件的 API 地址 + `Accept: application/octet-stream`，302 到对象存储时必须摘掉 Authorization（`Updater.RedirectSanitizer`）。
 - **退出必须由 `AppDelegate.applicationShouldTerminate` 自己答 `.terminateNow`**：交给 SwiftUI 默认实现时 `NSApp.terminate` 会既不退出也不返回（0.6.2 前「立即重启」按钮没反应）；sheet 还挂着时 terminate 还会被直接取消，所以 `Updater.relaunch` 先把 `phase` 置回 `.idle`、下一轮事件循环再 terminate。验证这条要真起进程：`open -g -n --env … .build/AgentIDEA.app` 起一个后台实例（`open` 会把环境变量传给新实例，临时钩子里记得 `unsetenv`，否则重启脚本拉起的新实例会再触发一次，无限循环），看日志里旧实例退出后有没有新的「启动」。
 - **更新器访问私有仓库**：token 依次取 `~/.agentidea/github_token`、`GITHUB_TOKEN`/`GH_TOKEN`、`gh auth token`。GUI 应用不继承 shell 的 PATH，所以 gh / git 都按固定路径找（`ExecutableLocator`）。
-- **主题色两份**：`Theme.swift` 与 `web/style.css` 顶部变量，架构测试核对几个关键色。
+- **主题（浅色 / 深色）分两半**：外壳这半边靠**动态色**——`Theme` 的每个颜色都是 `NSColor(name:dynamicProvider:)`，按窗口当前的 appearance 从 `ThemePalette.dark` / `.light` 里挑，所以「视图 → 外观」只是写一句 `NSApp.appearance`（`AppTheme.appearance`，跟随系统就是 nil），界面代码一行不用改，连 `NSColor(Theme.text)` 转回去的（`FocusedTextField`、`PlainTextEditor`、窗口背景、拖影）也还是动态的（`themeColorsResolvePerAppearance` 守着）。正文那半边在 WebView 里，得自己告知：`WorkbenchView` 观察 `colorScheme`（不是观察偏好——选「跟随系统」时系统换深浅也要跟上）调 `ContentRenderer.setTheme(light:)` → `render.js` 的 `setTheme` 切根元素的 `light` class，颜色全在 `style.css` 的变量里（`:root` 深色 + `:root.light` 覆盖，语法色是共用的 `--syn-*`，`hljs-idea.css` / `cm-idea.css` 只做 token → 变量的映射）；mermaid 的配色是初始化时定的，切完要重画一遍当前 payload。页面重载（内容进程被回收）后 `markReadyAndFlush` 补发一次 setTheme，否则会停在深色。**色值的事实源是 `ThemePalette.swift`**，`style.css` 顶部有同一套 CSS 变量，架构测试把两套调色板与两个 `:root` 块逐个对上。
 
 ## 本地状态
 

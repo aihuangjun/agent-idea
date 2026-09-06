@@ -11,6 +11,7 @@
  * editable 为真的 code / markdown 源码用 CodeMirror 编辑器画，否则是只读的静态视图。
  * 宿主还会问 window.ide.getState() → { scrollTop, text: 编辑器里的全文或 null, cursor }，切标签前拿走最新文字；
  * 基线是异步取的，到了就 window.ide.setBase({ path, base })，编辑器在行号右侧画「改过（蓝）/ 新增（绿）」的标记（IDEA 的 gutter）。
+ * window.ide.setTheme("light" | "dark") 切浅色 / 深色：只换根元素的 class，颜色都在 style.css 的变量里。
  * window.ide.navigateChange("next" | "previous") 跳到下一处 / 上一处变更（IDEA 的 F7 / ⇧F7）：编辑器里按光标找、把那一行滚到正中；
  * 只读 diff 表格按连续的变更行段落跳。回 { index, total }，没有可跳的回 null；页面里按 F7 / ⇧F7 也走它。
  * 渲染完、跳转后、光标移动、改动、滚动时都会 post changes { hasPrevious, hasNext }，宿主据此把到头的箭头灰掉。
@@ -236,7 +237,7 @@
   function editorOptions(mode, extra) {
     return Object.assign({
       mode,
-      theme: "idea-dark",
+      theme: "idea",
       lineNumbers: true,
       lineWrapping: !!(current && current.wrap),
       indentUnit: 4,
@@ -485,10 +486,16 @@
     return markdownEngine;
   }
 
+  /* mermaid 的配色是初始化时定的，跟着当前主题走。 */
+  function mermaidOptions() {
+    const light = document.documentElement.classList.contains("light");
+    return { startOnLoad: false, theme: light ? "default" : "dark", securityLevel: "strict" };
+  }
+
   let mermaidReady = false;
   function ensureMermaid() {
     if (mermaidReady || !window.mermaid) return;
-    window.mermaid.initialize({ startOnLoad: false, theme: "dark", securityLevel: "strict" });
+    window.mermaid.initialize(mermaidOptions());
     mermaidReady = true;
   }
 
@@ -879,6 +886,20 @@
     /* 上一处 / 下一处变更；回 { index, total }，没有可跳的回 null。 */
     navigateChange(direction) {
       return navigateChange(direction);
+    },
+    /* 浅色 / 深色：外壳跟着 NSApp.appearance 走，这里只切根元素的 class，颜色全在 CSS 变量里。
+       mermaid 的图是渲染时定色的，切完要把当前 payload 重画一遍。 */
+    setTheme(theme) {
+      const light = theme === "light";
+      if (light === document.documentElement.classList.contains("light")) return;
+      document.documentElement.classList.toggle("light", light);
+      if (window.mermaid) {
+        try { window.mermaid.initialize(mermaidOptions()); } catch (e) { /* 主题切换不该把正文弄没 */ }
+      }
+      if (current) {
+        current.scrollTop = window.ide.getScrollTop();
+        window.ide.render(current);
+      }
     },
     setZoom(zoom) {
       document.documentElement.style.setProperty("--zoom", String(zoom));

@@ -111,9 +111,40 @@ private func imports(in file: URL) throws -> Set<String> {
 }
 
 @Test func themeAndStylesheetShareColors() throws {
-    let theme = try String(contentsOf: packageRoot.appendingPathComponent("Sources/DesignSystem/Theme.swift"), encoding: .utf8)
+    let palette = try String(contentsOf: packageRoot.appendingPathComponent("Sources/DesignSystem/ThemePalette.swift"), encoding: .utf8)
     let css = try String(contentsOf: packageRoot.appendingPathComponent("Sources/DesignSystem/Resources/web/style.css"), encoding: .utf8)
-    for (swiftHex, cssHex) in [("0x1E1F22", "#1E1F22"), ("0x2B2D30", "#2B2D30"), ("0x393B40", "#393B40"), ("0x2E436E", "#2E436E"), ("0xDFE1E5", "#DFE1E5")] {
-        #expect(theme.contains(swiftHex) && css.contains(cssHex), "主题色 \(cssHex) 两边不一致")
+
+    /// `public static let <名字> = ThemePalette(...)` 里的 `字段: 0xRRGGBB`。
+    func swiftColors(_ name: String) throws -> [String: String] {
+        let body = try #require(palette.firstMatch(of: try Regex("static let \(name) = ThemePalette\\((.*?)\\)\n").dotMatchesNewlines())
+            .map { String($0.output[1].substring ?? "") })
+        return Dictionary(uniqueKeysWithValues: body.matches(of: #/([a-zA-Z]+): 0x([0-9A-Fa-f]{6})/#)
+            .map { (String($0.1), String($0.2).uppercased()) })
     }
+
+    /// `:root { ... }` / `:root.light { ... }` 里的 `--变量: #RRGGBB;`。
+    func cssColors(_ selector: String) throws -> [String: String] {
+        let body = try #require(css.firstMatch(of: try Regex("\(selector) \\{(.*?)\n\\}").dotMatchesNewlines())
+            .map { String($0.output[1].substring ?? "") })
+        return Dictionary(uniqueKeysWithValues: body.matches(of: #/--([a-z0-9-]+): #([0-9A-Fa-f]{6});/#)
+            .map { (String($0.1), String($0.2).uppercased()) })
+    }
+
+    // 外壳（SwiftUI）与正文（WebView）共用的那几个面：两边都得是同一个色值
+    let shared = [("editorBackground", "bg"), ("panel", "panel"), ("border", "border"),
+                  ("selection", "selection"), ("text", "text"), ("secondaryText", "text-2"), ("mutedText", "text-3")]
+    for (theme, selector) in [("dark", ":root"), ("light", ":root.light")] {
+        let swift = try swiftColors(theme)
+        let web = try cssColors(selector)
+        for (field, variable) in shared {
+            #expect(swift[field] != nil, "ThemePalette.\(theme) 少了 \(field)")
+            #expect(swift[field] == web[variable], "\(theme) 的 \(field) / --\(variable) 两边不一致：\(swift[field] ?? "无") vs \(web[variable] ?? "无")")
+        }
+    }
+
+    // 浅色必须真的是另一套色：整块照抄深色的话这条会响
+    let dark = try swiftColors("dark")
+    let light = try swiftColors("light")
+    #expect(dark.count == light.count, "两套调色板的字段要一一对应")
+    #expect(dark["editorBackground"] != light["editorBackground"])
 }

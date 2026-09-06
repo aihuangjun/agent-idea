@@ -15,7 +15,9 @@ private func makeSession(in directory: URL, git: FakeCommandRunner? = nil) -> Pr
 }
 
 @MainActor
-private func waitUntil(_ timeout: TimeInterval = 3, _ condition: @MainActor () -> Bool) async {
+/// 等条件成立。超时给得宽（测试是并行跑的，几十个 WKWebView / 离屏窗口一起挤主线程时
+/// 一次 git 探测排上几秒很正常）——条件一成立就返回，通过的用例不会因此变慢。
+private func waitUntil(_ timeout: TimeInterval = 10, _ condition: @MainActor () -> Bool) async {
     let deadline = Date().addingTimeInterval(timeout)
     while !condition() && Date() < deadline {
         try? await Task.sleep(nanoseconds: 20_000_000)

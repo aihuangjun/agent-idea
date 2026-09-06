@@ -9,6 +9,14 @@ import Foundation
 final class ReadingPreferences: ObservableObject {
     @Published var diffMode: DiffViewMode { didSet { defaults.set(diffMode.rawValue, forKey: "diff.mode") } }
     @Published var wordWrap: Bool { didSet { defaults.set(wordWrap, forKey: "editor.wrap") } }
+    /// 界面外观（跟随系统 / 浅色 / 深色）。改了立刻写进 `NSApp.appearance`：
+    /// `Theme` 的颜色是动态色，appearance 一换整个界面自己跟着变。
+    @Published var theme: AppTheme {
+        didSet {
+            defaults.set(theme.rawValue, forKey: "appearance")
+            applyAppearance()
+        }
+    }
     @Published private(set) var zoom: Double { didSet { defaults.set(zoom, forKey: "editor.zoom") } }
 
     private let defaults: UserDefaults
@@ -19,6 +27,12 @@ final class ReadingPreferences: ObservableObject {
         wordWrap = defaults.bool(forKey: "editor.wrap")
         let saved = defaults.double(forKey: "editor.zoom")
         zoom = saved > 0 ? saved : 1
+        theme = AppTheme(rawValue: defaults.string(forKey: "appearance") ?? "") ?? .dark
+    }
+
+    /// 把当前外观写进 `NSApp`。启动时也要调一次（`init` 里 NSApp 可能还没起来）。
+    func applyAppearance() {
+        NSApp?.appearance = theme.appearance
     }
 
     func zoomIn() { zoom = min(3, (zoom * 10).rounded() / 10 + 0.1) }

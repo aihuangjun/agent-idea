@@ -1,0 +1,40 @@
+/* CodeMirror 主题：与 hljs-idea.css 同一套 IntelliJ 配色，两边的 token 名不同、颜色对齐在
+   style.css 顶部的 --syn-* 变量上（深色 / 浅色各一套）。
+   这份文件是手写的，不是 vendor，升级 CodeMirror 不要覆盖它。 */
+.CodeMirror { height: 100%; font-family: var(--mono); font-size: var(--code-size); line-height: 1.6; }
+.cm-s-idea.CodeMirror { background: var(--bg); color: var(--syn-text); }
+.cm-s-idea .CodeMirror-gutters { background: var(--bg); border-right: 1px solid var(--border); }
+.cm-s-idea .CodeMirror-linenumber { color: var(--text-3); padding: 0 14px 0 12px; }
+.cm-s-idea .CodeMirror-lines { padding: 0; }
+.cm-s-idea pre.CodeMirror-line, .cm-s-idea pre.CodeMirror-line-like { padding: 0 12px 0 14px; }
+.cm-s-idea .CodeMirror-cursor { border-left: 1.5px solid var(--syn-cursor); }
+/* 行号右侧的变更标记（IDEA 的 gutter）：改过蓝、新增绿，颜色与目录树的 VCS 色一致 */
+.cm-s-idea .cm-changes { width: 6px; }
+.cm-s-idea .cm-change-mark { width: 3px; height: 1.6em; margin-left: 1px; border-radius: 1px; }
+.cm-s-idea .cm-change-mark.modified { background: var(--link); }
+.cm-s-idea .cm-change-mark.added { background: var(--add-fg); }
+.cm-s-idea .CodeMirror-selected, .cm-s-idea .CodeMirror-focused .CodeMirror-selected { background: var(--selection); }
+.cm-s-idea .CodeMirror-line::selection, .cm-s-idea .CodeMirror-line > span::selection, .cm-s-idea .CodeMirror-line > span > span::selection { background: var(--selection); }
+.cm-s-idea .CodeMirror-activeline-background { background: var(--syn-active-line); }
+.cm-s-idea .CodeMirror-activeline .CodeMirror-linenumber { color: var(--text-2); }
+.cm-s-idea .CodeMirror-matchingbracket { color: var(--syn-bracket-fg) !important; background: var(--syn-bracket-bg); }
+.cm-s-idea .CodeMirror-nonmatchingbracket { color: var(--del-fg) !important; }
+
+.cm-s-idea .cm-comment { color: var(--syn-comment); }
+.cm-s-idea .cm-keyword, .cm-s-idea .cm-atom, .cm-s-idea .cm-type, .cm-s-idea .cm-variable-3 { color: var(--syn-keyword); }
+.cm-s-idea .cm-string, .cm-s-idea .cm-string-2 { color: var(--syn-string); }
+.cm-s-idea .cm-number { color: var(--syn-number); }
+.cm-s-idea .cm-def, .cm-s-idea .cm-variable, .cm-s-idea .cm-operator, .cm-s-idea .cm-punctuation, .cm-s-idea .cm-attribute { color: var(--syn-text); }
+.cm-s-idea .cm-variable-2, .cm-s-idea .cm-property, .cm-s-idea .cm-qualifier { color: var(--syn-attr); }
+.cm-s-idea .cm-builtin { color: var(--syn-function); }
+.cm-s-idea .cm-tag, .cm-s-idea .cm-bracket { color: var(--syn-tag); }
+.cm-s-idea .cm-meta { color: var(--syn-meta); }
+.cm-s-idea .cm-header { color: var(--syn-keyword); font-weight: 600; }
+.cm-s-idea .cm-quote { color: var(--syn-comment); }
+.cm-s-idea .cm-link, .cm-s-idea .cm-url { color: var(--link); }
+.cm-s-idea .cm-em { font-style: italic; }
+.cm-s-idea .cm-strong { font-weight: 600; }
+.cm-s-idea .cm-hr { color: var(--text-3); }
+.cm-s-idea .cm-error { color: var(--del-fg); }
+.cm-s-idea .cm-positive { color: var(--add-fg); }
+.cm-s-idea .cm-negative { color: var(--del-fg); }
