@@ -3,8 +3,8 @@ import Foundation
 /// 用系统 git 命令操作仓库。
 ///
 /// 读：仓库根、status、diff、log。写只有几类，都是用户在界面上明确点出来的：
-/// 提交（`add` / `rm --cached` + `commit --only`）、推送、回滚工作区变更（`restore` / `rm`）、
-/// 反向打回历史提交里的一个变更（`apply --reverse`）。除此之外不碰仓库。
+/// 提交（`add` / `rm --cached` + `commit --only`）、推送、与远程同步（`fetch` + `rebase --autostash`）、
+/// 回滚工作区变更（`restore` / `rm`）、反向打回历史提交里的一个变更（`apply --reverse`）。除此之外不碰仓库。
 public struct GitClient: Sendable {
     public static let searchPaths = ["/usr/local/bin/git", "/opt/homebrew/bin/git", "/usr/bin/git"]
 
@@ -240,6 +240,63 @@ public struct GitClient: Sendable {
     public func removeAdded(path: String, repositoryRoot: URL) async throws {
         _ = try await run(["rm", "-f", "-q", "--", path], in: repositoryRoot)
     }
+
+    // MARK: - 与远程同步
+
+    /// 当前分支跟踪的上游（`origin/main` 这种）。没有上游、游离 HEAD 时返回 nil。
+    public func upstreamBranch(repositoryRoot: URL) async -> String? {
+        guard let output = try? await run(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], in: repositoryRoot) else { return nil }
+        let name = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? nil : name
+    }
+
+    /// 当前分支名；游离 HEAD 时是 `HEAD`。
+    public func currentBranch(repositoryRoot: URL) async -> String {
+        let output = try? await run(["rev-parse", "--abbrev-ref", "HEAD"], in: repositoryRoot)
+        let name = output?.text.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return name.isEmpty ? "HEAD" : name
+    }
+
+    /// 从远程取最新的引用。`--prune` 顺手清掉远端已经删掉的分支的本地跟踪引用。
+    /// 不带 remote：git 自己按当前分支的配置挑（没配就是 origin）。
+    public func fetch(repositoryRoot: URL) async throws {
+        _ = try await run(["fetch", "--prune"], in: repositoryRoot)
+    }
+
+    /// 本地相对上游落后 / 领先几个提交。
+    public func divergence(from upstream: String, repositoryRoot: URL) async throws -> (behind: Int, ahead: Int) {
+        let output = try await run(["rev-list", "--left-right", "--count", upstream + "...HEAD"], in: repositoryRoot)
+        return GitRevListCount.parse(output.text) ?? (0, 0)
+    }
+
+    /// 与远程同步（IDEA 的 Update Project）：`fetch` 之后把上游的新提交 rebase 到本地分支下面。
+    ///
+    /// - 上游没有新提交就不跑 rebase，本地一动不动。
+    /// - 工作区有没提交的改动时靠 `--autostash` 收起再放回来，不用先手动 stash。
+    /// - rebase 中途出问题（冲突、autostash 放不回去）一律 `--abort` 回到同步前的样子再报错：
+    ///   这个应用没有解冲突的界面，把仓库停在 rebase 中途只会让用户更难办。
+    public func syncWithRemote(repositoryRoot: URL) async throws -> GitSyncResult {
+        guard await hasHead(repositoryRoot: repositoryRoot) else { throw GitSyncError.unborn }
+        guard let upstream = await upstreamBranch(repositoryRoot: repositoryRoot) else {
+            throw GitSyncError.noUpstream(branch: await currentBranch(repositoryRoot: repositoryRoot))
+        }
+        try await fetch(repositoryRoot: repositoryRoot)
+        let counts = try await divergence(from: upstream, repositoryRoot: repositoryRoot)
+        let result = GitSyncResult(upstream: upstream, pulled: counts.behind, replayed: counts.ahead)
+        guard result.didRebase else { return result }
+        do {
+            _ = try await run(["rebase", "--autostash", upstream], in: repositoryRoot)
+        } catch is CancellationError {
+            // 取消是调用方的事（关项目、退出），不是失败；rebase 被 SIGTERM 打断的话 git 自己会收尾
+            throw CancellationError()
+        } catch {
+            let recovered = (try? await run(["rebase", "--abort"], in: repositoryRoot)) != nil
+            throw GitSyncError.rebaseFailed(message: error.userFacingDescription, recovered: recovered)
+        }
+        return result
+    }
+
+    // MARK: - 推送
 
     /// 推送当前分支。没有上游的话建上游（`-u origin HEAD`）。返回 git 的输出（进度在 stderr 里）。
     public func push(repositoryRoot: URL, hasUpstream: Bool) async throws -> String {

@@ -25,6 +25,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     @Published private(set) var gitIndex: GitStatusIndex = .empty
     @Published private(set) var changeGroups = ChangeGroups(changes: [])
     @Published private(set) var isRefreshingGit = false
+    /// 正在跟远程同步（fetch + rebase）。要走网络，比 status 慢得多，所以单独一个状态。
+    @Published private(set) var isSyncingRemote = false
     @Published private(set) var gitError: String?
     /// 仓库确定之后才有；没有 git 的项目为 nil。
     @Published private(set) var commit: CommitController?
@@ -947,6 +949,42 @@ final class ProjectSession: ObservableObject, Identifiable {
             }
             contents[tab.id] = nil
             if activeTabID == tab.id, let current = tabs.first(where: { $0.id == tab.id }) { loadDiff(for: current) }
+        }
+    }
+
+    /// 能不能跟远程同步：有仓库、没在同步。
+    var canSyncWithRemote: Bool { hasGit && !isSyncingRemote }
+
+    /// 与远程同步（IDEA 的 Update Project）：`git fetch` 之后把上游的新提交 rebase 到本地分支下面，
+    /// 完了整体刷新（目录树、开着的文件、git 状态、已经打开的提交历史）。
+    ///
+    /// 结果与失败都报在状态栏：成功的提示自己消失，失败的留着等用户看完关掉。
+    func syncWithRemote() {
+        guard let git, let repositoryRoot = project.repositoryRoot, !isSyncingRemote else { return }
+        isSyncingRemote = true
+        // 刻意不在 tearDown 里取消：rebase 跑到一半被 SIGTERM 打断可能把仓库停在 rebase 中途，
+        // 而这个应用没有解冲突的界面。任务只捕获弱引用，项目关了它自己会安静地跑完。
+        Task { [weak self] in
+            do {
+                let result = try await git.syncWithRemote(repositoryRoot: repositoryRoot)
+                Log.info("git", "同步远程：\(result.summary)")
+                guard let self else { return }
+                self.isSyncingRemote = false
+                self.notify(result.summary)
+            } catch is CancellationError {
+                self?.isSyncingRemote = false
+                return
+            } catch {
+                Log.warn("git", "同步远程失败：\(error)")
+                guard let self else { return }
+                self.isSyncingRemote = false
+                // 出错的提示不自动消失，用户自己关
+                self.banner = "同步失败：\(error.userFacingDescription)"
+            }
+            guard let self else { return }
+            self.refreshAll()
+            // HEAD 没变时 apply(snapshot) 不会重拉历史，但用户是点了刷新按钮才到这儿的，打开着的历史照拉一次
+            self.history?.reloadIfLoaded()
         }
     }
 

@@ -136,6 +136,10 @@ public struct AgentIDEARootScene: Scene {
                     .keyboardShortcut("k", modifiers: [.command, .shift])
                     .disabled(!(workbench.active?.commit?.canPush ?? false))
                 Divider()
+                // IDEA 的 Update Project 也是 ⌘T
+                Button("与远程同步（fetch + rebase）") { workbench.active?.syncWithRemote() }
+                    .keyboardShortcut("t", modifiers: .command)
+                    .disabled(!(workbench.active?.canSyncWithRemote ?? false))
                 Button("刷新 git 状态") { workbench.active?.refreshGit() }
                     .disabled(!(workbench.active?.hasGit ?? false))
             }

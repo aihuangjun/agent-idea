@@ -26,6 +26,13 @@ struct ProjectTreeView: View {
     var body: some View {
         VStack(spacing: 0) {
             ToolWindowHeader(title: "项目") {
+                if session.isSyncingRemote {
+                    ProgressView().controlSize(.mini).padding(.trailing, 4)
+                }
+                IconButton("arrow.down.backward", help: "与远程同步：git fetch + rebase（⌘T）", size: 22) {
+                    session.syncWithRemote()
+                }
+                    .disabled(!session.canSyncWithRemote)
                 IconButton("magnifyingglass", help: "查找文件（⌘F）", isActive: search.isActive, size: 22) {
                     if search.isActive { closeSearch() } else { search.activate() }
                 }

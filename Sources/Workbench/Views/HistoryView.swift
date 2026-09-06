@@ -23,18 +23,23 @@ struct HistoryView: View {
     }
 }
 
-/// 标题条 + 正文。转圈、刷新按钮都看 `HistoryController` 的状态，所以标题条也放在观察它的这一层。
+/// 标题条 + 正文。转圈、刷新按钮看历史控制器与会话两边的状态（拉 log 与同步远程各转各的），所以标题条也放在同时观察它俩的这一层。
 private struct HistoryBody: View {
-    let session: ProjectSession
+    @ObservedObject var session: ProjectSession
     @ObservedObject var history: HistoryController
 
     var body: some View {
         VStack(spacing: 0) {
             ToolWindowHeader(title: "提交历史") {
-                if history.isLoading {
+                if history.isLoading || session.isSyncingRemote {
                     ProgressView().controlSize(.mini).padding(.trailing, 4)
                 }
-                IconButton("arrow.clockwise", help: "刷新", size: 22) { history.refresh() }
+                // 刷新 = 与远程同步后再重拉：只重列本地的 log 看不到别人刚推上去的提交。
+                // 同步不了的仓库（没上游、还没有提交）退回本地刷新，按钮照样能用。
+                IconButton("arrow.clockwise", help: "与远程同步并刷新：git fetch + rebase", size: 22) {
+                    if session.canSyncWithRemote { session.syncWithRemote() } else { history.refresh() }
+                }
+                    .disabled(session.isSyncingRemote)
             }
             content
         }

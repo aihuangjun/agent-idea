@@ -59,6 +59,12 @@ final class HistoryController: ObservableObject {
         if hasLoaded, loadedHead != currentHead { refresh() }
     }
 
+    /// 用户明确要求刷新（与远程同步之后）：打开过历史就重拉，HEAD 没变也拉——远程可能改写过历史。
+    /// 没打开过的不主动拉，跟 `refreshIfLoaded` 一样等打开时再说。
+    func reloadIfLoaded() {
+        if hasLoaded { refresh() }
+    }
+
     /// 项目关掉：正在跑的都停掉。
     func cancel() {
         loadTask?.cancel()

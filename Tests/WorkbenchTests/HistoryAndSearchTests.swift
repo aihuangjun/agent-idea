@@ -173,3 +173,55 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
         await waitUntil { search.indexedCount == 5 }
     }
 }
+
+/// 与远程同步：fetch + rebase 之后整体刷新，打开着的历史重新拉一遍，结果报在状态栏。
+@Test @MainActor func syncWithRemotePullsRebasesAndReloadsHistory() async throws {
+    try await withTemporaryDirectory { directory in
+        let head = Locked("1111111111111111")
+        let upstream = Locked<String?>("origin/main")
+        let runner = FakeCommandRunner { arguments, _ in
+            switch arguments.first {
+            case "rev-parse" where arguments.contains("--show-toplevel"): return shellOutput(directory.path + "\n")
+            case "rev-parse" where arguments.contains("@{upstream}"):
+                return upstream.value.map { shellOutput($0 + "\n") } ?? shellOutput("", status: 128, stderr: "fatal: no upstream")
+            case "rev-parse" where arguments.contains("--abbrev-ref"): return shellOutput("main\n")
+            case "rev-parse": return shellOutput(head.value)
+            case "status": return shellOutput("# branch.oid \(head.value)\u{0}# branch.head main\u{0}")
+            case "rev-list": return shellOutput("2\t0")
+            case "rebase":
+                // rebase 之后 HEAD 变了：新的 log 才拉得到同事的提交
+                head.value = "2222222222222222"
+                return shellOutput("")
+            case "log": return shellOutput(logRecord(head.value, parents: "", subject: "同事的提交"))
+            default: return shellOutput("")
+            }
+        }
+        let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
+        let session = ProjectSession(root: directory, git: git, renderer: ContentRenderer(),
+                                     preferences: ReadingPreferences(defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!))
+        await waitUntil { session.history != nil && session.gitSnapshot.branch.name == "main" }
+        let history = try #require(session.history)
+        history.loadIfNeeded()
+        await waitUntil { !history.commits.isEmpty }
+        let logsBefore = runner.calls(startingWith: "log").count
+
+        #expect(session.canSyncWithRemote)
+        session.syncWithRemote()
+        await waitUntil { !session.isSyncingRemote && session.banner != nil }
+        #expect(runner.calls(startingWith: "fetch").last == ["fetch", "--prune"])
+        #expect(runner.calls(startingWith: "rebase").last == ["rebase", "--autostash", "origin/main"])
+        #expect(session.banner == "已从 origin/main 拉取 2 个提交")
+        // 同步完整体刷新一遍，历史也重拉了
+        await waitUntil { runner.calls(startingWith: "log").count > logsBefore }
+        #expect(session.gitSnapshot.branch.headOID == "2222222222222222")
+
+        // 没有上游：报在状态栏，历史照样刷新（提交历史的刷新按钮退回本地刷新）
+        upstream.value = nil
+        session.dismissBanner()
+        let logsBeforeFailure = runner.calls(startingWith: "log").count
+        session.syncWithRemote()
+        await waitUntil { !session.isSyncingRemote && session.banner != nil }
+        #expect(session.banner?.contains("main 没有跟踪远程分支") == true)
+        await waitUntil { runner.calls(startingWith: "log").count > logsBeforeFailure }
+    }
+}
