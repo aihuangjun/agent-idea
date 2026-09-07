@@ -86,11 +86,14 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         public var scrollTop: Double
         public var text: String?
         public var cursor: EditorCursor?
+        /// 编辑器的撤销历史（JSON 文本），没有编辑器时为 nil。
+        public var history: String?
 
-        public init(scrollTop: Double = 0, text: String? = nil, cursor: EditorCursor? = nil) {
+        public init(scrollTop: Double = 0, text: String? = nil, cursor: EditorCursor? = nil, history: String? = nil) {
             self.scrollTop = scrollTop
             self.text = text
             self.cursor = cursor
+            self.history = history
         }
     }
 
@@ -163,7 +166,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
             completion(ViewState(
                 scrollTop: (dictionary["scrollTop"] as? NSNumber)?.doubleValue ?? 0,
                 text: dictionary["text"] as? String,
-                cursor: Self.cursor(from: dictionary["cursor"])
+                cursor: Self.cursor(from: dictionary["cursor"]),
+                history: dictionary["history"] as? String
             ))
         }
     }
@@ -200,6 +204,22 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         guard isReady else { return }
         webView.evaluateJavaScript("window.ide.navigateChange(\"\(step.rawValue)\")") { _, error in
             if let error { Log.warn("web", "navigateChange 失败：\(error)") }
+        }
+    }
+
+    /// 编辑器里的撤销 / 重做（CodeMirror 自己的历史）。回调告诉调用方页面里有没有编辑器接下这一步：
+    /// 没有（只读视图）的话调用方去撤文件操作。
+    public func undo(_ completion: @escaping (Bool) -> Void) { performEditorCommand("undo", completion) }
+    public func redo(_ completion: @escaping (Bool) -> Void) { performEditorCommand("redo", completion) }
+
+    private func performEditorCommand(_ command: String, _ completion: @escaping (Bool) -> Void) {
+        guard isReady else {
+            completion(false)
+            return
+        }
+        webView.evaluateJavaScript("window.ide.\(command)()") { value, error in
+            if let error { Log.warn("web", "\(command) 失败：\(error)") }
+            completion((value as? Bool) ?? false)
         }
     }
 

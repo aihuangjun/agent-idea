@@ -9,6 +9,9 @@ struct ChangesView: View {
     @State private var trackedCollapsed = false
     @State private var untrackedCollapsed = false
     @State private var clicks = DoubleClickDetector(interval: NSEvent.doubleClickInterval)
+    /// 正在重命名的文件。对话框挂在整个面板上而不是行上：行在 LazyVStack 里，git 一刷新就可能被回收，
+    /// 挂在行上的 sheet 会跟着消失。
+    @State private var renaming: FileNode?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,6 +35,9 @@ struct ChangesView: View {
             }
         }
         .background(Theme.panel)
+        .sheet(item: $renaming) { node in
+            RenameSheet(node: node) { session.renameProblem(for: node, newName: $0) } commit: { session.rename(node, to: $0) }
+        }
     }
 
     private func changeList(commit: CommitController) -> some View {
@@ -41,7 +47,7 @@ struct ChangesView: View {
                     GroupHeader(title: "变更", changes: session.changeGroups.tracked, commit: commit, isCollapsed: $trackedCollapsed)
                     if !trackedCollapsed {
                         ForEach(session.changeGroups.tracked) { change in
-                            ChangeRow(session: session, commit: commit, clicks: clicks, change: change, isActive: isActive(change))
+                            ChangeRow(session: session, commit: commit, clicks: clicks, change: change, isActive: isActive(change), onRename: { renaming = $0 })
                         }
                     }
                 }
@@ -49,7 +55,7 @@ struct ChangesView: View {
                     GroupHeader(title: "未跟踪文件", changes: session.changeGroups.untracked, commit: commit, isCollapsed: $untrackedCollapsed)
                     if !untrackedCollapsed {
                         ForEach(session.changeGroups.untracked) { change in
-                            ChangeRow(session: session, commit: commit, clicks: clicks, change: change, isActive: isActive(change))
+                            ChangeRow(session: session, commit: commit, clicks: clicks, change: change, isActive: isActive(change), onRename: { renaming = $0 })
                         }
                     }
                 }
@@ -106,6 +112,7 @@ private struct ChangeRow: View {
     let clicks: DoubleClickDetector
     let change: GitChange
     let isActive: Bool
+    let onRename: (FileNode) -> Void
     @State private var isHovering = false
     @State private var pendingAction: DestructiveConfirmation?
 
@@ -133,13 +140,14 @@ private struct ChangeRow: View {
         } release: { isClick in
             if isClick, clicks.registerClick(on: change.path) { session.openDiff(change, pinned: true) }
         }
+        // 没有「显示 diff」：点这一行本来就是看 diff
         .contextMenu {
-            Button("显示 diff") { session.openDiff(change, pinned: true) }
+            // 分隔线跟着这一组走：已删除的变更这一组整个没有，菜单第一项就不该是一条线
             if change.kind != .deleted, let url = session.url(for: change) {
                 Button("打开文件") { session.openFile(url, pinned: true) }
                 Button("在项目视图中显示") { session.reveal(url) }
+                Divider()
             }
-            Divider()
             if change.kind != .untracked {
                 Button("回滚…") {
                     pendingAction = DestructiveConfirmation(
@@ -149,8 +157,11 @@ private struct ChangeRow: View {
                             ? "这是一个新增的文件，回滚会把它从 git 和磁盘上一起删掉。"
                             : "会把它恢复到 HEAD 的样子，本地改动会丢失。",
                         buttonTitle: "回滚"
-                    ) { commit.rollback(change) }
+                    ) { session.rollback(change) }
                 }
+            }
+            if let node = session.node(for: change) {
+                Button("重命名…") { onRename(node) }
             }
             if commit.canDelete(change) {
                 Button("删除…") {
@@ -161,7 +172,7 @@ private struct ChangeRow: View {
                             ? "文件会移到废纸篓。"
                             : "文件会移到废纸篓，git 里会显示为已删除；要不要提交这次删除由你决定。",
                         buttonTitle: "删除"
-                    ) { commit.delete(change) }
+                    ) { session.delete(change) }
                 }
             }
         }

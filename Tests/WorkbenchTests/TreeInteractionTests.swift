@@ -24,11 +24,11 @@ import TestSupport
     #expect(TreeRowInteraction.View.isContextClick(event(.leftMouseDown, flags: .control)))
     #expect(!TreeRowInteraction.View.isContextClick(event(.leftMouseDown)))
 
-    let accepted = Locked<[String]>([])
+    let accepted = Locked<[[String]]>([])
     let targeted = Locked<[Bool]>([])
     let view = TreeRowInteraction.View(configuration: TreeRowInteraction(
         dragPath: "/p/a",
-        dropCheck: { $0 == "/p/ok" },
+        dropCheck: { $0.allSatisfy { $0.hasPrefix("/p/ok") } },
         drop: { accepted.value.append($0) },
         onTargetChange: { targeted.value.append($0) }
     ))
@@ -38,7 +38,16 @@ import TestSupport
     pasteboard.setString("/p/ok", forType: TreeRowInteraction.pasteboardType)
     #expect(view.dropOperation(for: pasteboard) == .move)
     #expect(view.performDrop(from: pasteboard))
-    #expect(accepted.value == ["/p/ok"])
+    #expect(accepted.value == [["/p/ok"]])
+
+    // 多选拖过来：一个剪贴板项里放路径数组，一起交给 drop
+    pasteboard.clearContents()
+    let multiple = NSPasteboardItem()
+    multiple.setPropertyList(["/p/ok1", "/p/ok2"], forType: TreeRowInteraction.pasteboardType)
+    pasteboard.writeObjects([multiple])
+    #expect(TreeRowInteraction.View.paths(on: pasteboard) == ["/p/ok1", "/p/ok2"])
+    #expect(view.performDrop(from: pasteboard))
+    #expect(accepted.value.last == ["/p/ok1", "/p/ok2"])
 
     pasteboard.clearContents()
     pasteboard.setString("/p/no", forType: TreeRowInteraction.pasteboardType)
@@ -47,7 +56,7 @@ import TestSupport
     pasteboard.clearContents()
     pasteboard.setString("/p/ok", forType: .string)
     #expect(view.dropOperation(for: pasteboard) == [], "别的应用拖来的文字不收")
-    #expect(accepted.value == ["/p/ok"])
+    #expect(accepted.value.count == 2)
 
     // 不收拖放的行（没有 dropCheck）
     let plain = TreeRowInteraction.View(configuration: TreeRowInteraction())
@@ -179,5 +188,87 @@ import TestSupport
             hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
             try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: snapshotDirectory).appendingPathComponent("project-tree.png"))
         }
+    }
+}
+
+/// 拖到列表上下边缘附近要自动滚动，往上往下都要能滚到头（0.8.0 里往上滚不动：定时器挂在行上，行一被回收就停了）。
+/// 拖拽会话本身起不来，把「光标在哪」换成假的直接喂给列表级的自动滚动。
+@Test @MainActor func draggingNearEdgesAutoscrollsBothWays() async throws {
+    try await withTemporaryDirectory { directory in
+        for index in 0..<24 {
+            try "x".write(to: directory.appendingPathComponent(String(format: "file-%02d.txt", index)), atomically: true, encoding: .utf8)
+        }
+        let session = ProjectSession(root: directory, git: nil, renderer: ContentRenderer(),
+                                     preferences: ReadingPreferences(defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!))
+        session.setActive(true)
+        let size = CGSize(width: 320, height: 300)
+        let hosting = NSHostingView(rootView: ProjectTreeView(session: session).frame(width: size.width, height: size.height))
+        hosting.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: size.width, height: size.height), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = hosting
+        window.orderBack(nil)
+        window.layoutIfNeeded()
+        hosting.layoutSubtreeIfNeeded()
+        try await Task.sleep(nanoseconds: 500_000_000)
+        defer { window.orderOut(nil) }
+
+        func find<T: NSView>(_: T.Type, in view: NSView) -> T? {
+            if let match = view as? T { return match }
+            for child in view.subviews { if let match = find(T.self, in: child) { return match } }
+            return nil
+        }
+        let scrollView = try #require(find(NSScrollView.self, in: hosting))
+        let clip = scrollView.contentView
+        /// 视野离文档顶端 / 底端还有多远（视觉上的，与坐标系翻不翻转无关）。
+        func distanceFromTop() -> CGFloat {
+            let document = clip.documentView?.bounds ?? .zero
+            return clip.isFlipped ? clip.documentVisibleRect.minY : document.maxY - clip.documentVisibleRect.maxY
+        }
+        func distanceFromBottom() -> CGFloat {
+            let document = clip.documentView?.bounds ?? .zero
+            return clip.isFlipped ? document.maxY - clip.documentVisibleRect.maxY : clip.documentVisibleRect.minY
+        }
+        // 转一小段就 yield 一次：一口气转几秒会把并行跑的别的 @MainActor 测试饿住（见 AGENTS.md）
+        @MainActor func spinUntil(_ seconds: TimeInterval, _ done: () -> Bool) async {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline, !done() {
+                spin(0.02)
+                await Task.yield()
+            }
+        }
+        let frameInWindow = scrollView.convert(scrollView.bounds, to: nil)   // 窗口坐标 y 向上：maxY 是视觉上的顶边
+        #expect(distanceFromTop() == 0)
+
+        let autoscroll = TreeAutoscroll.shared
+        let cursor = Locked(NSPoint(x: frameInWindow.midX, y: frameInWindow.minY + 8))
+        let mouseDown = Locked(true)
+        autoscroll.locationInWindow = { _ in cursor.value }
+        autoscroll.isMouseDown = { mouseDown.value }
+        defer {
+            autoscroll.stop()
+            autoscroll.locationInWindow = { $0.convertPoint(fromScreen: NSEvent.mouseLocation) }
+            autoscroll.isMouseDown = { NSEvent.pressedMouseButtons != 0 }
+        }
+
+        // 贴着下边缘往下滚到底（内容高度是边滚边长的，到头那一拍不能停）
+        autoscroll.start(in: scrollView)
+        await spinUntil(3) { distanceFromBottom() < 8 }
+        #expect(distanceFromBottom() < 8, "往下滚到头（差的那几个点是列表底部的内边距）")
+        #expect(distanceFromTop() > 100)
+        #expect(autoscroll.isRunning, "光标还贴着边就不停")
+
+        // 光标挪到上边缘（甚至跑到列表上面一点，标题条上）：往上滚回顶
+        cursor.value = NSPoint(x: frameInWindow.midX, y: frameInWindow.maxY + 10)
+        await spinUntil(3) { distanceFromTop() < 8 }
+        #expect(distanceFromTop() < 8, "往上滚到头")
+
+        // 光标回到中间：停；松开鼠标：停
+        cursor.value = NSPoint(x: frameInWindow.midX, y: frameInWindow.midY)
+        await spinUntil(1) { !autoscroll.isRunning }
+        #expect(!autoscroll.isRunning)
+        autoscroll.start(in: scrollView)
+        mouseDown.value = false
+        await spinUntil(1) { !autoscroll.isRunning }
+        #expect(!autoscroll.isRunning)
     }
 }

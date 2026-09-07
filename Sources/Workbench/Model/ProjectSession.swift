@@ -15,7 +15,12 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     @Published private(set) var tree = FlattenedTree()
     @Published private(set) var rows: [FlattenedTree.Row] = []
-    @Published private(set) var selectedPath: String?
+    /// 树上选中的东西：单击一个，⌘ / ⇧点击多选；`selectedPath` 是锚点（键盘导航、重命名这些只看它）。
+    @Published private(set) var selection = TreeSelection()
+    var selectedPath: String? {
+        get { selection.anchor }
+        set { selection.select(newValue) }
+    }
     /// 定位的次数。树视图观察它，据此决定「这次选中要滚动到可见」（鼠标点选不滚）。
     @Published private(set) var revealRequests = 0
 
@@ -48,6 +53,10 @@ final class ProjectSession: ObservableObject, Identifiable {
     private var baseTextsHead = ""
     /// 后退 / 前进的历史，元素是标签 id。
     @Published private(set) var navigation = NavigationHistory<String>()
+    /// 文件操作的撤销 / 重做栈（重命名、移动、删除、回滚）。编辑器里的撤销是 CodeMirror 自己的，见 `UndoDispatcher`。
+    @Published var undoHistory = UndoHistory<UndoableOperation>()
+    /// 一次撤销 / 重做正在跑（搬文件、git 都是异步的），跑完之前再按 ⌘Z 不响应。
+    var isUndoing = false
     /// 状态栏里一条可关闭的提示。换了内容就把附带的动作清掉（动作只属于设它时的那条）。
     @Published private(set) var banner: String? {
         didSet { if banner != oldValue { bannerAction = nil } }
@@ -78,7 +87,10 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     private let git: GitClient?
     private let renderer: ContentRenderer
-    private let fileManager = FileManager.default
+    let fileManager = FileManager.default
+    /// 目录树的展开状态记在这里（按项目根目录分键），下次打开同一个项目原样展开。
+    private let defaults: UserDefaults
+    private var savedExpanded: Set<String> = []
     private let preferences: ReadingPreferences
     /// 由 `WorkbenchModel.activate` 写入。只有当前项目才往共用的 WebView 里画。
     private(set) var isActive = false
@@ -97,10 +109,11 @@ final class ProjectSession: ObservableObject, Identifiable {
         return contents[activeTabID]
     }
 
-    init(root: URL, git: GitClient?, renderer: ContentRenderer, preferences: ReadingPreferences) {
+    init(root: URL, git: GitClient?, renderer: ContentRenderer, preferences: ReadingPreferences, defaults: UserDefaults = .standard) {
         self.git = git
         self.renderer = renderer
         self.preferences = preferences
+        self.defaults = defaults
         let project = Project(root: root)
         self.project = project
         self.id = project.root.path
@@ -108,6 +121,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         Log.info("project", "打开 \(project.root.path)")
 
         loadChildren(of: project.root.path)
+        restoreExpandedDirectories()
         recomputeRows()
         watcher = ChangeWatcher(root: project.root) { [weak self] paths in self?.handleChanges(paths) }
 
@@ -161,8 +175,14 @@ final class ProjectSession: ObservableObject, Identifiable {
         banner = nil
     }
 
+    /// 出错的提示：不自动消失，用户自己关。
+    func showError(_ text: String) {
+        bannerTimeout?.cancel()
+        banner = text
+    }
+
     /// 一条过一会儿自己消失的提示，可带一个动作。出错的提示不走这里，那些要用户自己关。
-    private func notify(_ text: String, action: BannerAction? = nil, timeout: TimeInterval = 8) {
+    func notify(_ text: String, action: BannerAction? = nil, timeout: TimeInterval = 8) {
         bannerTimeout?.cancel()
         banner = text
         bannerAction = action
@@ -179,14 +199,55 @@ final class ProjectSession: ObservableObject, Identifiable {
         tree.setChildren(DirectoryLister.list(URL(fileURLWithPath: path, isDirectory: true), fileManager: fileManager), for: path)
     }
 
+    /// 某个目录里多了 / 少了东西：重列它（已经列过的话），行跟着变。
+    func refreshTree(directoryContaining url: URL) {
+        let directory = url.deletingLastPathComponent().path
+        if tree.hasLoaded(directory) { loadChildren(of: directory) }
+        recomputeRows()
+    }
+
     private func recomputeRows() {
         for pending in tree.needsLoading(root: project.root.path) {
             loadChildren(of: pending)
         }
         rows = tree.rows(root: project.root.path)
+        saveExpandedDirectoriesIfChanged()
+    }
+
+    // MARK: - 展开状态的记忆
+
+    private var expandedDirectoriesKey: String { "tree.expanded:" + project.root.path }
+
+    /// 展开了哪些目录，每次行重算时比一下，变了就写（相对项目根的路径，项目搬家也还认）。
+    private func saveExpandedDirectoriesIfChanged() {
+        guard tree.expanded != savedExpanded else { return }
+        savedExpanded = tree.expanded
+        let relative = tree.expanded.compactMap { path -> String? in
+            let components = project.projectRelativeComponents(of: URL(fileURLWithPath: path, isDirectory: true))
+            return components.isEmpty ? nil : components.joined(separator: "/")
+        }
+        defaults.set(relative.sorted(), forKey: expandedDirectoriesKey)
+    }
+
+    /// 打开项目时把上次展开的目录展开回来（已经不存在的跳过）。
+    private func restoreExpandedDirectories() {
+        for relative in defaults.stringArray(forKey: expandedDirectoriesKey) ?? [] {
+            let path = project.root.appendingPathComponent(relative, isDirectory: true).path
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue else { continue }
+            tree.expand(path)
+        }
+        savedExpanded = tree.expanded
     }
 
     func select(_ path: String?) { selectedPath = path }
+    /// ⌘点击：加进 / 移出多选。
+    func toggleSelection(_ path: String) { selection.toggle(path, order: rows.map(\.id)) }
+    /// ⇧点击：从锚点连选到这一行。
+    func extendSelection(to path: String) { selection.extend(to: path, order: rows.map(\.id)) }
+
+    /// 选中的节点，按行序；多选拖拽、删除用 `TreeSelection.roots` 去掉祖先也选中的那些。
+    var selectedNodes: [FileNode] { rows.filter { selection.contains($0.id) }.map(\.node) }
 
     func toggleExpanded(_ path: String) {
         tree.toggle(path)
@@ -210,13 +271,18 @@ final class ProjectSession: ObservableObject, Identifiable {
         recomputeRows()
     }
 
-    /// 在树上定位并选中一个文件（IDEA 的 Select Opened File）。
+    /// 在树上定位并选中一个文件（IDEA 的 Select Opened File），并切到项目工具窗口。
     func reveal(_ url: URL) {
+        revealInTree(url)
+        onRequestToolWindow?(.project)
+    }
+
+    /// 只在树上露出并选中，不切工具窗口（撤销删除之后把回来的文件指出来）。
+    func revealInTree(_ url: URL) {
         tree.reveal(url.path, root: project.root.path)
         recomputeRows()
         revealRequests += 1
         selectedPath = url.path
-        onRequestToolWindow?(.project)
     }
 
     /// 定位当前标签对应的文件。
@@ -251,6 +317,11 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
     }
 
+    /// 选中某个路径的父目录（根目录就清掉选中）：删掉选中的东西之后用。
+    func select(parentOf url: URL) {
+        selectedPath = parentPath(of: url.path)
+    }
+
     private func parentPath(of path: String) -> String? {
         let parent = (path as NSString).deletingLastPathComponent
         return parent == project.root.path ? nil : parent
@@ -265,20 +336,28 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 删除一个文件或目录：进废纸篓（不是 rm，删错了能找回来），关掉它（以及目录下）开着的标签，选中挪到父节点。
     /// 目录树与 FSEvents 会随后自己刷新；这里立刻刷一次，不用等去抖。
     func delete(_ node: FileNode) {
-        guard node.url.path != project.root.path else { return }
+        guard let trashed = performDelete(node) else { return }
+        recordUndo("删除 \(node.name)", .delete(original: node.url, trashed: trashed, isDirectory: node.isDirectory))
+    }
+
+    /// 真正删（进废纸篓）、关标签、挪选中、刷新；不记撤销栈（重做时也走这里）。返回它在废纸篓里的位置，删不成 nil。
+    func performDelete(_ node: FileNode) -> URL? {
+        guard node.url.path != project.root.path else { return nil }
+        let trashed: URL
         do {
-            try Trash.move(node.url)
+            trashed = try Trash.move(node.url)
             Log.info("project", "已删除 \(node.url.path)")
         } catch {
             banner = "删除失败：\(error.userFacingDescription)"
             Log.warn("project", "删除 \(node.url.path) 失败：\(error)")
-            return
+            return nil
         }
         closeTabs(under: node.url)
         if selectedPath == node.id || (selectedPath?.hasPrefix(node.url.path + "/") ?? false) {
             selectedPath = parentPath(of: node.id)
         }
         refreshAll()
+        return trashed
     }
 
     // MARK: - 重命名
@@ -291,7 +370,7 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     /// 目录里有没有这个名字的条目。用 lstat 语义（`attributesOfItem`）而不是 `fileExists`：后者会跟着符号链接走，
     /// 一个目标失效的链接会被当成不存在，搬过去才报「已存在」。
-    private func entryExists(_ path: String) -> Bool {
+    func entryExists(_ path: String) -> Bool {
         (try? fileManager.attributesOfItem(atPath: path)) != nil
     }
 
@@ -307,7 +386,10 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
         let destination = node.url.deletingLastPathComponent().appendingPathComponent(name, isDirectory: node.isDirectory)
         saveAll { [weak self] in
-            Task { [weak self] in await self?.move(node, to: destination, verb: "重命名") }
+            Task { [weak self] in
+                guard let self, let failure = await self.move(node, to: destination, verb: "重命名") else { return }
+                self.showError(failure)
+            }
         }
     }
 
@@ -332,31 +414,24 @@ final class ProjectSession: ObservableObject, Identifiable {
         let destination = directory.appendingPathComponent(node.name, isDirectory: node.isDirectory)
         saveAll { [weak self] in
             Task { [weak self] in
-                guard let self, await self.move(node, to: destination, verb: "移动") else { return }
-                self.offerUndo(of: node, movedTo: destination)
+                guard let self else { return }
+                if let failure = await self.move(node, to: destination, verb: "移动") {
+                    self.showError(failure)
+                    return
+                }
+                // 搬完在状态栏给一条带「撤销」的提示（与 ⌘Z 撤的是同一步：只在它还是栈顶时才撤）
+                let target = self.project.projectRelativeComponents(of: directory).joined(separator: "/")
+                let recorded = self.undoHistory.nextUndo?.id
+                self.notify("已移动 \(node.name) 到 \(target.isEmpty ? "项目根目录" : target + "/")", action: BannerAction(title: "撤销") { [weak self] in
+                    self?.dismissBanner()
+                    self?.undo(expecting: recorded)
+                })
             }
         }
     }
 
-    /// 搬完之后的「撤销」：把它搬回原来的目录。撤销本身也是一次移动，也能再撤销（相当于重做）。
-    /// 记下搬过去的那个文件的身份（inode）：这几秒里它要是被删了、改名了，或者别的东西占了这个路径，撤销就不能再搬。
-    private func offerUndo(of node: FileNode, movedTo destination: URL) {
-        let target = project.projectRelativeComponents(of: destination.deletingLastPathComponent()).joined(separator: "/")
-        let moved = FileNode(url: destination, name: node.name, isDirectory: node.isDirectory, isSymlink: node.isSymlink)
-        let identity = fileIdentity(destination.path)
-        notify("已移动 \(node.name) 到 \(target.isEmpty ? "项目根目录" : target + "/")", action: BannerAction(title: "撤销") { [weak self] in
-            guard let self else { return }
-            self.dismissBanner()
-            guard identity != nil, self.fileIdentity(destination.path) == identity else {
-                self.banner = "不能撤销：\(node.name) 已经不在 \(target.isEmpty ? "项目根目录" : target + "/") 了"
-                return
-            }
-            self.move(moved, into: node.url.deletingLastPathComponent())
-        })
-    }
-
     /// 一个目录项的身份（设备号 + inode），lstat 语义。不存在返回 nil。
-    private func fileIdentity(_ path: String) -> [Int]? {
+    func fileIdentity(_ path: String) -> [Int]? {
         guard let attributes = try? fileManager.attributesOfItem(atPath: path),
               let device = attributes[.systemNumber] as? Int, let inode = attributes[.systemFileNumber] as? Int else { return nil }
         return [device, inode]
@@ -367,37 +442,48 @@ final class ProjectSession: ObservableObject, Identifiable {
         rows.first { $0.id == path }?.node
     }
 
-    /// 真正搬。返回搬成功了没有。
-    @discardableResult
-    private func move(_ node: FileNode, to destination: URL, verb: String) async -> Bool {
+    /// 变更列表里一条变更对应的文件节点（右键「重命名…」用）。不从树上找：变更的文件所在目录多半还没展开，
+    /// `rows` 里根本没有它。已删除的变更、磁盘上已经不在的路径没有节点，菜单项也就不出现。
+    func node(for change: GitChange) -> FileNode? {
+        guard change.kind != .deleted, let url = url(for: change), entryExists(url.path) else { return nil }
+        let type = (try? fileManager.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType
+        return FileNode(url: url, name: change.fileName, isDirectory: false, isSymlink: type == .typeSymbolicLink)
+    }
+
+    /// 真正搬。搬成了返回 nil 并记进撤销栈（`recording` 为 false 时不记：撤销 / 重做本身走的也是这里），
+    /// 搬不成返回给用户看的原因（「重命名失败：…」）。
+    func move(_ node: FileNode, to destination: URL, verb: String, recording: Bool = true) async -> String? {
         // 未跟踪的文件 git mv 一定拒绝，不用白跑一趟；目录不看聚合状态（里面可能既有已跟踪的又有未跟踪的），交给 git 试
         let isUntrackedFile = !node.isDirectory && gitStatus(for: node) == .change(.untracked)
+        var moved = false
         if let git, let repositoryRoot = project.repositoryRoot, !isUntrackedFile, gitStatus(for: node) != .ignored,
            let oldRelative = project.repositoryRelativePath(of: node.url), let newRelative = project.repositoryRelativePath(of: destination) {
             do {
                 try await git.move(from: oldRelative, to: newRelative, repositoryRoot: repositoryRoot)
-                didRename(node.url, to: destination)
-                return true
+                moved = true
             } catch {
                 // git 不认这个路径（未跟踪、目录里没有已跟踪文件）：退回普通的搬文件。git mv 搬之前把源和目标都检查过，不会搬到一半。
                 // 别的失败（Agent 正在跑 git、index.lock 被占）不能退回：文件搬了索引没动，status 会变成「删除 + 未跟踪」
                 guard GitClient.refusedBecauseUntracked(error) else {
-                    banner = "\(verb)失败：\(error.userFacingDescription)"
                     Log.warn("project", "git mv \(oldRelative) 失败：\(error)")
-                    return false
+                    return "\(verb)失败：\(error.userFacingDescription)"
                 }
                 Log.info("project", "git mv \(oldRelative) 未成功，改为直接移动：\(error)")
             }
         }
-        do {
-            try fileManager.moveItem(at: node.url, to: destination)
-        } catch {
-            banner = "\(verb)失败：\(error.userFacingDescription)"
-            Log.warn("project", "\(verb) \(node.url.path) 失败：\(error)")
-            return false
+        if !moved {
+            do {
+                try fileManager.moveItem(at: node.url, to: destination)
+            } catch {
+                Log.warn("project", "\(verb) \(node.url.path) 失败：\(error)")
+                return "\(verb)失败：\(error.userFacingDescription)"
+            }
         }
         didRename(node.url, to: destination)
-        return true
+        if recording {
+            recordUndo("\(verb) \(node.name)", .move(from: node.url, to: destination, isDirectory: node.isDirectory, isSymlink: node.isSymlink, identity: fileIdentity(destination.path)))
+        }
+        return nil
     }
 
     /// 磁盘上已经搬好了：界面上所有指着旧路径的东西换到新路径。
@@ -417,6 +503,7 @@ final class ProjectSession: ObservableObject, Identifiable {
             var replaced = EditorTab(kind: .file(URL(fileURLWithPath: moved)), isPreview: tab.isPreview)
             replaced.scrollTop = tab.scrollTop
             replaced.cursor = tab.cursor
+            replaced.history = tab.history
             replaced.markdownView = tab.markdownView
             tabs[index] = replaced
             renamedTabIDs[tab.id] = replaced.id
@@ -650,6 +737,8 @@ final class ProjectSession: ObservableObject, Identifiable {
             guard let self, let index = self.tabs.firstIndex(where: { $0.id == tabID }) else { return }
             self.tabs[index].scrollTop = state.scrollTop
             if let cursor = state.cursor { self.tabs[index].cursor = cursor }
+            // 编辑器的撤销历史跟着标签走（连同它对应的文本），切回来 ⌘Z 还能撤；只读视图没有编辑器，别把上次记的清掉
+            if let text = state.text, let history = state.history { self.tabs[index].history = EditorHistory(json: history, text: text) }
             if let text = state.text, let url = self.documentURL(for: self.tabs[index]) { self.applyEdit(path: url.path, text: text) }
             continuation(self.tabs[index])
         }
@@ -724,6 +813,8 @@ final class ProjectSession: ObservableObject, Identifiable {
             if let index = self.tabs.firstIndex(where: { $0.id == id }) {
                 self.tabs[index].scrollTop = state.scrollTop
                 if let cursor = state.cursor { self.tabs[index].cursor = cursor }
+                // 重命名 / 移动之后编辑器会重建（内容重读），历史也得是此刻的这份
+                if let text = state.text, let history = state.history { self.tabs[index].history = EditorHistory(json: history, text: text) }
             }
             if let text = state.text, let url = self.documentURL(for: tab) { self.applyEdit(path: url.path, text: text) }
             self.writeAllDrafts()
@@ -854,7 +945,7 @@ final class ProjectSession: ObservableObject, Identifiable {
            let document = ensureDocument(documentID) {
             rendered = FileContentLoader.editableDiff(
                 change: change, document: document, draft: draftStore[documentID], base: baseTexts[documentID],
-                filePath: url.path, cursor: tab.cursor, mode: preferences.diffMode
+                filePath: url.path, cursor: tab.cursor, history: tab.history, mode: preferences.diffMode
             )
         } else {
             rendered = content.renderContent(
@@ -1040,6 +1131,8 @@ final class ProjectSession: ObservableObject, Identifiable {
                 // 先问编辑器：刚敲的几笔可能还没送过来，问完要是有草稿就不重读了
                 rememberScroll(of: activeTabID) { [weak self] current in
                     guard let self, !self.draftStore.isModified(documentID) else { return }
+                    // 内容要从磁盘重读了：编辑器的撤销历史指的是旧内容里的位置，作废
+                    self.forgetEditorHistory(of: documentID)
                     if current.fileURL != nil {
                         // 文件标签：走 loadFile，大文件（只读）也能异步重读；ensureDocument 只管可编辑上限之内的
                         self.loadFile(for: current)
@@ -1050,9 +1143,14 @@ final class ProjectSession: ObservableObject, Identifiable {
                     }
                 }
             } else {
+                forgetEditorHistory(of: documentID)
                 contents[documentID] = nil
             }
         }
+    }
+
+    private func forgetEditorHistory(of documentID: String) {
+        for index in tabs.indices where self.documentID(for: tabs[index]) == documentID { tabs[index].history = nil }
     }
 
     // MARK: - 杂项

@@ -711,6 +711,46 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
     }
 }
 
+/// 变更列表右键「重命名…」：节点从变更本身来（文件所在的目录多半没在树上展开过），
+/// 已删除的变更、磁盘上已经没有的路径给不出节点（菜单项不出现）；重命名走的还是同一条路（git mv + 换标签）。
+@Test @MainActor func renamingFromChangeListUsesChangeItselfAsNode() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("sub"), withIntermediateDirectories: true)
+        try "m\n".write(to: directory.appendingPathComponent("sub/m.txt"), atomically: true, encoding: .utf8)
+        let moves = Locked<[[String]]>([])
+        let status = "# branch.head main\u{0}1 .M N... 100644 100644 100644 a a sub/m.txt\u{0}1 .D N... 100644 100644 100644 a a gone.txt\u{0}? ghost.txt\u{0}"
+        let runner = gitRunner(root: root, status: { status }, extra: { arguments in
+            guard arguments.first == "mv" else { return nil }
+            moves.value.append(arguments)
+            try? FileManager.default.moveItem(atPath: root + "/" + arguments[2], toPath: root + "/" + arguments[3])
+            return shellOutput("")
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.changeGroups.total == 3 }
+
+        let changes = session.gitSnapshot.changes
+        let deleted = try #require(changes.first { $0.path == "gone.txt" })
+        #expect(session.node(for: deleted) == nil, "已删除的变更没有文件可搬")
+        let ghost = try #require(changes.first { $0.path == "ghost.txt" })
+        #expect(session.node(for: ghost) == nil, "status 报了但磁盘上没有（刚被别处删掉）")
+
+        let modified = try #require(changes.first { $0.path == "sub/m.txt" })
+        #expect(!session.rows.contains { $0.node.name == "m.txt" }, "sub 没展开，树上没有这一行")
+        let node = try #require(session.node(for: modified))
+        #expect(node.url.path == directory.appendingPathComponent("sub/m.txt").path && !node.isDirectory)
+
+        session.openDiff(modified, pinned: true)
+        session.rename(node, to: "m2.txt")
+        await waitUntil { moves.value.isEmpty == false && session.tabs.isEmpty }
+        #expect(moves.value == [["mv", "--", "sub/m.txt", "sub/m2.txt"]])
+        #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("sub/m2.txt").path))
+        #expect(session.tabs.isEmpty, "旧路径的工作区 diff 标签关掉")
+    }
+}
+
 /// 拖拽移动（IDEA 的 Move）：文件搬进另一个目录，开着的标签换到新路径，目标目录展开并选中新位置；
 /// 拖回原目录什么都不做，拖进自己的子目录报错不动磁盘；仓库里的走 git mv。
 @Test @MainActor func movingNodesIntoAnotherDirectory() async throws {
@@ -756,27 +796,166 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         #expect(session.contents[session.tabs[0].id]?.text == "a")
         #expect(session.revealRequests == 1, "树要滚到新位置")
 
-        // 不弹确认，状态栏给「撤销」：撤销把它搬回去（同样走 git mv），再给一次「撤销」当重做
+        // 不弹确认，状态栏给「撤销」：与「编辑 → 撤销」撤的是同一步（撤销栈顶），撤回去同样走 git mv，再给一次「重做」
         #expect(session.banner == "已移动 a.txt 到 dst/deep/")
+        #expect(session.undoTitle == "撤销移动 a.txt")
         let undo = try #require(session.bannerAction)
         #expect(undo.title == "撤销")
         undo.perform()
         await waitUntil { FileManager.default.fileExists(atPath: file.path) }
-        await waitUntil { session.banner == "已移动 a.txt 到 src/" }
+        await waitUntil { session.banner == "已撤销移动 a.txt" }
         #expect(moves.value.last == ["mv", "--", "dst/deep/a.txt", "src/a.txt"])
         #expect(session.tabs.first?.fileURL?.path == file.resolvingSymlinksInPath().path)
         #expect(session.selectedPath == file.path)
+        #expect(!session.canUndo && session.redoTitle == "重做移动 a.txt")
         let redo = try #require(session.bannerAction)
+        #expect(redo.title == "重做")
 
-        // 撤销之前文件被换掉了（删了再建一个同名的）：不能把别人搬走
+        // 重做之前文件被换掉了（删了再建一个同名的）：不能把别人搬走，这一步也就作废
         try FileManager.default.removeItem(at: file)
         try "impostor".write(to: file, atomically: true, encoding: .utf8)
         let movesBefore = moves.value.count
         redo.perform()
-        await waitUntil { session.banner?.hasPrefix("不能撤销") == true }
+        await waitUntil { session.banner?.hasPrefix("不能重做移动 a.txt") == true }
         #expect(moves.value.count == movesBefore)
         #expect(session.bannerAction == nil)
+        #expect(!session.canRedo)
         #expect(try String(contentsOf: file, encoding: .utf8) == "impostor")
+    }
+}
+
+/// 撤销 / 重做重命名（「编辑 → 撤销」）：搬回去走同一条路（git mv），开着的标签跟着换回旧路径；重做再搬过去。
+/// 状态栏那条「已移动 … 撤销」只在它还是栈顶时才撤：撤销栈上又压了别的操作之后按它不该撤错东西。
+@Test @MainActor func undoAndRedoRename() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        let file = directory.appendingPathComponent("a.txt")
+        try "x\n".write(to: file, atomically: true, encoding: .utf8)
+        let moves = Locked<[[String]]>([])
+        let runner = gitRunner(root: root, status: { "# branch.head main\u{0}" }, extra: { arguments in
+            guard arguments.first == "mv" else { return nil }
+            moves.value.append(arguments)
+            try? FileManager.default.moveItem(atPath: root + "/" + arguments[2], toPath: root + "/" + arguments[3])
+            return shellOutput("")
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.commit != nil }
+        #expect(!session.canUndo && session.undoTitle == "撤销" && session.redoTitle == "重做")
+
+        session.openFile(file, pinned: true)
+        let node = try #require(session.rows.first { $0.node.name == "a.txt" }?.node)
+        session.rename(node, to: "b.txt")
+        await waitUntil { session.tabs.first?.fileURL?.lastPathComponent == "b.txt" }
+        #expect(session.undoTitle == "撤销重命名 a.txt" && !session.canRedo)
+
+        session.undo()
+        await waitUntil { session.tabs.first?.fileURL?.lastPathComponent == "a.txt" }
+        #expect(moves.value == [["mv", "--", "a.txt", "b.txt"], ["mv", "--", "b.txt", "a.txt"]])
+        #expect(FileManager.default.fileExists(atPath: file.path))
+        #expect(!session.canUndo && session.canRedo)
+        await waitUntil { session.banner == "已撤销重命名 a.txt" }
+
+        session.redo()
+        await waitUntil { session.tabs.first?.fileURL?.lastPathComponent == "b.txt" }
+        #expect(moves.value.last == ["mv", "--", "a.txt", "b.txt"])
+        #expect(session.canUndo && !session.canRedo)
+        await waitUntil { session.banner == "已重做重命名 a.txt" }
+
+        // 指定了「期望的那一步」而栈顶不是它：不动
+        session.undo(expecting: UUID())
+        #expect(session.canUndo && FileManager.default.fileExists(atPath: directory.appendingPathComponent("b.txt").path))
+    }
+}
+
+/// 撤销删除：从废纸篓搬回原位、树上露出并选中；重做再删一次。原位置这期间被占了就撤不了。
+@Test @MainActor func undoAndRedoDelete() async throws {
+    try await withTemporaryDirectory { directory in
+        let sub = directory.appendingPathComponent("sub")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        let file = sub.appendingPathComponent("gone.txt")
+        try "bye".write(to: file, atomically: true, encoding: .utf8)
+        let workbench = makeWorkbench(in: directory, git: nil)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        session.expand(sub.path)
+        session.openFile(file, pinned: true)
+
+        session.delete(try #require(session.node(atPath: file.path)))
+        #expect(!FileManager.default.fileExists(atPath: file.path) && session.tabs.isEmpty)
+        #expect(session.undoTitle == "撤销删除 gone.txt")
+
+        session.undo()
+        await waitUntil { FileManager.default.fileExists(atPath: file.path) }
+        #expect(try String(contentsOf: file, encoding: .utf8) == "bye")
+        await waitUntil { session.rows.contains { $0.node.name == "gone.txt" } }
+        #expect(session.selectedPath == file.path && session.revealRequests == 1)
+        #expect(session.redoTitle == "重做删除 gone.txt")
+
+        session.redo()
+        await waitUntil { !FileManager.default.fileExists(atPath: file.path) }
+        #expect(session.canUndo && !session.canRedo)
+
+        // 原位置被占了：不能撤，这一步作废
+        try "squatter".write(to: file, atomically: true, encoding: .utf8)
+        session.undo()
+        await waitUntil { session.banner?.hasPrefix("不能撤销删除 gone.txt") == true }
+        #expect(try String(contentsOf: file, encoding: .utf8) == "squatter")
+        #expect(!session.canUndo)
+    }
+}
+
+/// 撤销回滚：回滚前把工作区里的内容记在内存里，撤销写回去；新增的还要重新 add 回索引；重做再回滚一次。
+@Test @MainActor func undoAndRedoRollback() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        let modified = directory.appendingPathComponent("m.txt")
+        let added = directory.appendingPathComponent("new.txt")
+        try "edited\n".write(to: modified, atomically: true, encoding: .utf8)
+        try "fresh\n".write(to: added, atomically: true, encoding: .utf8)
+        let calls = Locked<[[String]]>([])
+        let status = "# branch.head main\u{0}1 .M N... 100644 100644 100644 a a m.txt\u{0}1 A. N... 000000 100644 100644 0 a new.txt\u{0}"
+        let runner = gitRunner(root: root, status: { status }, extra: { arguments in
+            switch arguments.first {
+            case "restore":
+                calls.value.append(arguments)
+                try? "head\n".write(toFile: root + "/m.txt", atomically: true, encoding: .utf8)
+                return shellOutput("")
+            case "rm":
+                calls.value.append(arguments)
+                try? FileManager.default.removeItem(atPath: root + "/new.txt")
+                return shellOutput("")
+            case "add":
+                calls.value.append(arguments)
+                return shellOutput("")
+            default:
+                return nil
+            }
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.changeGroups.total == 2 }
+        let byPath = Dictionary(uniqueKeysWithValues: session.gitSnapshot.changes.map { ($0.path, $0) })
+
+        session.rollback(try #require(byPath["m.txt"]))
+        await waitUntil { session.undoTitle == "撤销回滚 m.txt" }
+        #expect(try String(contentsOf: modified, encoding: .utf8) == "head\n")
+        session.undo()
+        await waitUntil { (try? String(contentsOf: modified, encoding: .utf8)) == "edited\n" }
+        #expect(!calls.value.contains { $0.first == "add" }, "修改的写回去就行，不用碰索引")
+        session.redo()
+        await waitUntil { (try? String(contentsOf: modified, encoding: .utf8)) == "head\n" }
+        #expect(calls.value.filter { $0.first == "restore" }.count == 2)
+
+        session.rollback(try #require(byPath["new.txt"]))
+        await waitUntil { session.undoTitle == "撤销回滚 new.txt" }
+        #expect(!FileManager.default.fileExists(atPath: added.path))
+        session.undo()
+        await waitUntil { FileManager.default.fileExists(atPath: added.path) }
+        #expect(try String(contentsOf: added, encoding: .utf8) == "fresh\n")
+        await waitUntil { calls.value.contains(["add", "-A", "--", "new.txt"]) }
     }
 }
 
@@ -801,5 +980,165 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         #expect(session.moveProblem(for: file, into: directory.appendingPathComponent("alias")) == nil)
         #expect(session.renameProblem(for: file, newName: "b.txt") == nil)
         #expect(session.renameProblem(for: session.node(atPath: directory.appendingPathComponent("dst").path)!, newName: "alias") == .exists, "改成已有链接的名字")
+    }
+}
+
+/// 目录树的「新建文件夹」：建在指定目录下、树上展开露出并选中；名字校验与重命名一样；撤销删掉它（只在还空着时），重做再建。
+@Test @MainActor func creatingFolderRevealsItAndCanBeUndone() async throws {
+    try await withTemporaryDirectory { directory in
+        let sub = directory.appendingPathComponent("sub")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        try "t".write(to: directory.appendingPathComponent("taken.txt"), atomically: true, encoding: .utf8)
+        let workbench = makeWorkbench(in: directory, git: nil)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+
+        #expect(session.newFolderProblem(in: directory, name: "") == .empty)
+        #expect(session.newFolderProblem(in: directory, name: "taken.txt") == .exists)
+        #expect(session.newFolderProblem(in: directory, name: "a/b") == .containsSlash)
+        #expect(session.newFolderProblem(in: directory, name: "docs") == nil)
+
+        // sub 没展开：建在它下面要把它展开、露出新目录并选中
+        session.createFolder(named: " docs ", in: sub)
+        let created = sub.appendingPathComponent("docs")
+        var isDirectory: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: created.path, isDirectory: &isDirectory) && isDirectory.boolValue)
+        #expect(session.rows.map(\.node.name).filter { $0 != "recent.json" } == ["sub", "docs", "taken.txt"])
+        #expect(session.selectedPath == created.path && session.revealRequests == 1)
+        #expect(session.undoTitle == "撤销新建文件夹 docs")
+
+        session.createFolder(named: "docs", in: sub)
+        #expect(session.banner?.contains("已经有这个名字") == true)
+        session.dismissBanner()
+
+        // 里面放了东西就不能撤
+        try "x".write(to: created.appendingPathComponent("x.txt"), atomically: true, encoding: .utf8)
+        session.undo()
+        await waitUntil { session.banner?.hasPrefix("不能撤销新建文件夹 docs") == true }
+        #expect(FileManager.default.fileExists(atPath: created.path) && !session.canUndo)
+
+        // 空的能撤：删掉、选中回到父目录；重做再建出来
+        try FileManager.default.removeItem(at: created.appendingPathComponent("x.txt"))
+        session.createFolder(named: "empty", in: sub)
+        let empty = sub.appendingPathComponent("empty")
+        session.undo()
+        await waitUntil { !FileManager.default.fileExists(atPath: empty.path) }
+        #expect(session.selectedPath == sub.path)
+        #expect(session.redoTitle == "重做新建文件夹 empty")
+        session.redo()
+        await waitUntil { FileManager.default.fileExists(atPath: empty.path) }
+        #expect(session.selectedPath == empty.path)
+    }
+}
+
+/// 多选（⌘ / ⇧点击）一起拖进另一个目录（IDEA 的 Move）：选中里目录的子项不重复搬，本来就在目标里的跳过，
+/// 整个记成一步撤销；一起删也是一步。
+@Test @MainActor func movingAndDeletingMultipleSelectedNodes() async throws {
+    try await withTemporaryDirectory { directory in
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            try name.write(to: directory.appendingPathComponent(name), atomically: true, encoding: .utf8)
+        }
+        let dir = directory.appendingPathComponent("dir")
+        try FileManager.default.createDirectory(at: dir.appendingPathComponent("inner"), withIntermediateDirectories: true)
+        try "i".write(to: dir.appendingPathComponent("inner/i.txt"), atomically: true, encoding: .utf8)
+        let target = directory.appendingPathComponent("dst")
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try "c".write(to: target.appendingPathComponent("c.txt"), atomically: true, encoding: .utf8)
+        let workbench = makeWorkbench(in: directory, git: nil)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        session.expand(dir.path)
+        session.expand(dir.appendingPathComponent("inner").path)
+        #expect(session.rows.map(\.node.name).filter { $0 != "recent.json" } == ["dir", "inner", "i.txt", "dst", "a.txt", "b.txt", "c.txt"])
+
+        // ⇧点击连选 dir…dst（含 dir 里展开的子项），⌘点击加上 b.txt、去掉 dst
+        session.select(dir.path)
+        session.extendSelection(to: target.path)
+        #expect(session.selection.count == 4 && session.selectedPath == dir.path)
+        session.toggleSelection(directory.appendingPathComponent("b.txt").path)
+        session.toggleSelection(target.path)
+        #expect(session.selection.paths == Set([dir.path, dir.appendingPathComponent("inner").path, dir.appendingPathComponent("inner/i.txt").path, directory.appendingPathComponent("b.txt").path]))
+        let roots = TreeSelection.roots(session.selectedNodes)
+        #expect(roots.map(\.name) == ["dir", "b.txt"], "dir 里的不重复算")
+
+        // c.txt 在目标里已有同名：整个多选都不能放
+        let withConflict = roots + [try #require(session.node(atPath: directory.appendingPathComponent("c.txt").path))]
+        #expect(!session.canMove(withConflict, into: target))
+        #expect(session.canMove(roots, into: target))
+        #expect(!session.canMove(roots, into: directory), "都已经在这个目录里")
+
+        session.move(roots, into: target)
+        await waitUntil { FileManager.default.fileExists(atPath: target.appendingPathComponent("b.txt").path) && FileManager.default.fileExists(atPath: target.appendingPathComponent("dir/inner/i.txt").path) }
+        #expect(session.banner == "已移动 2 个项目到 dst/")
+        #expect(session.undoTitle == "撤销移动 2 个项目")
+        #expect(!FileManager.default.fileExists(atPath: dir.path))
+
+        session.undo()
+        await waitUntil { FileManager.default.fileExists(atPath: dir.appendingPathComponent("inner/i.txt").path) && FileManager.default.fileExists(atPath: directory.appendingPathComponent("b.txt").path) }
+        #expect(!FileManager.default.fileExists(atPath: target.appendingPathComponent("b.txt").path))
+        #expect(session.redoTitle == "重做移动 2 个项目")
+        session.redo()
+        await waitUntil { FileManager.default.fileExists(atPath: target.appendingPathComponent("b.txt").path) }
+
+        // 一起删：一步撤销全部回来
+        let files = ["a.txt", "c.txt"].map { directory.appendingPathComponent($0) }
+        session.delete(files.map { FileNode(url: $0, name: $0.lastPathComponent, isDirectory: false) })
+        #expect(files.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) })
+        #expect(session.undoTitle == "撤销删除 2 个项目")
+        session.undo()
+        await waitUntil { files.allSatisfy { FileManager.default.fileExists(atPath: $0.path) } }
+        #expect(try String(contentsOf: files[0], encoding: .utf8) == "a.txt")
+    }
+}
+
+/// 编辑器的撤销历史只跟它记下时的那份文本走：同一文档在另一个标签里改过、重命名后重读、磁盘上被改过，
+/// 文本不一样就不送（CodeMirror 的 setHistory 不校验内容，装回去 ⌘Z 会在错的位置改字）。
+@Test @MainActor func editorHistoryOnlyAppliesToTheTextItWasRecordedFor() {
+    var tab = EditorTab(kind: .file(URL(fileURLWithPath: "/p/a.txt")), isPreview: false)
+    tab.history = EditorHistory(json: "{\"done\":[]}", text: "one\n")
+    #expect(tab.history(matching: "one\n") == "{\"done\":[]}")
+    #expect(tab.history(matching: "two\n") == nil)
+
+    let content = TabContent.code(text: "one\n", language: .plainText, encoding: "UTF-8", lineCount: 1, modified: nil)
+    if case .code(_, _, _, _, _, _, let history) = content.renderContent(for: tab, diffMode: .unified, draft: nil, editable: true) {
+        #expect(history == "{\"done\":[]}")
+    } else { Issue.record("应该是 code") }
+    if case .code(_, _, _, _, _, _, let history) = content.renderContent(for: tab, diffMode: .unified, draft: "edited elsewhere\n", editable: true) {
+        #expect(history == nil, "草稿在别的标签里改过，历史对不上")
+    } else { Issue.record("应该是 code") }
+
+    let change = GitChange(path: "a.txt", kind: .modified)
+    if case .diff(_, _, _, _, _, let edit) = FileContentLoader.editableDiff(change: change, document: content, draft: nil, base: "", filePath: "/p/a.txt", cursor: nil, history: tab.history, mode: .unified) {
+        #expect(edit?.history == "{\"done\":[]}")
+    } else { Issue.record("应该是 diff") }
+    if case .diff(_, _, _, _, _, let edit) = FileContentLoader.editableDiff(change: change, document: content, draft: "x\n", base: "", filePath: "/p/a.txt", cursor: nil, history: tab.history, mode: .unified) {
+        #expect(edit?.history == nil)
+    } else { Issue.record("应该是 diff") }
+}
+
+/// 目录树的展开状态按项目记住：关掉再打开（重启应用也是这条路）原样展开；已经不存在的目录跳过。
+@Test @MainActor func expandedDirectoriesSurviveReopeningTheProject() async throws {
+    try await withTemporaryDirectory { directory in
+        for path in ["a/deep", "b", "gone"] {
+            try FileManager.default.createDirectory(at: directory.appendingPathComponent(path), withIntermediateDirectories: true)
+        }
+        try "x".write(to: directory.appendingPathComponent("a/deep/x.txt"), atomically: true, encoding: .utf8)
+        let defaults = UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!
+        let workbench = makeWorkbench(in: directory, git: nil, defaults: defaults)
+        workbench.openProject(directory)
+        var session = try #require(workbench.active)
+        session.expand(directory.appendingPathComponent("a").path)
+        session.expand(directory.appendingPathComponent("a/deep").path)
+        session.expand(directory.appendingPathComponent("gone").path)
+        session.expand(directory.appendingPathComponent("b").path)
+        session.collapse(directory.appendingPathComponent("b").path)
+        workbench.closeProject()
+        try FileManager.default.removeItem(at: directory.appendingPathComponent("gone"))
+
+        workbench.openProject(directory)
+        session = try #require(workbench.active)
+        #expect(session.rows.map(\.node.name).filter { $0 != "recent.json" } == ["a", "deep", "x.txt", "b"])
+        #expect(session.tree.isExpanded(directory.appendingPathComponent("a/deep").path))
+        #expect(!session.tree.isExpanded(directory.appendingPathComponent("b").path))
     }
 }

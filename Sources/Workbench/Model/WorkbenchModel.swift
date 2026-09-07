@@ -152,7 +152,7 @@ final class WorkbenchModel: ObservableObject {
         if let existing = sessions.first(where: { $0.project.root == root }) {
             activate(existing.id)
         } else {
-            let session = ProjectSession(root: chosen, git: git, renderer: renderer, preferences: preferences)
+            let session = ProjectSession(root: chosen, git: git, renderer: renderer, preferences: preferences, defaults: defaults)
             session.onRequestToolWindow = { [weak self] window in self?.toolWindow = window }
             sessions.append(session)
             activate(session.id)

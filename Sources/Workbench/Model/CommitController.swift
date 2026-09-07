@@ -106,13 +106,18 @@ final class CommitController: ObservableObject {
 
     /// 回滚一条变更到 HEAD。修改/删除/重命名/冲突 → restore；新增（已在索引）→ 连文件一起删。
     /// 未跟踪文件不在 git 里、没有可回滚的目标，走 `delete`。
-    func rollback(_ change: GitChange) {
+    /// 做完（成功与否）调 `completion`：会话据此记撤销栈。未跟踪文件的回滚其实是删除，撤销也按删除记（`completion` 不会被调）。
+    func rollback(_ change: GitChange, completion: @escaping @MainActor (Bool) -> Void = { _ in }) {
         guard change.kind != .untracked else {
             delete(change)
             return
         }
         Task { [weak self] in
-            guard let self else { return }
+            guard let self else {
+                completion(false)
+                return
+            }
+            var succeeded = false
             do {
                 switch change.kind {
                 case .added:
@@ -121,12 +126,19 @@ final class CommitController: ObservableObject {
                     try await git.restoreToHead(paths: [change.path] + (change.originalPath.map { [$0] } ?? []), repositoryRoot: repositoryRoot)
                 }
                 Log.info("git", "已回滚 \(change.path)")
+                succeeded = true
             } catch {
                 status = .failure("回滚失败：\(error.userFacingDescription)")
                 Log.warn("git", "回滚 \(change.path) 失败：\(error)")
             }
             onRepositoryChanged?([change])
+            completion(succeeded)
         }
+    }
+
+    /// 撤销「回滚」的后半步：把写回来的文件重新记进索引（新增 / 重命名的状态才回得来）。
+    func stage(paths: [String]) async throws {
+        try await git.stage(paths: paths, repositoryRoot: repositoryRoot)
     }
 
     /// 能不能删：磁盘上还有文件才行（「已删除」的变更没有东西可删）。
@@ -134,16 +146,20 @@ final class CommitController: ObservableObject {
 
     /// 删除一条变更对应的文件：进废纸篓，不是 rm——IDEA 的删除能从本地历史找回来，这里用废纸篓兜底。
     /// 已跟踪的文件删掉之后 git 会把它显示成「已删除」，要不要提交这次删除由用户决定；未跟踪的删掉就没了。
-    func delete(_ change: GitChange) {
-        guard canDelete(change) else { return }
+    /// 返回文件在废纸篓里的位置（撤销删除从那里搬回来），删不成返回 nil。
+    @discardableResult
+    func delete(_ change: GitChange) -> URL? {
+        guard canDelete(change) else { return nil }
+        var trashed: URL?
         do {
-            try Trash.move(repositoryRoot.appendingPathComponent(change.path))
+            trashed = try Trash.move(repositoryRoot.appendingPathComponent(change.path))
             Log.info("git", "已删除 \(change.path)")
         } catch {
             status = .failure("删除失败：\(error.userFacingDescription)")
             Log.warn("git", "删除 \(change.path) 失败：\(error)")
         }
         onRepositoryChanged?([change])
+        return trashed
     }
 }
 

@@ -67,10 +67,11 @@ private func porcelain(_ records: [String]) -> String {
     let index = GitStatusIndex(snapshot: snapshot)
     #expect(index.status(of: "Sources/Core/A.swift", isDirectory: false) == .change(.modified))
     #expect(index.status(of: "Sources/Core/B.swift", isDirectory: false) == .change(.untracked))
-    // 目录取优先级最高的：删除 > 修改 > 未跟踪
-    #expect(index.status(of: "Sources", isDirectory: true) == .change(.deleted))
+    // 目录取优先级最高的：修改 > 未跟踪；里面有文件被删只算「修改」（目录还在，不画删除线）
+    #expect(index.status(of: "Sources", isDirectory: true) == .change(.modified))
     #expect(index.status(of: "Sources/Core", isDirectory: true) == .change(.modified))
-    #expect(index.status(of: "Sources/UI", isDirectory: true) == .change(.deleted))
+    #expect(index.status(of: "Sources/UI", isDirectory: true) == .change(.modified))
+    #expect(index.status(of: "Sources/UI/C.swift", isDirectory: false) == .change(.deleted), "文件本身还是删除")
     #expect(index.status(of: "Tests", isDirectory: true) == nil)
     // 忽略：目录本身、目录里的任何东西、单独匹配的文件
     #expect(index.status(of: ".build", isDirectory: true) == .ignored)

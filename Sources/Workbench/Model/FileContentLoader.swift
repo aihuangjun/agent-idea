@@ -53,12 +53,14 @@ enum FileContentLoader {
     }
 
     /// 可编辑的工作区 diff：左边基线（HEAD），右边文档（含草稿）。
-    static func editableDiff(change: GitChange, document: TabContent, draft: String?, base: String?, filePath: String, cursor: EditorCursor?, mode: DiffViewMode) -> RenderPayload.Content {
+    static func editableDiff(change: GitChange, document: TabContent, draft: String?, base: String?, filePath: String, cursor: EditorCursor?, history: EditorHistory? = nil, mode: DiffViewMode) -> RenderPayload.Content {
         let language = Language.forFile(named: change.fileName)
+        let newText = draft ?? document.text ?? ""
+        let matching = history.flatMap { $0.textHash == EditorHistory.hash(newText) ? $0.json : nil }
         return .diff(
             path: change.path, language: language.highlightID,
             diff: FileDiff(oldPath: nil, newPath: change.path, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
-            edit: DiffEdit(oldText: base ?? "", newText: draft ?? document.text ?? "", filePath: filePath, cursor: cursor)
+            edit: DiffEdit(oldText: base ?? "", newText: newText, filePath: filePath, cursor: cursor, history: matching)
         )
     }
 
@@ -82,12 +84,12 @@ extension TabContent {
         case .loading:
             return .message(title: "", detail: "")
         case .code(let text, let language, _, _, _):
-            return .code(path: path, text: draft ?? text, language: language.highlightID, editable: editable, cursor: tab.cursor, base: base)
+            return .code(path: path, text: draft ?? text, language: language.highlightID, editable: editable, cursor: tab.cursor, base: base, history: tab.history(matching: draft ?? text))
         case .markdown(let text, _, _, _):
             return .markdown(
                 path: path, markdown: draft ?? text,
                 documentDirectory: tab.fileURL?.deletingLastPathComponent() ?? URL(fileURLWithPath: "/"),
-                view: tab.markdownView, editable: editable, cursor: tab.cursor, base: base
+                view: tab.markdownView, editable: editable, cursor: tab.cursor, base: base, history: tab.history(matching: draft ?? text)
             )
         case .image(let url, let size):
             return .image(path: url.path, url: url, sizeText: Self.byteCount(size))

@@ -10,7 +10,7 @@ public enum ChangeKind: Equatable, Hashable, Sendable {
     /// 未纳入版本管理（IDEA 叫 Unversioned）。
     case untracked
 
-    /// 一个目录里同时有几种变化时，它显示哪一种：冲突 > 删除 > 修改 > 重命名 > 新增 > 未跟踪。
+    /// 一个目录里同时有几种变化时，它显示哪一种：冲突 > 修改 > 重命名 > 新增 > 未跟踪（里面有删除算「修改」，见 `GitStatusIndex`）。
     /// 排序只影响目录着色，与提交无关。
     public var precedence: Int {
         switch self {
@@ -212,12 +212,14 @@ public struct GitStatusIndex: Equatable, Sendable {
         var directories: [String: ChangeKind] = [:]
         for change in snapshot.changes {
             files[change.path] = change.kind
+            // 目录里有文件被删了，目录本身只是「改动了」（蓝色）：它还在，不该画成删除线（IDEA 也只给目录上「修改」色）
+            let kind: ChangeKind = change.kind == .deleted ? .modified : change.kind
             var directory = (change.path as NSString).deletingLastPathComponent
             while !directory.isEmpty {
-                if let existing = directories[directory], existing.precedence >= change.kind.precedence {
+                if let existing = directories[directory], existing.precedence >= kind.precedence {
                     // 已经记了更强的，但更上层的祖先仍要继续走
                 } else {
-                    directories[directory] = change.kind
+                    directories[directory] = kind
                 }
                 directory = (directory as NSString).deletingLastPathComponent
             }

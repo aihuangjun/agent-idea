@@ -74,6 +74,14 @@ public struct AgentIDEARootScene: Scene {
                     .keyboardShortcut("w", modifiers: [.command, .option])
                     .disabled(workbench.active == nil)
             }
+            // 撤销 / 重做按焦点分发（UndoDispatcher）。焦点在编辑器里时 ⌘Z 由 CodeMirror 处理、不会到这里；
+            // 标题显示的是文件操作栈顶那一步（「撤销重命名 a.txt」）
+            CommandGroup(replacing: .undoRedo) {
+                Button(workbench.active?.undoTitle ?? "撤销") { UndoDispatcher.undo(workbench) }
+                    .keyboardShortcut("z", modifiers: .command)
+                Button(workbench.active?.redoTitle ?? "重做") { UndoDispatcher.redo(workbench) }
+                    .keyboardShortcut("z", modifiers: [.command, .shift])
+            }
             CommandMenu("视图") {
                 Button("项目") { workbench.toolWindow = workbench.toolWindow == .project ? nil : .project }
                     .keyboardShortcut("1", modifiers: .command)

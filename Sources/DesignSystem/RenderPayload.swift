@@ -54,12 +54,15 @@ public struct DiffEdit: Equatable, Sendable {
     /// 工作区文件的绝对路径：编辑器发 edited 消息、基线更新时都靠它对上文档。
     public var filePath: String
     public var cursor: EditorCursor?
+    /// 编辑器的撤销历史（CodeMirror `getHistory()` 的 JSON 文本），切标签时带走再带回来，⌘Z 才能撤到切走之前。
+    public var history: String?
 
-    public init(oldText: String, newText: String, filePath: String, cursor: EditorCursor? = nil) {
+    public init(oldText: String, newText: String, filePath: String, cursor: EditorCursor? = nil, history: String? = nil) {
         self.oldText = oldText
         self.newText = newText
         self.filePath = filePath
         self.cursor = cursor
+        self.history = history
     }
 }
 
@@ -69,8 +72,8 @@ public struct RenderPayload: Equatable, Sendable {
     public enum Content: Equatable, Sendable {
         /// `editable` 为真时用编辑器（CodeMirror）画，否则是只读的静态视图。`base` 是这个文件在 HEAD 里的内容，
         /// 编辑器据此在行号旁画「改过 / 新增」的标记；nil 表示没有基线（未跟踪、没有 git）。
-        case code(path: String, text: String, language: String?, editable: Bool = false, cursor: EditorCursor? = nil, base: String? = nil)
-        case markdown(path: String, markdown: String, documentDirectory: URL, view: MarkdownView, editable: Bool = false, cursor: EditorCursor? = nil, base: String? = nil)
+        case code(path: String, text: String, language: String?, editable: Bool = false, cursor: EditorCursor? = nil, base: String? = nil, history: String? = nil)
+        case markdown(path: String, markdown: String, documentDirectory: URL, view: MarkdownView, editable: Bool = false, cursor: EditorCursor? = nil, base: String? = nil, history: String? = nil)
         case image(path: String, url: URL, sizeText: String)
         /// `edit` 非空时是可编辑的 diff（工作区变更）：不送 rows，两份全文由编辑器自己比；否则是只读的静态表格。
         case diff(path: String, language: String?, diff: FileDiff, mode: DiffViewMode, emptyReason: String?, edit: DiffEdit? = nil)
@@ -110,7 +113,7 @@ public extension RenderPayload.Content {
 
 extension RenderPayload: Encodable {
     private enum Key: String, CodingKey {
-        case kind, scrollTop, wrap, path, text, language, editable, cursor, base, markdown, docDir, view, url, sizeText
+        case kind, scrollTop, wrap, path, text, language, editable, cursor, base, history, markdown, docDir, view, url, sizeText
         case mode, rows, binary, empty, added, removed, emptyReason, title, detail, edit, oldText, newText, filePath
     }
 
@@ -119,7 +122,7 @@ extension RenderPayload: Encodable {
         try container.encode(scrollTop, forKey: .scrollTop)
         try container.encode(wrap, forKey: .wrap)
         switch content {
-        case .code(let path, let text, let language, let editable, let cursor, let base):
+        case .code(let path, let text, let language, let editable, let cursor, let base, let history):
             try container.encode("code", forKey: .kind)
             try container.encode(path, forKey: .path)
             try container.encode(text, forKey: .text)
@@ -127,7 +130,8 @@ extension RenderPayload: Encodable {
             try container.encode(editable, forKey: .editable)
             try container.encodeIfPresent(cursor, forKey: .cursor)
             try container.encodeIfPresent(base, forKey: .base)
-        case .markdown(let path, let markdown, let directory, let view, let editable, let cursor, let base):
+            try container.encodeIfPresent(history, forKey: .history)
+        case .markdown(let path, let markdown, let directory, let view, let editable, let cursor, let base, let history):
             try container.encode("markdown", forKey: .kind)
             try container.encode(path, forKey: .path)
             try container.encode(markdown, forKey: .markdown)
@@ -136,6 +140,7 @@ extension RenderPayload: Encodable {
             try container.encode(editable, forKey: .editable)
             try container.encodeIfPresent(cursor, forKey: .cursor)
             try container.encodeIfPresent(base, forKey: .base)
+            try container.encodeIfPresent(history, forKey: .history)
         case .image(let path, let url, let sizeText):
             try container.encode("image", forKey: .kind)
             try container.encode(path, forKey: .path)
@@ -152,6 +157,7 @@ extension RenderPayload: Encodable {
                 try editContainer.encode(edit.newText, forKey: .newText)
                 try editContainer.encode(edit.filePath, forKey: .filePath)
                 try editContainer.encodeIfPresent(edit.cursor, forKey: .cursor)
+                try editContainer.encodeIfPresent(edit.history, forKey: .history)
                 return
             }
             try container.encode(diff.isBinary, forKey: .binary)

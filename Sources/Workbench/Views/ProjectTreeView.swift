@@ -15,6 +15,8 @@ struct ProjectTreeView: View {
     @State private var pendingDelete: DestructiveConfirmation?
     /// 正在重命名的节点（右键菜单或 ⇧F6），对话框以 sheet 弹出。
     @State private var renaming: FileNode?
+    /// 正在往哪个目录下新建文件夹（右键菜单）。
+    @State private var newFolder: NewFolderRequest?
     /// 拖拽正经过哪一行、那一行会把东西交给哪个目录：接收目录那一行画高亮。
     @State private var dropTarget = DropTargetState()
 
@@ -89,7 +91,8 @@ struct ProjectTreeView: View {
                         RootRow(
                             name: session.project.name, path: session.project.root.path,
                             isDropTarget: dropTarget.directory == session.project.root.path,
-                            dropTarget: dropTarget(row: session.project.root.path, into: session.project.root)
+                            dropTarget: dropTarget(row: session.project.root.path, into: session.project.root),
+                            onNewFolder: { newFolder = NewFolderRequest(directory: session.project.root) }
                         )
                         ForEach(session.rows) { row in
                             TreeRow(
@@ -97,11 +100,12 @@ struct ProjectTreeView: View {
                                 clicks: clicks,
                                 row: row,
                                 status: session.gitStatus(for: row.node),
-                                isSelected: session.selectedPath == row.id,
+                                isSelected: session.selection.contains(row.id),
                                 isFocused: isFocused,
                                 onPress: { isFocused = true },
                                 onDelete: { requestDelete($0) },
                                 onRename: { renaming = $0 },
+                                onNewFolder: { newFolder = NewFolderRequest(directory: $0) },
                                 isDropTarget: row.node.isDirectory && dropTarget.directory == row.id,
                                 dropTarget: dropTarget(row: row.id, into: row.node.isDirectory ? row.node.url : row.node.url.deletingLastPathComponent())
                             )
@@ -150,6 +154,13 @@ struct ProjectTreeView: View {
             .sheet(item: $renaming) { node in
                 RenameSheet(node: node) { session.renameProblem(for: node, newName: $0) } commit: { session.rename(node, to: $0) }
             }
+            .sheet(item: $newFolder) { request in
+                NewFolderSheet(directory: request.directory, location: locationText(for: request.directory)) {
+                    session.newFolderProblem(in: request.directory, name: $0)
+                } commit: {
+                    session.createFolder(named: $0, in: request.directory)
+                }
+            }
         }
     }
 
@@ -157,10 +168,13 @@ struct ProjectTreeView: View {
     /// 松手就搬，不弹确认（访达也不问），状态栏给「撤销」。
     private func dropTarget(row: String, into directory: URL) -> TreeDropTarget {
         TreeDropTarget(
-            check: { path in session.node(atPath: path).map { session.moveProblem(for: $0, into: directory) == nil } ?? false },
-            drop: { path in
+            check: { paths in
+                let nodes = paths.compactMap(session.node(atPath:))
+                return nodes.count == paths.count && session.canMove(nodes, into: directory)
+            },
+            drop: { paths in
                 dropTarget.clear(row: row)
-                if let node = session.node(atPath: path) { session.move(node, into: directory) }
+                session.move(paths.compactMap(session.node(atPath:)), into: directory)
             },
             targeted: { isTargeted in
                 if isTargeted { dropTarget.enter(row: row, directory: directory.path) } else { dropTarget.clear(row: row) }
@@ -168,13 +182,30 @@ struct ProjectTreeView: View {
         )
     }
 
+    /// 对话框里「在 … 下」那一段：项目内的相对路径，根目录说「项目根目录」。
+    private func locationText(for directory: URL) -> String {
+        let relative = session.project.projectRelativeComponents(of: directory).joined(separator: "/")
+        return relative.isEmpty ? "项目根目录" : "“\(relative)/”"
+    }
+
+    /// 右键「删除…」/ ⌫：点的那一行在多选里就删整个多选（IDEA 一样），否则只删它。
     private func requestDelete(_ node: FileNode) {
-        pendingDelete = DestructiveConfirmation(
-            id: "delete:" + node.id,
-            title: "删除 \(node.name)？",
-            message: node.isDirectory ? "目录和里面的全部内容会移到废纸篓。" : "文件会移到废纸篓。",
-            buttonTitle: "删除"
-        ) { session.delete(node) }
+        let nodes = session.selection.contains(node.id) && session.selection.count > 1 ? TreeSelection.roots(session.selectedNodes) : [node]
+        if nodes.count == 1, let only = nodes.first {
+            pendingDelete = DestructiveConfirmation(
+                id: "delete:" + only.id,
+                title: "删除 \(only.name)？",
+                message: only.isDirectory ? "目录和里面的全部内容会移到废纸篓。" : "文件会移到废纸篓。",
+                buttonTitle: "删除"
+            ) { session.delete(only) }
+        } else {
+            pendingDelete = DestructiveConfirmation(
+                id: "delete:" + nodes.map(\.id).joined(separator: "\n"),
+                title: "删除 \(nodes.count) 个项目？",
+                message: "它们（目录连同里面的全部内容）会移到废纸篓。",
+                buttonTitle: "删除"
+            ) { session.delete(nodes) }
+        }
     }
 
     private func requestDeleteOfSelection() -> KeyPress.Result {
@@ -324,8 +355,8 @@ struct DropTargetState: Equatable {
 
 /// 一行作为拖放目标要知道的事：来源能不能放、放了怎么办、拖着经过时告诉树高亮哪个目录。
 struct TreeDropTarget {
-    let check: (String) -> Bool
-    let drop: (String) -> Void
+    let check: ([String]) -> Bool
+    let drop: ([String]) -> Void
     let targeted: (Bool) -> Void
 }
 
@@ -346,6 +377,7 @@ private struct RootRow: View {
     let path: String
     let isDropTarget: Bool
     let dropTarget: TreeDropTarget
+    let onNewFolder: () -> Void
 
     var body: some View {
         HStack(spacing: 6) {
@@ -361,6 +393,9 @@ private struct RootRow: View {
         .frame(height: Theme.treeRowHeight)
         .overlay { if isDropTarget { DropTargetHighlight() } }
         .overlay(TreeRowInteraction(dropCheck: dropTarget.check, drop: dropTarget.drop, onTargetChange: dropTarget.targeted))
+        .contextMenu {
+            Button("新建文件夹…") { onNewFolder() }
+        }
     }
 }
 
@@ -387,6 +422,8 @@ struct TreeRow: View {
     var onDelete: (FileNode) -> Void = { _ in }
     /// 右键「重命名…」：交给树弹对话框。
     var onRename: (FileNode) -> Void = { _ in }
+    /// 往这个目录下新建文件夹（文件行给的是它所在的目录）。
+    var onNewFolder: (URL) -> Void = { _ in }
     /// 拖着东西经过时这一行（目录）会接收：画高亮。由树算好传进来（文件行代表的是它所在的目录，高亮的是那个目录的行）。
     let isDropTarget: Bool
     /// 拖放到这一行上。
@@ -394,8 +431,8 @@ struct TreeRow: View {
     @State private var isHovering = false
     @State private var press: Press?
 
-    /// 一次按下的去向。
-    private enum Press { case chevron, row }
+    /// 一次按下的去向。`selectedRow`：按在已经在多选里的行上——先不动选中（拖起来要带着整个多选），松开算一次点击才收成只选它。
+    private enum Press { case chevron, row, selectedRow }
 
     private var node: FileNode { row.node }
     private var indent: CGFloat { CGFloat(row.depth) * 16 + 8 }
@@ -436,33 +473,49 @@ struct TreeRow: View {
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .overlay(TreeRowInteraction(
-            press: { press = pressed(at: $0) },
+            press: { press = pressed(at: $0, modifiers: $1) },
             release: { isClick in
-                if isClick, press == .row { released() }
+                if isClick, press == .selectedRow { session.select(node.id) }
+                if isClick, press == .row || press == .selectedRow { released() }
                 press = nil
             },
             dragPath: node.id,
-            dragPreview: TreeRowInteraction.DragPreview(
-                title: node.name, systemImage: icon.systemName,
-                tint: NSColor(status == .ignored ? Theme.vcsIgnored : icon.color), leadingInset: indent + 4 + 12 + 4
-            ),
+            // 在多选里的行拖起来带上整个多选；不在多选里的只拖自己
+            dragPaths: { session.selection.contains(node.id) ? TreeSelection.roots(session.selectedNodes).map(\.id) : [node.id] },
+            dragPreview: { count in
+                count > 1
+                    ? TreeRowInteraction.DragPreview(title: "\(count) 个项目", systemImage: "doc.on.doc", tint: NSColor(Theme.secondaryText), leadingInset: indent + 4 + 12 + 4)
+                    : TreeRowInteraction.DragPreview(
+                        title: node.name, systemImage: icon.systemName,
+                        tint: NSColor(status == .ignored ? Theme.vcsIgnored : icon.color), leadingInset: indent + 4 + 12 + 4
+                    )
+            },
             dropCheck: dropTarget.check,
             drop: dropTarget.drop,
             onTargetChange: dropTarget.targeted,
             // 折叠的目录：拖着东西在上面停一会儿就展开，好往里面的子目录放
             springLoad: node.isDirectory && !row.isExpanded ? { session.expand(node.id) } : nil
         ))
-        .contextMenu { TreeContextMenu(session: session, node: node, requestDelete: onDelete, requestRename: onRename) }
+        .contextMenu { TreeContextMenu(session: session, node: node, requestDelete: onDelete, requestRename: onRename, requestNewFolder: onNewFolder) }
     }
 
-    /// 按下：箭头区域直接展开/折叠；其余位置选中。
-    private func pressed(at location: CGPoint) -> Press {
+    /// 按下：箭头区域直接展开/折叠；⌘点击加减多选、⇧点击连选；其余位置选中。
+    private func pressed(at location: CGPoint, modifiers: NSEvent.ModifierFlags) -> Press {
         onPress()
         // 箭头占 indent 之后的 12pt，左右各留 3pt 好点中
-        if node.isDirectory, location.x >= indent - 3, location.x <= indent + 4 + 12 + 3 {
+        if node.isDirectory, modifiers.isEmpty, location.x >= indent - 3, location.x <= indent + 4 + 12 + 3 {
             session.toggleExpanded(node.id)
             return .chevron
         }
+        if modifiers.contains(.command) {
+            session.toggleSelection(node.id)
+            return .chevron   // 加减选中不算点击：松开时不打开、不展开
+        }
+        if modifiers.contains(.shift) {
+            session.extendSelection(to: node.id)
+            return .chevron
+        }
+        if session.selection.contains(node.id), session.selection.count > 1 { return .selectedRow }
         session.select(node.id)
         return .row
     }
@@ -490,8 +543,12 @@ private struct TreeContextMenu: View {
     let node: FileNode
     let requestDelete: (FileNode) -> Void
     let requestRename: (FileNode) -> Void
+    let requestNewFolder: (URL) -> Void
 
     var body: some View {
+        // IDEA 的 New：在目录上就建在它下面，在文件上建在它旁边
+        Button("新建文件夹…") { requestNewFolder(node.isDirectory ? node.url : node.url.deletingLastPathComponent()) }
+        Divider()
         if !node.isDirectory {
             Button("打开") { session.openFile(node.url, pinned: true) }
             if let change = session.change(for: node.url) {
@@ -499,14 +556,17 @@ private struct TreeContextMenu: View {
             }
             Divider()
         }
-        Button("在访达中显示") { Desktop.revealInFinder(node.url) }
-        Button("用默认应用打开") { Desktop.openWithDefaultApp(node.url) }
-        if !node.isDirectory, TerminalLauncher.canRun(fileNamed: node.name) {
-            Button("在终端中运行") { session.saveAll { Desktop.runInTerminal(node.url) } }
-        }
-        Divider()
+        // 常用的放上面；「用默认应用打开」只给文件（目录交给访达就够了）
         Button("重命名…") { requestRename(node) }
         Button("删除…") { requestDelete(node) }
+        Divider()
+        Button("在访达中显示") { Desktop.revealInFinder(node.url) }
+        if !node.isDirectory {
+            Button("用默认应用打开") { Desktop.openWithDefaultApp(node.url) }
+            if TerminalLauncher.canRun(fileNamed: node.name) {
+                Button("在终端中运行") { session.saveAll { Desktop.runInTerminal(node.url) } }
+            }
+        }
     }
 }
 

@@ -241,6 +241,13 @@ public struct GitClient: Sendable {
         _ = try await run(["rm", "-f", "-q", "--", path], in: repositoryRoot)
     }
 
+    /// 把这些路径在工作区里的样子记进索引（`add -A`：新增、修改、删除都记）。撤销「回滚」时用来把新增 / 重命名的状态放回去，
+    /// 否则写回来的文件在 git 眼里只是个未跟踪文件。
+    public func stage(paths: [String], repositoryRoot: URL) async throws {
+        precondition(!paths.isEmpty)
+        _ = try await run(["add", "-A", "--"] + Array(Set(paths)).sorted(), in: repositoryRoot)
+    }
+
     // MARK: - 与远程同步
 
     /// 当前分支跟踪的上游（`origin/main` 这种）。没有上游、游离 HEAD 时返回 nil。

@@ -20,6 +20,16 @@ struct EditorTab: Identifiable, Equatable {
     var scrollTop: Double = 0
     /// 切走时记下的光标位置（只有编辑器才有）。
     var cursor: EditorCursor?
+    /// 切走时记下的编辑器撤销历史（CodeMirror `getHistory()` 的 JSON 文本）连同它对应的那份文本的哈希：
+    /// 只有重画时的文本与记历史时的一模一样才装回去（`history(matching:)`）——同一文档的另一个标签改过、重命名重读、
+    /// 磁盘上被别人改过之后，历史里的位置都对不上新内容，CodeMirror 的 `setHistory` 不校验，装回去 ⌘Z 会撕坏正文。
+    var history: EditorHistory?
+
+    /// 要画的文本就是记历史时的那份才给历史，否则从头记。
+    func history(matching text: String) -> String? {
+        guard let history, history.textHash == EditorHistory.hash(text) else { return nil }
+        return history.json
+    }
     /// Markdown 标签：看渲染结果、看源码，还是分栏。
     var markdownView: MarkdownView = .preview
 
@@ -167,4 +177,17 @@ extension ChangeKind {
         case .untracked: return "未跟踪"
         }
     }
+}
+
+/// 编辑器的撤销历史与它对应的文本（哈希）。
+struct EditorHistory: Equatable {
+    let json: String
+    let textHash: Int
+
+    init(json: String, text: String) {
+        self.json = json
+        textHash = Self.hash(text)
+    }
+
+    static func hash(_ text: String) -> Int { text.hashValue }
 }

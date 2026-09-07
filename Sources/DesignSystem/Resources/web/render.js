@@ -2,14 +2,17 @@
  *
  * Swift 侧主要做一件事：window.ide.render(payload)。Swift 那边的事实源是 DesignSystem/RenderPayload.swift，
  * 改一边必须改另一边。每个 payload 都带 scrollTop（渲染完滚到哪）和 wrap（代码是否自动换行），kind 决定画什么：
- *   code     { path, text, language, editable, cursor?: {line, ch}, base?: HEAD 里的内容 }
- *   markdown { path, markdown, docDir, view: "preview" | "source" | "split", editable, cursor?, base? }
+ *   code     { path, text, language, editable, cursor?: {line, ch}, base?: HEAD 里的内容, history?: 编辑器撤销历史的 JSON 文本 }
+ *   markdown { path, markdown, docDir, view: "preview" | "source" | "split", editable, cursor?, base?, history? }
  *   image    { path, url, sizeText }
  *   diff     { path, language, mode: "side" | "unified", rows, binary, empty, added, removed, emptyReason }
- *            或可编辑的 { path, language, mode, edit: { oldText, newText, filePath, cursor? } }：左/上是基线只读，右/下是工作区可改
+ *            或可编辑的 { path, language, mode, edit: { oldText, newText, filePath, cursor?, history? } }：左/上是基线只读，右/下是工作区可改
  *   message  { title, detail }
  * editable 为真的 code / markdown 源码用 CodeMirror 编辑器画，否则是只读的静态视图。
- * 宿主还会问 window.ide.getState() → { scrollTop, text: 编辑器里的全文或 null, cursor }，切标签前拿走最新文字；
+ * 宿主还会问 window.ide.getState() → { scrollTop, text: 编辑器里的全文或 null, cursor, history }，切标签前拿走最新文字；
+ * history 是 CodeMirror getHistory() 的 JSON 文本，下次渲染同一份内容时随 payload 送回来（setHistory），切走再切回 ⌘Z 照样能撤。
+ * window.ide.undo() / redo() 是编辑器里的撤销 / 重做，回有没有编辑器接下这一步（只读视图回 false，宿主去撤文件操作）；
+ * 焦点在编辑器里时 ⌘Z / ⇧⌘Z 由 CodeMirror 自己处理，不会传到应用菜单。
  * 基线是异步取的，到了就 window.ide.setBase({ path, base })，编辑器在行号右侧画「改过（蓝）/ 新增（绿）」的标记（IDEA 的 gutter）。
  * window.ide.setTheme("light" | "dark") 切浅色 / 深色：只换根元素的 class，颜色都在 style.css 的变量里。
  * window.ide.navigateChange("next" | "previous") 跳到下一处 / 上一处变更（IDEA 的 F7 / ⇧F7）：编辑器里按光标找、把那一行滚到正中；
@@ -277,8 +280,15 @@
     }));
     attachEditorEvents(onChange);
     if (payload.cursor) editor.setCursor(payload.cursor);
+    restoreHistory(payload.history);
     updateChangeMarkers();
     return editor;
+  }
+
+  /* 切回来的标签把撤销历史带回来了：装回编辑器。坏掉的 JSON 就当没有，别让正文画不出来。 */
+  function restoreHistory(history) {
+    if (!editor || !history) return;
+    try { editor.setHistory(JSON.parse(history)); } catch (e) { /* 历史对不上就从头记 */ }
   }
 
   function renderEditor(payload, text, language) {
@@ -341,6 +351,7 @@
       diffTimer = setTimeout(() => { diffTimer = null; updateDiffSummary(); }, EDIT_DEBOUNCE);
     });
     if (edit.cursor) editor.setCursor(edit.cursor);
+    restoreHistory(edit.history);
     updateDiffSummary();
     editor.scrollTo(null, payload.scrollTop || 0);
   }
@@ -358,6 +369,7 @@
       diffTimer = setTimeout(() => { diffTimer = null; decorateUnified(); }, EDIT_DEBOUNCE);
     });
     if (edit.cursor) editor.setCursor(edit.cursor);
+    restoreHistory(edit.history);
     decorateUnified();
     editor.scrollTo(null, payload.scrollTop || 0);
   }
@@ -513,7 +525,7 @@
 
   function renderMarkdown(payload) {
     if (payload.view === "source") {
-      renderCode({ path: payload.path, text: payload.markdown, language: "markdown", editable: payload.editable, cursor: payload.cursor, base: payload.base });
+      renderCode({ path: payload.path, text: payload.markdown, language: "markdown", editable: payload.editable, cursor: payload.cursor, base: payload.base, history: payload.history });
       return;
     }
     if (payload.view === "split" && payload.editable) {
@@ -863,7 +875,19 @@
         scrollTop: window.ide.getScrollTop(),
         text: editor ? editor.getValue() : null,
         cursor: cursor ? { line: cursor.line, ch: cursor.ch } : null,
+        history: editor ? JSON.stringify(editor.getHistory()) : null,
       };
+    },
+    /* 编辑器里的撤销 / 重做；没有编辑器（只读视图）回 false，宿主去撤文件操作。 */
+    undo() {
+      if (!editor) return false;
+      editor.undo();
+      return true;
+    },
+    redo() {
+      if (!editor) return false;
+      editor.redo();
+      return true;
     },
     /* 基线（HEAD 里的内容）异步到了：是当前文件就重画标记 / 重算 diff。 */
     setBase(message) {

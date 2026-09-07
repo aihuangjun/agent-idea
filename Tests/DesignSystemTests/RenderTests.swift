@@ -106,6 +106,32 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     #expect(readOnly as? String == "0,true")
 }
 
+/// 编辑器的撤销历史随 getState 带走、随 payload 带回来：切走再切回的编辑器 ⌘Z 还能撤到切走之前；
+/// window.ide.undo() 在只读视图里回 false（宿主去撤文件操作）。
+@Test @MainActor func editorHistoryRoundTripsThroughPayload() async throws {
+    let history = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.txt", text: "one\n", language: nil, editable: true)),
+        prepare: "document.querySelector('.CodeMirror').CodeMirror.replaceRange('X', {line: 0, ch: 0})",
+        inspect: "[typeof window.ide.getState().history, window.ide.getState().text, window.ide.undo(), window.ide.getState().text, window.ide.redo(), window.ide.getState().text].join('|')"
+    )
+    #expect(history as? String == "string|Xone\n|true|one\n|true|Xone\n")
+    let recorded = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.txt", text: "one\n", language: nil, editable: true)),
+        prepare: "document.querySelector('.CodeMirror').CodeMirror.replaceRange('X', {line: 0, ch: 0})",
+        inspect: "window.ide.getState().history"
+    )
+    let restored = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.txt", text: "Xone\n", language: nil, editable: true, history: recorded as? String)),
+        inspect: "[window.ide.undo(), window.ide.getState().text].join('|')"
+    )
+    #expect(restored as? String == "true|one\n", "带着历史重画之后能撤到切走之前")
+    let readOnly = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.txt", text: "one\n", language: nil, editable: false)),
+        inspect: "[window.ide.undo(), window.ide.redo(), window.ide.getState().history === null].join('|')"
+    )
+    #expect(readOnly as? String == "false|false|true")
+}
+
 /// 编辑器里的 ⌥← / ⌥→ 是应用的后退 / 前进，不是按词移动：要发 navigate 消息给宿主。
 @Test @MainActor func editorForwardsOptionArrowsAsNavigation() async throws {
     let received = Locked<[String]>([])
