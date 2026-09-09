@@ -195,6 +195,15 @@ final class WorkbenchModel: ObservableObject {
         for session in sessions { session.saveAll() }
     }
 
+    /// 拖动排序：把第 `index` 个项目挪到 `destination`（下标按「先把它拿掉」算，见 `TabReorder`）。
+    /// 顺序要留住——下次启动是照 `openProjects` 的顺序开回来的。
+    func moveProject(from index: Int, to destination: Int) {
+        let reordered = TabReorder.reordered(sessions, from: index, to: destination)
+        guard reordered.map(\.id) != sessions.map(\.id) else { return }
+        sessions = reordered
+        saveOpenProjects()
+    }
+
     func selectNextProject(offset: Int) {
         guard sessions.count > 1, let index = sessions.firstIndex(where: { $0.id == activeSessionID }) else { return }
         activate(sessions[(index + offset + sessions.count) % sessions.count].id)

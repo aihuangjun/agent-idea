@@ -33,7 +33,13 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
                 let skip = arguments.firstIndex(of: "--skip").map { Int(arguments[$0 + 1]) ?? 0 } ?? 0
                 if skip == 0 {
                     // 恰好一整页：说明还有更多
-                    let page = (0..<HistoryController.pageSize).map { logRecord(String(format: "%016x", 0x1000 + $0), parents: $0 == HistoryController.pageSize - 1 ? "" : String(format: "%016x", 0x1001 + $0), subject: "提交 \($0)") }
+                    // 拆开写：整行塞在一句里编译器要推半天（Swift 6.3 直接报 unable to type-check）
+                    let last: Int = HistoryController.pageSize - 1
+                    let page: [String] = (0..<HistoryController.pageSize).map { (index: Int) -> String in
+                        let hash: String = String(format: "%016x", 0x1000 + index)
+                        let parents: String = index == last ? "" : String(format: "%016x", 0x1001 + index)
+                        return logRecord(hash, parents: parents, subject: "提交 \(index)")
+                    }
                     return shellOutput(page.joined())
                 }
                 return shellOutput(logRecord("0000000000000abc", parents: "", subject: "root"))
