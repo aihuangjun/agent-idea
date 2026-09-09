@@ -11,6 +11,8 @@ swift scripts/make_icon.swift && iconutil -c icns Resources/AppIcon.iconset -o R
 scripts/fetch_vendor.sh         # 仅升级前端离线依赖时（需联网）
 ```
 
+机器上要先装什么（Swift 官方 toolchain——不装 `swift test` 会报 `no such module 'Testing'`、本机签名证书、git 身份、`gh`）见 [`SETUP.md`](SETUP.md)。
+
 构建环境：本机只有 Command Line Tools，没有 Xcode。不要引入 `.xcodeproj`。
 测试框架必须用 swift-testing（`import Testing`），XCTest 不在本机 SDK 里。
 所有 target 都用 `.swiftLanguageMode(.v5)`：Swift 6 严格并发下 WebKit/AppKit 的回调会满屏报错。

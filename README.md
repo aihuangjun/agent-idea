@@ -42,7 +42,8 @@ Agent 开发配套的 IDEA：一个很轻的 macOS 工作台，用来看 Agent �
 
 ## 构建与运行
 
-本机只需 Command Line Tools（没有 Xcode 也行）。
+换一台新机器要装什么（Swift 官方 toolchain、本机签名证书、git 身份、`gh`），
+以及每样缺了会怎么报错，见 [`SETUP.md`](SETUP.md)。已经装好的话：
 
 ```bash
 swift build                 # 编译
@@ -63,8 +64,8 @@ scripts/release.sh 0.3.0 --local    # 只打到 dist/，不动仓库
 ```
 
 历史版本都在仓库的 [Releases](https://github.com/aihuangjun/agent-idea/releases)（tag `vX.Y.Z`，dmg 作附件）。
-应用里「Agent IDEA → 检查更新…」读的就是最新那个 Release。仓库是私有的，
-更新器需要 GitHub 凭据：本机装好 `gh` 并登录，或把 token 写进 `~/.agentidea/github_token`。
+应用里「Agent IDEA → 检查更新…」读的就是最新那个 Release。仓库现在是公开的，更新不需要凭据；
+若改回私有，更新器按 `~/.agentidea/github_token` → `GITHUB_TOKEN`/`GH_TOKEN` → 本机 `gh auth token` 的顺序找。
 
 ## 结构
 
