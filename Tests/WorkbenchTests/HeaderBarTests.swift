@@ -145,3 +145,61 @@ import TestSupport
         #expect(workbench.sessions.map(\.project.name) == before.filter { $0 != dragged }, "点 ✕ 该关掉第一个标签的项目")
     }
 }
+
+/// 慢慢拖（小步长）时顺序只能往一个方向走，不能来回跳：跳一下就是屏幕上高频闪烁。
+///
+/// 拖动手势的位移一旦按**标签自己的**坐标系算，就会这样：标签让位往右挪了 Δ，光标在它局部坐标里
+/// 就往左退了 Δ，位移跟着减 Δ、落点退回原来那一格，下一拍又挪回去——每一帧换一次位。
+@Test @MainActor func draggingATabDoesNotOscillate() async throws {
+    try await withTemporaryDirectory { directory in
+        let workbench = WorkbenchModel(git: nil, defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!,
+                                       recentFile: directory.appendingPathComponent("recent.json"))
+        for name in ["alpha", "bravo", "charlie"] {
+            let root = directory.appendingPathComponent(name)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            workbench.openProject(root)
+        }
+
+        let size = CGSize(width: 900, height: 28)
+        let hosting = NSHostingView(rootView: HeaderBar(openProject: {}).frame(width: size.width, height: size.height).environmentObject(workbench))
+        hosting.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: size.width, height: size.height),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = hosting
+        FirstMouse.enableGlobally()
+        window.orderBack(nil)
+        window.layoutIfNeeded()
+        hosting.layoutSubtreeIfNeeded()
+        try await Task.sleep(nanoseconds: 500_000_000)
+        defer { window.orderOut(nil) }
+
+        @MainActor func send(_ type: NSEvent.EventType, x: Double) {
+            let event = NSEvent.mouseEvent(with: type, location: CGPoint(x: x, y: size.height / 2), modifierFlags: [],
+                                           timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                           context: nil, eventNumber: 0, clickCount: 1, pressure: 0)!
+            window.sendEvent(event)
+        }
+        @MainActor func settle(_ seconds: TimeInterval) async {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline {
+                spinRunLoop(0.01)
+                await Task.yield()
+            }
+            hosting.layoutSubtreeIfNeeded()
+        }
+
+        send(.leftMouseDown, x: 20)
+        var indexes: [Int] = []
+        // 步子小才看得见来回跳；也别太多步——测试是并行跑的，主线程占太久会把别的用例饿超时
+        for x in stride(from: 26.0, through: 320, by: 6) {
+            send(.leftMouseDragged, x: x)
+            await settle(0.015)
+            indexes.append(workbench.sessions.firstIndex { $0.project.name == "alpha" } ?? -1)
+        }
+        send(.leftMouseUp, x: 320)
+        await settle(0.2)
+
+        #expect(indexes.last == 2, "拖到最右该排到最后（实际走位：\(indexes)）")
+        #expect(zip(indexes, indexes.dropFirst()).allSatisfy { $0 <= $1 }, "一路往右拖，位置不该往回跳：\(indexes)")
+    }
+}

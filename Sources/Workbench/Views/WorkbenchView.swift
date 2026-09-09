@@ -131,12 +131,16 @@ struct HeaderBar: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 0) {
                     ForEach(Array(workbench.sessions.enumerated()), id: \.element.id) { index, session in
-                        ProjectTab(session: session, isActive: session.id == workbench.activeSessionID, isDragging: drag?.id == session.id)
+                        ProjectTab(session: session, isActive: session.id == workbench.activeSessionID,
+                                   isDragging: drag?.id == session.id, isReordering: drag != nil)
                             .offset(x: offset(of: session.id, at: index))
                             // 拖着的那个盖在别人上面
                             .zIndex(drag?.id == session.id ? 1 : 0)
+                            // 位移必须按**不跟着标签动**的坐标系算（`.global` 是窗口的）。按标签自己的局部坐标算的话：
+                            // 标签让位往右挪了 Δ，光标在它局部坐标里就往左退了 Δ，位移跟着减 Δ、落点退回原来那一格，
+                            // 下一拍又挪回去——每一帧换一次位，屏幕上就是高频闪烁（`draggingATabDoesNotOscillate` 守着）。
                             .gesture(
-                                DragGesture(minimumDistance: 4)
+                                DragGesture(minimumDistance: 4, coordinateSpace: .global)
                                     .onChanged { dragChanged(session.id, translation: $0.translation.width) }
                                     .onEnded { _ in drag = nil }
                             )
@@ -201,9 +205,13 @@ private struct ProjectTab: View {
     @ObservedObject var session: ProjectSession
     let isActive: Bool
     let isDragging: Bool
+    /// 有标签正被拖着。拖动时标签在光标底下来回滑过，谁都别再亮悬停底色、别再冒出关闭按钮——那也是一种闪。
+    let isReordering: Bool
     @State private var isHovering = false
 
     var body: some View {
+        // 拖动期间标签在光标底下来回滑过，悬停底色与关闭按钮跟着一亮一灭也是闪，索性都按「没悬停」画
+        let hovering = isHovering && !isReordering
         HStack(spacing: 5) {
             Image(systemName: "folder.fill").foregroundStyle(Theme.folderIcon).font(.system(size: 10.5))
             Text(session.project.name)
@@ -224,17 +232,17 @@ private struct ProjectTab: View {
                 Image(systemName: "xmark").font(.system(size: 8.5, weight: .bold))
                     .foregroundStyle(Theme.secondaryText)
                     .frame(width: 14, height: 14)
-                    .background(Circle().fill(isHovering ? Theme.border : .clear))
+                    .background(Circle().fill(hovering ? Theme.border : .clear))
             }
             .buttonStyle(.plain)
-            .opacity(isHovering || isActive ? 1 : 0)
+            .opacity(hovering || isActive ? 1 : 0)
             .toolTip("关闭项目")
         }
         .padding(.leading, 12)
         .padding(.trailing, 6)
         .frame(height: 28)
         // 方角、撑满整行高度。选中的用比标签栏**浅**的底色，是凸起来的那种；用内容区的深色会像陷下去。
-        .background(isActive ? Theme.hover : (isHovering ? Theme.hover.opacity(0.35) : Theme.panel))
+        .background(isActive ? Theme.hover : (hovering ? Theme.hover.opacity(0.35) : Theme.panel))
         .overlay(alignment: .bottom) { Rectangle().fill(isActive ? Theme.accent : .clear).frame(height: 2) }
         .overlay(alignment: .trailing) { Rectangle().fill(Theme.border).frame(width: 1) }
         .contentShape(Rectangle())
