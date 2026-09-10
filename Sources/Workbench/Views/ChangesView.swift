@@ -19,7 +19,7 @@ struct ChangesView: View {
                 if session.isRefreshingGit {
                     ProgressView().controlSize(.mini).padding(.trailing, 4)
                 }
-                IconButton("arrow.clockwise", help: "刷新（⌘R）", size: 22) { session.refreshGit() }
+                IconButton(ToolWindowIcon.refresh, help: "刷新（⌘R）：重列工作区的改动，不联网", size: 22) { session.refreshGit() }
             }
             if let commit = session.commit {
                 if let error = session.gitError {

@@ -1043,12 +1043,73 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
     }
 
-    /// 能不能跟远程同步：有仓库、当前分支有上游、没在同步。
+    // MARK: - 添加到 git
+
+    /// git 认不认识这个节点：未跟踪的、被 `.gitignore` 挡着的都还没纳入版本管理，右键才给「添加到 git」。
+    func canAddToGit(_ node: FileNode) -> Bool {
+        switch gitStatus(for: node) {
+        case .change(.untracked), .ignored: return true
+        default: return false
+        }
+    }
+
+    func isIgnoredByGit(_ node: FileNode) -> Bool { gitStatus(for: node) == .ignored }
+
+    /// 目录树右键「添加到 git」（IDEA 的 Add to VCS）：把未跟踪 / 被忽略的路径纳入版本管理，
+    /// 之后它们出现在提交列表里、能跟着一起提交。只动索引，磁盘上的文件一个字节都不碰。
+    ///
+    /// 两处讲究：
+    /// - **先把目录展开成它下面的具体文件再 add**（`ls-files --others`）：撤销时才能精确地把这几个文件从索引里撤下来。
+    ///   直接 `rm --cached -r <目录>` 会把目录里本来就跟踪着的文件也一起摘出版本管理——未跟踪的目录里完全可能有已跟踪的文件
+    ///   （目录的颜色只反映它下面变更里优先级最高的那一种）。
+    /// - **被忽略的与未跟踪的分成两次 add**：前者非 `--force` 不可（不加 git 直接拒绝整条命令），
+    ///   而 `--force` 用在未跟踪的目录上会把它里面本该忽略的东西（`node_modules`、构建产物）一起拖进来。
+    func addToGit(_ nodes: [FileNode]) {
+        guard let commit else { return }
+        let targets = TreeSelection.roots(nodes.filter(canAddToGit))
+        guard !targets.isEmpty else { return }
+        let ignoredPaths = targets.filter(isIgnoredByGit).compactMap { project.repositoryRelativePath(of: $0.url) }
+        let untrackedPaths = targets.filter { !isIgnoredByGit($0) }.compactMap { project.repositoryRelativePath(of: $0.url) }
+        let title = targets.count == 1 ? "添加 \(targets[0].name) 到 git" : "添加 \(targets.count) 个项目到 git"
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let untracked = untrackedPaths.isEmpty ? [] : try await commit.untrackedFiles(under: untrackedPaths, ignored: false)
+                let ignored = ignoredPaths.isEmpty ? [] : try await commit.untrackedFiles(under: ignoredPaths, ignored: true)
+                guard !untracked.isEmpty || !ignored.isEmpty else {
+                    // git 只记文件：空目录（或里面只剩空目录）没有东西可加
+                    self.notify("没有可添加的文件：git 记不住空目录")
+                    return
+                }
+                if !untracked.isEmpty { try await commit.add(paths: untracked, force: false) }
+                if !ignored.isEmpty { try await commit.add(paths: ignored, force: true) }
+                let count = untracked.count + ignored.count
+                Log.info("git", "添加到 git：\(count) 个文件（其中被忽略的 \(ignored.count) 个）")
+                let recorded = self.recordUndo(title, .addToGit(untracked: untracked, ignored: ignored))
+                self.notify("已添加 \(count) 个文件到 git", action: BannerAction(title: "撤销") { [weak self] in
+                    self?.dismissBanner()
+                    self?.undo(expecting: recorded.id)
+                })
+                self.refreshAll()
+            } catch {
+                Log.warn("git", "添加到 git 失败：\(error)")
+                self.showError("添加到 git 失败：\(error.userFacingDescription)")
+                self.refreshAll()
+            }
+        }
+    }
+
+    /// 这个项目**够得着远程**：有仓库、有提交、当前分支有上游。与「此刻能不能点」分开——
+    /// 提交历史的刷新按钮按它决定自己是「同步」还是「只重列本地」（图标与提示都跟着走），
+    /// 同步进行中按钮只是灰着，不该在那两三秒里变成另一个按钮。
+    var hasRemoteUpstream: Bool {
+        hasGit && !gitSnapshot.branch.isUnborn && gitSnapshot.branch.upstream != nil
+    }
+
+    /// 能不能跟远程同步：够得着远程，而且没在同步。
     /// 没有上游的仓库（还没 push 过、游离 HEAD）按钮直接灰掉，提交历史的刷新退回本地刷新，
     /// 不要点一下弹一条要用户手动关掉的错误。
-    var canSyncWithRemote: Bool {
-        hasGit && !isSyncingRemote && !gitSnapshot.branch.isUnborn && gitSnapshot.branch.upstream != nil
-    }
+    var canSyncWithRemote: Bool { hasRemoteUpstream && !isSyncingRemote }
 
     /// 与远程同步（IDEA 的 Update Project）：`git fetch` 之后把上游的新提交 rebase 到本地分支下面，
     /// 完了整体刷新（目录树、开着的文件、git 状态、已经打开的提交历史）。

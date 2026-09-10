@@ -116,8 +116,8 @@ Agent IDEA $VERSION
 
 以后怎么升级
 菜单栏「Agent IDEA → 检查更新…」会自己从 GitHub 取最新版本。
-仓库是私有的，本机要先装好 gh 并登录（brew install gh && gh auth login），
-或者把一个有 repo 读权限的 token 写进 ~/.agentidea/github_token。
+仓库是公开的，不需要任何凭据；若哪天改回私有，本机要先装好 gh 并登录
+（brew install gh && gh auth login），或者把一个有 repo 读权限的 token 写进 ~/.agentidea/github_token。
 
 用法
 - 欢迎页「打开项目…」选一个工作区目录，或把目录拖进窗口。

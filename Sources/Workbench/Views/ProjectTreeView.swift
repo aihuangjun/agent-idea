@@ -11,8 +11,10 @@ struct ProjectTreeView: View {
     @State private var scrollOnSelection = false
     /// 双击判定是输入层的事，放在视图里；一棵树共用一个，跨行才能判「同一行点了两下」。
     @State private var clicks = DoubleClickDetector(interval: NSEvent.doubleClickInterval)
-    /// 等确认的删除（右键菜单或 ⌫）。
-    @State private var pendingDelete: DestructiveConfirmation?
+    /// 等确认的操作：删除（右键菜单或 ⌫），或者把被 .gitignore 忽略的东西添加到 git
+    /// （`git add --force` 很容易一下子把 node_modules 拖进来，动手前问一句）。
+    /// 两者共用一个状态、一个弹窗：同一时刻只可能有一个在等确认，两个 alert 挂在同一个视图上是自找麻烦。
+    @State private var pending: DestructiveConfirmation?
     /// 正在重命名的节点（右键菜单或 ⇧F6），对话框以 sheet 弹出。
     @State private var renaming: FileNode?
     /// 正在往哪个目录下新建文件夹（右键菜单）。
@@ -31,7 +33,7 @@ struct ProjectTreeView: View {
                 if session.isSyncingRemote {
                     ProgressView().controlSize(.mini).padding(.trailing, 4)
                 }
-                IconButton("arrow.down.backward", help: syncHelp, size: 22) { session.syncWithRemote() }
+                IconButton(ToolWindowIcon.syncWithRemote, help: syncHelp, size: 22) { session.syncWithRemote() }
                     .disabled(!session.canSyncWithRemote)
                 IconButton("magnifyingglass", help: "查找文件（⌘F）", isActive: search.isActive, size: 22) {
                     if search.isActive { closeSearch() } else { search.activate() }
@@ -105,6 +107,7 @@ struct ProjectTreeView: View {
                                 onPress: { isFocused = true },
                                 onDelete: { requestDelete($0) },
                                 onRename: { renaming = $0 },
+                                onAddToGit: { requestAddToGit($0) },
                                 onNewFolder: { newFolder = NewFolderRequest(directory: $0) },
                                 isDropTarget: row.node.isDirectory && dropTarget.directory == row.id,
                                 dropTarget: dropTarget(row: row.id, into: row.node.isDirectory ? row.node.url : row.node.url.deletingLastPathComponent())
@@ -150,7 +153,7 @@ struct ProjectTreeView: View {
             .contentShape(Rectangle())
             .onTapGesture { isFocused = true }
             .onChange(of: session.revealRequests) { _, _ in scrollOnSelection = true }
-            .destructiveConfirmation($pendingDelete)
+            .destructiveConfirmation($pending)
             .sheet(item: $renaming) { node in
                 RenameSheet(node: node) { session.renameProblem(for: node, newName: $0) } commit: { session.rename(node, to: $0) }
             }
@@ -192,20 +195,40 @@ struct ProjectTreeView: View {
     private func requestDelete(_ node: FileNode) {
         let nodes = session.selection.contains(node.id) && session.selection.count > 1 ? TreeSelection.roots(session.selectedNodes) : [node]
         if nodes.count == 1, let only = nodes.first {
-            pendingDelete = DestructiveConfirmation(
+            pending = DestructiveConfirmation(
                 id: "delete:" + only.id,
                 title: "删除 \(only.name)？",
                 message: only.isDirectory ? "目录和里面的全部内容会移到废纸篓。" : "文件会移到废纸篓。",
                 buttonTitle: "删除"
             ) { session.delete(only) }
         } else {
-            pendingDelete = DestructiveConfirmation(
+            pending = DestructiveConfirmation(
                 id: "delete:" + nodes.map(\.id).joined(separator: "\n"),
                 title: "删除 \(nodes.count) 个项目？",
                 message: "它们（目录连同里面的全部内容）会移到废纸篓。",
                 buttonTitle: "删除"
             ) { session.delete(nodes) }
         }
+    }
+
+    /// 右键「添加到 git」：点的那一行在多选里就添加整个多选（与删除一样），否则只添加它。
+    /// 里面有被 .gitignore 忽略的先弹一句确认——`add --force` 一不留神就是几万个文件。
+    private func requestAddToGit(_ node: FileNode) {
+        let nodes = session.selection.contains(node.id) && session.selection.count > 1 ? TreeSelection.roots(session.selectedNodes) : [node]
+        let targets = nodes.filter(session.canAddToGit)
+        guard !targets.isEmpty else { return }
+        let ignored = targets.filter(session.isIgnoredByGit)
+        guard !ignored.isEmpty else {
+            session.addToGit(targets)
+            return
+        }
+        pending = DestructiveConfirmation(
+            id: "add:" + targets.map(\.id).joined(separator: "\n"),
+            title: ignored.count == 1 ? "“\(ignored[0].name)”被 .gitignore 忽略，仍然添加？" : "有 \(ignored.count) 个被 .gitignore 忽略，仍然添加？",
+            message: "会用 git add --force 把它们纳入版本管理；目录会连同里面被忽略的文件一起添加。",
+            buttonTitle: "添加",
+            isDestructive: false
+        ) { session.addToGit(targets) }
     }
 
     private func requestDeleteOfSelection() -> KeyPress.Result {
@@ -422,6 +445,9 @@ struct TreeRow: View {
     var onDelete: (FileNode) -> Void = { _ in }
     /// 右键「重命名…」：交给树弹对话框。
     var onRename: (FileNode) -> Void = { _ in }
+    /// 右键「添加到 git」：交给树处理多选与确认。
+    var onAddToGit: (FileNode) -> Void = { _ in }
+
     /// 往这个目录下新建文件夹（文件行给的是它所在的目录）。
     var onNewFolder: (URL) -> Void = { _ in }
     /// 拖着东西经过时这一行（目录）会接收：画高亮。由树算好传进来（文件行代表的是它所在的目录，高亮的是那个目录的行）。
@@ -496,7 +522,10 @@ struct TreeRow: View {
             // 折叠的目录：拖着东西在上面停一会儿就展开，好往里面的子目录放
             springLoad: node.isDirectory && !row.isExpanded ? { session.expand(node.id) } : nil
         ))
-        .contextMenu { TreeContextMenu(session: session, node: node, requestDelete: onDelete, requestRename: onRename, requestNewFolder: onNewFolder) }
+        .contextMenu {
+            TreeContextMenu(session: session, node: node, requestDelete: onDelete, requestRename: onRename,
+                            requestNewFolder: onNewFolder, requestAddToGit: onAddToGit)
+        }
     }
 
     /// 按下：箭头区域直接展开/折叠；⌘点击加减多选、⇧点击连选；其余位置选中。
@@ -544,6 +573,7 @@ private struct TreeContextMenu: View {
     let requestDelete: (FileNode) -> Void
     let requestRename: (FileNode) -> Void
     let requestNewFolder: (URL) -> Void
+    let requestAddToGit: (FileNode) -> Void
 
     var body: some View {
         // IDEA 的 New：在目录上就建在它下面，在文件上建在它旁边
@@ -554,6 +584,11 @@ private struct TreeContextMenu: View {
             if let change = session.change(for: node.url) {
                 Button("显示 diff") { session.openDiff(change, pinned: true) }
             }
+            Divider()
+        }
+        // git 还不认识的（未跟踪、被忽略）才有：IDEA 的 Add to VCS。被忽略的要弹确认，标题带省略号
+        if session.canAddToGit(node) {
+            Button(session.isIgnoredByGit(node) ? "添加到 git…" : "添加到 git") { requestAddToGit(node) }
             Divider()
         }
         // 常用的放上面；「用默认应用打开」只给文件（目录交给访达就够了）

@@ -824,6 +824,61 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
     }
 }
 
+/// 目录树右键「添加到 git」：未跟踪的与被忽略的分成两次 add（后者带 --force），
+/// 而且先把目录展开成具体文件再 add——撤销才能精确地把这几个文件从索引里撤下来。
+@Test @MainActor func addToGitSplitsIgnoredAndUndoesByPath() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("pkg"), withIntermediateDirectories: true)
+        try "a".write(to: directory.appendingPathComponent("pkg/a.txt"), atomically: true, encoding: .utf8)
+        try "b".write(to: directory.appendingPathComponent("pkg/b.log"), atomically: true, encoding: .utf8)
+        try "d".write(to: directory.appendingPathComponent("debug.log"), atomically: true, encoding: .utf8)
+        try "# hi".write(to: directory.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        let git = Locked<[[String]]>([])
+        // pkg 整个未跟踪（里面的 b.log 被忽略），debug.log 被忽略
+        let runner = gitRunner(root: root, status: { "# branch.oid abc\u{0}# branch.head main\u{0}? pkg/a.txt\u{0}! pkg/b.log\u{0}! debug.log\u{0}" }, extra: { arguments in
+            switch arguments.first {
+            case "ls-files":
+                git.value.append(arguments)
+                return shellOutput(arguments.contains("--ignored") ? "debug.log\u{0}" : "pkg/a.txt\u{0}")
+            case "add", "rm":
+                git.value.append(arguments)
+                return shellOutput("")
+            default: return nil
+            }
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.commit != nil && !session.gitSnapshot.changes.isEmpty }
+
+        let pkg = try #require(session.rows.first { $0.node.name == "pkg" }?.node)
+        let log = try #require(session.rows.first { $0.node.name == "debug.log" }?.node)
+        #expect(session.canAddToGit(pkg) && !session.isIgnoredByGit(pkg))
+        #expect(session.canAddToGit(log) && session.isIgnoredByGit(log))
+        // 已跟踪且没改的（status 里根本不出现）没有这一项
+        let tracked = try #require(session.rows.first { $0.node.name == "README.md" }?.node)
+        #expect(!session.canAddToGit(tracked))
+
+        session.addToGit([pkg, log])
+        await waitUntil { git.value.contains { $0.first == "add" && $0.contains("--force") } }
+        #expect(git.value.filter { $0.first == "ls-files" }.count == 2)
+        // 目录没有原样传给 add：传的是它下面列出来的文件
+        #expect(git.value.contains(["add", "--", "pkg/a.txt"]))
+        #expect(git.value.contains(["add", "--force", "--", "debug.log"]))
+        await waitUntil { session.undoTitle == "撤销添加 2 个项目到 git" }
+
+        session.undo()
+        await waitUntil { git.value.contains { $0.first == "rm" } }
+        #expect(git.value.last == ["rm", "--cached", "--ignore-unmatch", "--quiet", "--", "debug.log", "pkg/a.txt"])
+        await waitUntil { session.banner == "已撤销添加 2 个项目到 git" }
+
+        session.redo()
+        await waitUntil { git.value.filter { $0.first == "add" }.count == 4 }
+        #expect(git.value.suffix(2) == [["add", "--", "pkg/a.txt"], ["add", "--force", "--", "debug.log"]])
+    }
+}
+
 /// 撤销 / 重做重命名（「编辑 → 撤销」）：搬回去走同一条路（git mv），开着的标签跟着换回旧路径；重做再搬过去。
 /// 状态栏那条「已移动 … 撤销」只在它还是栈顶时才撤：撤销栈上又压了别的操作之后按它不该撤错东西。
 @Test @MainActor func undoAndRedoRename() async throws {

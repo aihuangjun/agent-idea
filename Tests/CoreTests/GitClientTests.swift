@@ -122,6 +122,74 @@ import TestSupport
     }
 }
 
+/// 目录树的「添加到 git」：未跟踪的直接 add，被忽略的非 --force 不可；撤销就是从索引里撤下来，工作区不动。
+/// 关键的一条：未跟踪的目录里夹着被忽略的文件时，add 这个目录不能把被忽略的那些也拖进来。
+@Test func addToGitTracksUntrackedAndForcesIgnoredOnly() async throws {
+    guard let git = GitClient.locate() else { return }
+    try await withTemporaryDirectory { directory in
+        let shell = ShellCommand()
+        func run(_ args: [String]) async throws {
+            _ = try await shell.runChecked(executable: git.executable, arguments: args, currentDirectory: directory, environment: ["GIT_CONFIG_NOSYSTEM": "1", "HOME": directory.path, "PATH": "/usr/bin:/bin"])
+        }
+        func write(_ relative: String, _ text: String) throws {
+            let url = directory.appendingPathComponent(relative)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        }
+        try await run(["init", "-q", "-b", "main"])
+        try await run(["config", "user.email", "t@example.com"])
+        try await run(["config", "user.name", "t"])
+        try write(".gitignore", "build/\n*.log\n")
+        try write("src/old.txt", "old")
+        try await run(["add", "."])
+        try await run(["commit", "-q", "-m", "init"])
+        // 未跟踪的目录 pkg 里夹着一个被忽略的 b.log；build/ 与 debug.log 整个被忽略
+        try write("pkg/a.txt", "a")
+        try write("pkg/b.log", "b")
+        try write("build/out.o", "o")
+        try write("debug.log", "d")
+
+        // 列出来的是具体文件，不是目录；已跟踪的 src/old.txt 一个都不在里面
+        #expect(try await git.untrackedFiles(under: ["pkg"], repositoryRoot: directory) == ["pkg/a.txt"])
+        #expect(try await git.untrackedFiles(under: ["build", "debug.log"], ignored: true, repositoryRoot: directory) == ["build/out.o", "debug.log"])
+
+        try await git.add(paths: ["pkg/a.txt"], repositoryRoot: directory)
+        try await git.add(paths: ["build/out.o", "debug.log"], force: true, repositoryRoot: directory)
+        let added = try await git.snapshot(repositoryRoot: directory)
+        let kinds = Dictionary(uniqueKeysWithValues: added.changes.map { ($0.path, $0.kind) })
+        #expect(kinds["pkg/a.txt"] == .added && kinds["build/out.o"] == .added && kinds["debug.log"] == .added)
+        // 目录里被忽略的文件没被顺手带进来
+        #expect(kinds["pkg/b.log"] == nil)
+
+        // 撤销：从索引里撤下来，磁盘上的文件还在，状态回到未跟踪 / 被忽略
+        try await git.unstage(paths: ["pkg/a.txt", "build/out.o", "debug.log"], repositoryRoot: directory)
+        let undone = try await git.snapshot(repositoryRoot: directory)
+        #expect(undone.changes.map(\.path) == ["pkg/a.txt"])
+        #expect(undone.changes.first?.kind == .untracked)
+        #expect(undone.ignored.sorted() == ["build/", "debug.log", "pkg/b.log"])
+        #expect(FileManager.default.fileExists(atPath: directory.appendingPathComponent("build/out.o").path))
+    }
+}
+
+/// 路径多到超过 argv 上限时分几批跑（被忽略的 node_modules 底下几万个文件是常态）。
+@Test func addAndUnstageRunInBatches() async throws {
+    try await withTemporaryDirectory { repo in
+        let runner = FakeCommandRunner { _, _ in shellOutput("") }
+        let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
+        let paths = (0..<1100).map { String(format: "node_modules/p%04d.js", $0) }
+        try await git.add(paths: paths, force: true, repositoryRoot: repo)
+        let adds = runner.calls(startingWith: "add")
+        #expect(adds.count == 3)
+        #expect(adds.allSatisfy { $0.prefix(3) == ["add", "--force", "--"] })
+        // 每一批都排过序，合起来正好是全部路径，一个不多一个不少
+        #expect(adds.flatMap { $0.dropFirst(3) } == paths.sorted())
+        #expect(adds.map { $0.count - 3 } == [512, 512, 76])
+
+        try await git.unstage(paths: paths, repositoryRoot: repo)
+        #expect(runner.calls(startingWith: "rm").count == 3)
+    }
+}
+
 @Test func commitAndPushArguments() async throws {
     try await withTemporaryDirectory { repo in
         try "a".write(to: repo.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
@@ -202,7 +270,7 @@ import TestSupport
         return shellOutput("")
     }
     let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
-    let commit = GitCommit(hash: "abc", shortHash: "abc", parents: ["p1"], authorName: "", authorEmail: "", date: Date(), subject: "", body: "")
+    let commit = GitCommit(hash: "abc", shortHash: "abc", parents: ["p1"], authorName: "", authorEmail: "", authorDate: Date(), subject: "", body: "")
     try await git.revert(change: GitChange(path: "x", originalPath: "old", kind: .renamed), in: commit, repositoryRoot: repo)
     #expect(runner.calls[0].arguments == ["diff", "--binary", "--no-color", "--no-ext-diff", "--find-renames", "p1", "abc", "--", "x", "old"])
     #expect(runner.calls[1].arguments.prefix(3) == ["apply", "--reverse", "--whitespace=nowarn"])

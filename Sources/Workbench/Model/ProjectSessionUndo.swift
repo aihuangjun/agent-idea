@@ -1,7 +1,7 @@
 import Core
 import Foundation
 
-/// 文件操作的撤销 / 重做（IDEA 的 Undo / Redo 里编辑之外的那部分）：重命名、移动、删除、回滚。
+/// 文件操作的撤销 / 重做（IDEA 的 Undo / Redo 里编辑之外的那部分）：重命名、移动、删除、回滚、添加到 git。
 /// 栈是 `UndoHistory`（Core，纯逻辑）；这里管每一种操作怎么撤、怎么重做，以及撤不成时怎么说。
 /// 撤销前先核对磁盘：这中间文件被删了、改名了、原位置被别的东西占了，就报错并把这一步丢掉（留着下次还是撤不成）。
 extension ProjectSession {
@@ -86,6 +86,17 @@ extension ProjectSession {
             return .done(entry)
         case .rollback(let change, let backup):
             return await restoreRolledBack(entry, change: change, backup: backup)
+        case .addToGit(let untracked, let ignored):
+            guard let commit else { return .failed("没有 git 仓库") }
+            do {
+                try await commit.unstage(paths: untracked + ignored)
+            } catch {
+                Log.warn("git", "撤销添加到 git 失败：\(error)")
+                return .failed(error.userFacingDescription)
+            }
+            Log.info("git", "已把 \(untracked.count + ignored.count) 个文件从索引里撤下来")
+            refreshAll()
+            return .done(entry)
         case .createFolder(let url):
             guard entryExists(url.path) else { return .failed("\(url.lastPathComponent) 已经不在了") }
             guard (try? fileManager.contentsOfDirectory(atPath: url.path))?.isEmpty == true else { return .failed("里面已经有东西了") }
@@ -172,6 +183,17 @@ extension ProjectSession {
             var updated = entry
             updated.kind = .rollback(change: change, backup: backup)
             return .done(updated)
+        case .addToGit(let untracked, let ignored):
+            guard let commit else { return .failed("没有 git 仓库") }
+            do {
+                if !untracked.isEmpty { try await commit.add(paths: untracked, force: false) }
+                if !ignored.isEmpty { try await commit.add(paths: ignored, force: true) }
+            } catch {
+                Log.warn("git", "重做添加到 git 失败：\(error)")
+                return .failed(error.userFacingDescription)
+            }
+            refreshAll()
+            return .done(entry)
         case .createFolder(let url):
             if let failure = performCreateFolder(at: url) { return .failed(failure) }
             return .done(entry)

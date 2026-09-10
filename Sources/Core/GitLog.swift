@@ -8,24 +8,31 @@ public struct GitCommit: Equatable, Hashable, Sendable, Identifiable {
     public let parents: [String]
     public let authorName: String
     public let authorEmail: String
-    public let date: Date
+    /// 作者写下这次改动的时间（`%at`）。rebase / cherry-pick 会保留它，所以它可能比提交落到本仓库的时间早很多。
+    public let authorDate: Date
+    /// 这次提交落到本仓库的时间（`%ct`）。`git log` 就是按它从新到旧排的，历史列表显示的也是它。
+    public let commitDate: Date
     /// 第一行。
     public let subject: String
     /// 第一行之后的正文，已去掉首尾空白；没有则为空串。
     public let body: String
 
-    public init(hash: String, shortHash: String, parents: [String], authorName: String, authorEmail: String, date: Date, subject: String, body: String) {
+    public init(hash: String, shortHash: String, parents: [String], authorName: String, authorEmail: String, authorDate: Date, commitDate: Date? = nil, subject: String, body: String) {
         self.hash = hash
         self.shortHash = shortHash
         self.parents = parents
         self.authorName = authorName
         self.authorEmail = authorEmail
-        self.date = date
+        self.authorDate = authorDate
+        self.commitDate = commitDate ?? authorDate
         self.subject = subject
         self.body = body
     }
 
     public var isMerge: Bool { parents.count > 1 }
+
+    /// 作者时间与提交时间差得够多（一分钟以上）才值得在详情里分开说；平时两者一样。
+    public var authorDateDiffers: Bool { abs(authorDate.timeIntervalSince(commitDate)) >= 60 }
 
     /// 拿来算这次提交改了什么的基准：第一个父提交；根提交对比空树。
     public var diffBase: String { parents.first ?? GitClient.emptyTree }
@@ -34,8 +41,8 @@ public struct GitCommit: Equatable, Hashable, Sendable, Identifiable {
 /// `git log -z --format=<logFormat>` 的解析。记录之间以 NUL 分隔（`-z`），字段之间以 0x1F（单元分隔符）分隔——
 /// 提交信息里什么字符都可能有，唯独这两个控制字符不会出现。
 public enum GitLogParser {
-    /// 字段顺序：全 hash、短 hash、父提交（空格分隔）、作者名、作者邮箱、作者时间（unix 秒）、主题、正文。
-    public static let format = "%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%s%x1f%b"
+    /// 字段顺序：全 hash、短 hash、父提交（空格分隔）、作者名、作者邮箱、作者时间（unix 秒）、提交时间（unix 秒）、主题、正文。
+    public static let format = "%H%x1f%h%x1f%P%x1f%an%x1f%ae%x1f%at%x1f%ct%x1f%s%x1f%b"
     static let fieldSeparator: Character = "\u{1f}"
 
     public static func parse(_ data: Data) -> [GitCommit] {
@@ -44,19 +51,21 @@ public enum GitLogParser {
 
     public static func parse(_ text: String) -> [GitCommit] {
         text.split(separator: "\0", omittingEmptySubsequences: true).compactMap { record in
-            let fields = record.split(separator: fieldSeparator, maxSplits: 7, omittingEmptySubsequences: false).map(String.init)
-            guard fields.count >= 7, !fields[0].isEmpty else { return nil }
+            let fields = record.split(separator: fieldSeparator, maxSplits: 8, omittingEmptySubsequences: false).map(String.init)
+            guard fields.count >= 8, !fields[0].isEmpty else { return nil }
             let parents = fields[2].split(separator: " ").map(String.init)
-            let seconds = TimeInterval(fields[5].trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
-            let body = fields.count > 7 ? fields[7].trimmingCharacters(in: .whitespacesAndNewlines) : ""
+            let authorSeconds = TimeInterval(fields[5].trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            let commitSeconds = TimeInterval(fields[6].trimmingCharacters(in: .whitespacesAndNewlines)) ?? authorSeconds
+            let body = fields.count > 8 ? fields[8].trimmingCharacters(in: .whitespacesAndNewlines) : ""
             return GitCommit(
                 hash: fields[0].trimmingCharacters(in: .whitespacesAndNewlines),
                 shortHash: fields[1],
                 parents: parents,
                 authorName: fields[3],
                 authorEmail: fields[4],
-                date: Date(timeIntervalSince1970: seconds),
-                subject: fields[6],
+                authorDate: Date(timeIntervalSince1970: authorSeconds),
+                commitDate: Date(timeIntervalSince1970: commitSeconds),
+                subject: fields[7],
                 body: body
             )
         }

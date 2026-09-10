@@ -17,7 +17,7 @@ private func waitUntil(_ timeout: TimeInterval = 10, _ condition: @MainActor () 
 
 private let us = "\u{1f}"
 private func logRecord(_ hash: String, parents: String, subject: String) -> String {
-    [hash, String(hash.prefix(7)), parents, "Alice", "a@x.io", "1725000000", subject, ""].joined(separator: us) + "\0"
+    [hash, String(hash.prefix(7)), parents, "Alice", "a@x.io", "1725000000", "1725000000", subject, ""].joined(separator: us) + "\0"
 }
 
 @Test @MainActor func historyLoadsPagesSelectsAndOpensCommitDiff() async throws {
@@ -62,7 +62,7 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
         await waitUntil { !history.commits.isEmpty && !history.isLoading }
         #expect(history.commits.count == HistoryController.pageSize)
         #expect(history.hasMore)
-        #expect(runner.calls(startingWith: "log").last == ["log", "-z", "--format=" + GitLogParser.format, "-n", "100"])
+        #expect(runner.calls(startingWith: "log").last == ["log", "--date-order", "-z", "--format=" + GitLogParser.format, "-n", "100"])
 
         history.loadMore()
         await waitUntil { history.commits.count > HistoryController.pageSize }

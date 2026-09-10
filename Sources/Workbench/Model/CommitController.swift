@@ -141,6 +141,23 @@ final class CommitController: ObservableObject {
         try await git.stage(paths: paths, repositoryRoot: repositoryRoot)
     }
 
+    // MARK: - 添加到 git（目录树右键）
+
+    /// 这些路径下 git 还不认识的文件，逐个列出来（`ignored` 为 true 时列被忽略的那些）。
+    func untrackedFiles(under paths: [String], ignored: Bool) async throws -> [String] {
+        try await git.untrackedFiles(under: paths, ignored: ignored, repositoryRoot: repositoryRoot)
+    }
+
+    /// 纳入版本管理。被忽略的路径要 `force`。
+    func add(paths: [String], force: Bool) async throws {
+        try await git.add(paths: paths, force: force, repositoryRoot: repositoryRoot)
+    }
+
+    /// 撤销「添加到 git」：从索引里撤下来，磁盘上的文件不动。
+    func unstage(paths: [String]) async throws {
+        try await git.unstage(paths: paths, repositoryRoot: repositoryRoot)
+    }
+
     /// 能不能删：磁盘上还有文件才行（「已删除」的变更没有东西可删）。
     func canDelete(_ change: GitChange) -> Bool { change.kind != .deleted }
 

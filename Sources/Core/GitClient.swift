@@ -111,11 +111,12 @@ public struct GitClient: Sendable {
 
     // MARK: - 提交历史
 
-    /// 当前分支的提交，新的在前。`skip` 用来翻页。仓库还没有提交时返回空数组。
+    /// 当前分支的提交，新的在前（按提交时间 `%ct`，与界面上显示的时间一致）。`skip` 用来翻页。仓库还没有提交时返回空数组。
     public func log(repositoryRoot: URL, limit: Int, skip: Int = 0) async throws -> [GitCommit] {
         // 只有第一页需要先确认有 HEAD（没有提交时 git log 会报错）；翻页时第一页已经证明有了
         if skip == 0, !(await hasHead(repositoryRoot: repositoryRoot)) { return [] }
-        var arguments = ["log", "-z", "--format=" + GitLogParser.format, "-n", String(limit)]
+        // --date-order：明确按提交时间排，且子提交永远排在父提交前面（拉回来的分支时间戳交错时不至于乱序）
+        var arguments = ["log", "--date-order", "-z", "--format=" + GitLogParser.format, "-n", String(limit)]
         if skip > 0 { arguments += ["--skip", String(skip)] }
         let output = try await run(arguments, in: repositoryRoot)
         return GitLogParser.parse(output.standardOutput)
@@ -239,6 +240,52 @@ public struct GitClient: Sendable {
     /// 回滚一个「新增」（在索引里、不在 HEAD 里）的文件：从索引和工作区一起删掉。IDEA 对 Added 的回滚也是删文件。
     public func removeAdded(path: String, repositoryRoot: URL) async throws {
         _ = try await run(["rm", "-f", "-q", "--", path], in: repositoryRoot)
+    }
+
+    /// 一个路径（文件或目录）下 git 还不认识的**文件**，逐个列出、不折成目录（`ls-files --others`）。
+    ///
+    /// `ignored` 为 false 时列的是未跟踪的（被 `.gitignore` 挡掉的不在里面），为 true 时反过来只列被忽略的。
+    /// 已跟踪的文件一个都不会出现在结果里——所以拿它算出来的路径可以放心 `add`，也可以放心在撤销时从索引里撤下来，
+    /// 不会连累目录里本来就跟踪着的文件。
+    public func untrackedFiles(under paths: [String], ignored: Bool = false, repositoryRoot: URL) async throws -> [String] {
+        precondition(!paths.isEmpty)
+        // --ignored 必须配合 --exclude-standard（git 要求给出忽略规则的来源）
+        var arguments = ["ls-files", "-z", "--others", "--exclude-standard"]
+        if ignored { arguments.append("--ignored") }
+        arguments += ["--"] + paths
+        let output = try await run(arguments, in: repositoryRoot)
+        let listed = String(decoding: output.standardOutput, as: UTF8.self)
+            .split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
+        return Array(Set(listed)).sorted()
+    }
+
+    /// 把这些路径纳入版本管理（`git add`，IDEA 的 Add to VCS）。
+    /// `force` 是给被 `.gitignore` 忽略的路径用的——不加 `-f` 时 git 直接拒绝整条命令（退出码 1，一个都不会加）。
+    /// 别把 `force` 用在未跟踪的目录上：那会把目录里本该被忽略的东西（`node_modules` 之类）一起拖进来。
+    public func add(paths: [String], force: Bool = false, repositoryRoot: URL) async throws {
+        precondition(!paths.isEmpty)
+        for batch in Self.batches(of: paths) {
+            var arguments = ["add"]
+            if force { arguments.append("--force") }
+            arguments += ["--"] + batch
+            _ = try await run(arguments, in: repositoryRoot)
+        }
+    }
+
+    /// 把这些路径从索引里撤下来，工作区的文件不动（撤销「添加到 git」）：它们回到未跟踪 / 被忽略的样子。
+    /// 只对刚加进来、HEAD 里还没有的文件用——已跟踪的文件这么做等于把它从版本管理里摘出去。
+    public func unstage(paths: [String], repositoryRoot: URL) async throws {
+        precondition(!paths.isEmpty)
+        for batch in Self.batches(of: paths) {
+            _ = try await run(["rm", "--cached", "--ignore-unmatch", "--quiet", "--"] + batch, in: repositoryRoot)
+        }
+    }
+
+    /// 去重、排序，再切成几段跑：一个被忽略的目录（`node_modules`）底下几万个文件一次全塞进 argv 会超过系统上限
+    /// （macOS 的 ARG_MAX 是 1MB），git 还没开始跑就 E2BIG 失败了。
+    static func batches(of paths: [String], size: Int = 512) -> [[String]] {
+        let unique = Array(Set(paths)).sorted()
+        return stride(from: 0, to: unique.count, by: size).map { Array(unique[$0..<min($0 + size, unique.count)]) }
     }
 
     /// 把这些路径在工作区里的样子记进索引（`add -A`：新增、修改、删除都记）。撤销「回滚」时用来把新增 / 重命名的状态放回去，

@@ -7,15 +7,20 @@ private let us = "\u{1f}"
 
 @Test func logParserSplitsRecordsAndFields() {
     let text = [
-        ["aaaa1111", "aaaa111", "bbbb2222 cccc3333", "张三", "zs@example.com", "1725000000", "合并 feature", "正文第一行\n\n第二段\n"].joined(separator: us),
-        ["bbbb2222", "bbbb222", "", "Alice", "a@x.io", "1724000000", "initial: 带 \"引号\" 与 / 斜杠", ""].joined(separator: us),
+        ["aaaa1111", "aaaa111", "bbbb2222 cccc3333", "张三", "zs@example.com", "1725000000", "1725014400", "合并 feature", "正文第一行\n\n第二段\n"].joined(separator: us),
+        ["bbbb2222", "bbbb222", "", "Alice", "a@x.io", "1724000000", "1724000000", "initial: 带 \"引号\" 与 / 斜杠", ""].joined(separator: us),
     ].joined(separator: "\0") + "\0"
     let commits = GitLogParser.parse(text)
     #expect(commits.count == 2)
     #expect(commits[0].hash == "aaaa1111" && commits[0].shortHash == "aaaa111")
     #expect(commits[0].parents == ["bbbb2222", "cccc3333"] && commits[0].isMerge)
     #expect(commits[0].authorName == "张三" && commits[0].authorEmail == "zs@example.com")
-    #expect(commits[0].date == Date(timeIntervalSince1970: 1_725_000_000))
+    // 作者时间与提交时间分开：rebase 过的提交两者能差出好几个小时，列表按提交时间排也按它显示
+    #expect(commits[0].authorDate == Date(timeIntervalSince1970: 1_725_000_000))
+    #expect(commits[0].commitDate == Date(timeIntervalSince1970: 1_725_014_400))
+    #expect(commits[0].authorDateDiffers)
+    #expect(commits[1].commitDate == Date(timeIntervalSince1970: 1_724_000_000))
+    #expect(!commits[1].authorDateDiffers)
     #expect(commits[0].subject == "合并 feature")
     #expect(commits[0].body == "正文第一行\n\n第二段")
     #expect(commits[0].diffBase == "bbbb2222")
@@ -55,7 +60,7 @@ private let us = "\u{1f}"
     let commits = try await git.log(repositoryRoot: repo, limit: 50)
     #expect(commits.map(\.hash) == ["abc"])
     #expect(runner.calls[0].arguments == ["rev-parse", "--verify", "-q", "HEAD"])
-    #expect(runner.calls[1].arguments == ["log", "-z", "--format=" + GitLogParser.format, "-n", "50"])
+    #expect(runner.calls[1].arguments == ["log", "--date-order", "-z", "--format=" + GitLogParser.format, "-n", "50"])
     let files = try await git.changedFiles(in: commits[0], repositoryRoot: repo)
     #expect(files.map(\.path) == ["a.swift"])
     #expect(runner.calls[2].arguments == ["diff", "--name-status", "-z", "--find-renames", GitClient.emptyTree, "abc"])
@@ -65,7 +70,7 @@ private let us = "\u{1f}"
     // 翻页：第一页已经证明有 HEAD，不再 rev-parse
     let paging = FakeCommandRunner(responses: [shellOutput(record)])
     _ = try await GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: paging).log(repositoryRoot: repo, limit: 50, skip: 100)
-    #expect(paging.calls.map(\.arguments) == [["log", "-z", "--format=" + GitLogParser.format, "-n", "50", "--skip", "100"]])
+    #expect(paging.calls.map(\.arguments) == [["log", "--date-order", "-z", "--format=" + GitLogParser.format, "-n", "50", "--skip", "100"]])
 
     // 没有提交的仓库：不跑 log，直接空
     let unborn = FakeCommandRunner(responses: [shellOutput("", status: 1)])

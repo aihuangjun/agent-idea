@@ -36,10 +36,13 @@ private struct HistoryBody: View {
                 }
                 // 刷新 = 与远程同步后再重拉：只重列本地的 log 看不到别人刚推上去的提交。
                 // 同步不了的仓库（没上游、还没有提交）退回本地刷新，按钮照样能用。
-                IconButton("arrow.clockwise",
-                           help: session.canSyncWithRemote ? "与远程同步并刷新：git fetch + rebase" : "刷新（当前分支没有跟踪远程分支，只重列本地提交）",
+                // 图标跟着实际做的事走：真去拉远程时用项目工具窗口那个同步图标，退回本地刷新时才是转圈箭头。
+                // 看的是 hasRemoteUpstream 而不是 canSyncWithRemote：后者在同步进行中是 false，
+                // 按它画的话同步那几秒按钮会变成另一个图标 + 另一套说明（按钮此时只该灰着）
+                IconButton(session.hasRemoteUpstream ? ToolWindowIcon.syncWithRemote : ToolWindowIcon.refresh,
+                           help: session.hasRemoteUpstream ? "与远程同步并刷新：git fetch + rebase" : "刷新（当前分支没有跟踪远程分支，只重列本地提交）",
                            size: 22) {
-                    if session.canSyncWithRemote { session.syncWithRemote() } else { history.refresh() }
+                    if session.hasRemoteUpstream { session.syncWithRemote() } else { history.refresh() }
                 }
                     .disabled(session.isSyncingRemote)
             }
@@ -149,7 +152,7 @@ private struct CommitRow: View {
             HStack(spacing: 4) {
                 Text(commit.authorName).lineLimit(1)
                 Text("·")
-                Text(DateText.relative(commit.date)).fixedSize()
+                Text(DateText.relative(commit.commitDate)).fixedSize()
                 Spacer(minLength: 0)
             }
             .font(Theme.smallFont).foregroundStyle(Theme.mutedText)
@@ -183,7 +186,11 @@ private struct CommitDetails: View {
                     HStack(spacing: 6) {
                         Text(commit.authorName).help(commit.authorEmail)
                         Text("·")
-                        Text(DateText.full(commit.date))
+                        Text(DateText.full(commit.commitDate))
+                        if commit.authorDateDiffers {
+                            // rebase / cherry-pick 过的提交，作者时间和落库时间对不上：两个都给出来，省得看着像排错了序
+                            Text("（编写于 \(DateText.full(commit.authorDate))）")
+                        }
                         Text("·")
                         Text(commit.shortHash).font(.system(size: 11, design: .monospaced)).help(commit.hash).textSelection(.enabled)
                     }
