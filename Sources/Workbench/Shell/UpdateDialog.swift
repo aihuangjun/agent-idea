@@ -44,8 +44,11 @@ private struct UpdateSheet: View {
                 Text("当前版本 \(updater.build.display)").foregroundStyle(Theme.secondaryText)
                 buttons { Button("好") { updater.dismiss() }.keyboardShortcut(.defaultAction) }
             case .available(let manifest):
-                header("有新版本 \(manifest.version)")
-                Text("当前 \(updater.currentVersion) · 安装包 \(manifest.displaySize)").foregroundStyle(Theme.secondaryText)
+                // 同版本号时装的是这一版的正式包（手上是本地构建），别写成「有新版本 X」——版本号一模一样，看着莫名其妙
+                let isSameVersion = manifest.version == updater.currentVersion
+                header(isSameVersion ? "有 \(manifest.version) 的正式包" : "有新版本 \(manifest.version)")
+                Text("当前 \(isSameVersion ? updater.build.display : updater.currentVersion) · 安装包 \(manifest.displaySize)")
+                    .foregroundStyle(Theme.secondaryText)
                 if let notes = manifest.notes, !notes.isEmpty {
                     ScrollView {
                         Text(notes).font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading)

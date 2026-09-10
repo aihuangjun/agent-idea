@@ -67,7 +67,9 @@ scripts/release.sh 0.3.0 --local    # 只打到 dist/，不动仓库
 ```
 
 历史版本都在仓库的 [Releases](https://github.com/aihuangjun/agent-idea/releases)（tag `vX.Y.Z`，dmg 作附件）。
-应用里「Agent IDEA → 检查更新…」读的就是最新那个 Release。仓库现在是公开的，更新不需要凭据；
+应用里「Agent IDEA → 检查更新…」读的就是最新那个 Release。本地 `scripts/build_app.sh` 装的是 debug 渠道包：
+版本号与线上正式包相同时，只有你自己点「检查更新…」才会提示装正式包，后台的自动检查不会把它换掉
+（不然刚构建出来要验的那份会在启动后几十秒里被悄悄替换）。仓库现在是公开的，更新不需要凭据；
 若改回私有，更新器按 `~/.agentidea/github_token` → `GITHUB_TOKEN`/`GH_TOKEN` → 本机 `gh auth token` 的顺序找。
 
 ## 结构

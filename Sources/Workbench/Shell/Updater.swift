@@ -56,7 +56,7 @@ final class Updater: ObservableObject {
         defaults.set(Date(), forKey: lastCheckKey)
         do {
             let manifest = try await fetchManifest()
-            guard UpdatePolicy.hasUpdate(manifest: manifest, current: build) else {
+            guard UpdatePolicy.hasUpdate(manifest: manifest, current: build, userInitiated: isUserInitiated) else {
                 phase = .upToDate
                 return
             }

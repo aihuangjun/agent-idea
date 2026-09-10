@@ -29,8 +29,15 @@ import Testing
     #expect(UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.1.0", channel: .release)))
     #expect(!UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.2.0", channel: .release)))
     #expect(!UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.3.0", channel: .debug)))
-    #expect(UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.2.0", channel: .debug)), "同版本号的本地构建要能升到正式包")
     #expect(!UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "garbage", channel: .debug)))
+    // 同版本号的本地构建：手动检查时能升到正式包，后台自动检查不碰它（不然刚装上要验的本地包会被悄悄换掉）
+    #expect(UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.2.0", channel: .debug), userInitiated: true))
+    #expect(!UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.2.0", channel: .debug)))
+    // 真的更新（远程版本更高）不分手动自动，一律提示
+    #expect(UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.1.0", channel: .debug)))
+    #expect(UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.1.0", channel: .release), userInitiated: true))
+    // 同版本号的正式包不会自我更新，手动检查也一样
+    #expect(!UpdatePolicy.hasUpdate(manifest: manifest, current: BuildIdentity(version: "0.2.0", channel: .release), userInitiated: true))
     #expect(manifest.displaySize == "1.0 MB")
 
     let now = Date()

@@ -101,11 +101,14 @@ public enum UpdatePolicy {
     }
 
     /// 版本号解析不出来时一律判为「没有更新」：宁可不提示，也不能凭一个坏清单把用户在用的版本换掉。
-    /// 本地迭代中的构建（`debug` 渠道）遇到**同一个版本号**的正式发布也算有更新：`0.6.0(…-debug)` 应该能升到发出去的 0.6.0，
-    /// 否则装着 debug 包的机器在这一版永远「已是最新」。
-    public static func hasUpdate(manifest: UpdateManifest, current: BuildIdentity) -> Bool {
+    ///
+    /// 本地迭代中的构建（`debug` 渠道）遇到**同一个版本号**的正式发布也算有更新——`1.1.0(…-debug)` 应该能升到发出去的
+    /// 1.1.0，否则装着 debug 包的机器在这一版永远「已是最新」——但**只在用户自己点「检查更新…」时**才这么算
+    /// （`userInitiated`）。后台那次一天一回的自动检查不碰它：刚 `scripts/build_app.sh` 装上、正拿来验收的本地包，
+    /// 会在启动后几十秒内被同版本的线上包悄悄换掉，验的就不是手上这份代码了（1.1.1 修的，真踩过）。
+    public static func hasUpdate(manifest: UpdateManifest, current: BuildIdentity, userInitiated: Bool = false) -> Bool {
         guard let remote = manifest.parsedVersion, let currentVersion = AppVersion(current.version) else { return false }
         if remote > currentVersion { return true }
-        return remote == currentVersion && current.channel == .debug
+        return userInitiated && remote == currentVersion && current.channel == .debug
     }
 }
