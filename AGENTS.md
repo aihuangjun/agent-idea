@@ -32,7 +32,8 @@ scripts/fetch_vendor.sh         # 仅升级前端离线依赖时（需联网）
 - **executable target 里一行逻辑都不放**——SwiftPM 测不了它。
 - **`runModal()` 只允许出现在 `WorkbenchView` 选目录那一处**，别处会让测试整体挂住（有架构测试守着）。
 - **模型测试用假的 `CommandRunning`**，不真起 git；只有 `realGitEndToEnd` 一条真跑系统 git，找不到 git 时跳过。
-- **测试是并行跑的，别在 `@MainActor` 测试里死转 run loop**：离屏合成事件之后要等，就用「转 10ms → `await Task.yield()`」的循环并带上提前退出的条件（`ToolTipClickTests.settle`、`TreeInteractionTests` 的 `settle`）。一口气 `RunLoop.main.run` 半秒会把别的 `@MainActor` 测试饿住，表现是一批 `waitUntil` 莫名超时——单独跑又都过。同理别为了一条用例多起 WKWebView（`RenderTests` 的浅色那条把切换前后的值在同一页里读两次）。各测试文件里的 `waitUntil` 默认等 10 秒也是为这个：条件一成立就返回，等得宽只影响真失败的用例。
+- **测试是并行跑的，别在 `@MainActor` 测试里死转 run loop**：离屏合成事件之后要等，就用「转 10ms → `await Task.yield()`」的循环并带上提前退出的条件（`ToolTipClickTests.settle`、`TreeInteractionTests` 的 `settle`）。一口气 `RunLoop.main.run` 半秒会把别的 `@MainActor` 测试饿住，表现是一批 `waitUntil` 莫名超时——单独跑又都过。同理别为了一条用例多起 WKWebView（`RenderTests` 的浅色那条把切换前后的值在同一页里读两次）。各测试文件里的 `waitUntil` 默认等 10 秒也是为这个：条件一成立就返回，等得宽只影响真失败的用例。**别在测试里写固定时长的等待**（`Task.sleep(500ms)`、`spin(0.25)` 这种）：忙的时候不够用，闲的时候白等——一律换成「等到条件成立，最多 N 秒」。
+- **用 `applyEdit` 伪造编辑、又要断言磁盘内容的用例，会话必须是「非当前」**（`setActive(false)`，或者干脆别 `setActive(true)`）：当前会话的 ⌘S / 关标签 / 重命名前的 `saveAll` 都会先 `renderer.currentState` 向 WebView 要一次编辑器里的最新文字（真实场景里编辑器才是文字的源头），而伪造的编辑页面并不知道——WebView 恰好在这几拍里加载完，就会拿页面里的旧文字把刚写的草稿盖回去，表现是「保存后磁盘上应该是 v4」偶发失败。切换要赶在开标签之前：那时 `activeTabID` 还是空的，`setActive(false)` 自己不会触发往返。
 - **正文渲染与编辑都在 WebView 里**（代码、Markdown、diff、图片；可编辑的代码 / Markdown 源码用 CodeMirror 5，只读的走静态视图）。契约的 Swift 事实源是 `DesignSystem/RenderPayload`（键名只在它的 `encode` 里出现一次），render.js 顶部注释是另一份，改一边必须改另一边；`DesignSystemTests` 会真起 WKWebView 渲染一遍核对。
 
 ## 几个容易踩的点

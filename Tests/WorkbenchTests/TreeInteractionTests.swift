@@ -75,17 +75,26 @@ import TestSupport
 @Test @MainActor func springLoadingFiresAfterHoveringLongEnough() async {
     // 别在主线程上转太久：并发跑的别的测试等 git 的期限会被耗掉
     let original = TreeRowInteraction.View.springLoadDelay
-    TreeRowInteraction.View.springLoadDelay = 0.1
+    // 0.3 秒而不是 0.1：下面「停得不够久」那一段要明显短于它。机器忙的时候 RunLoop 转一小会儿也可能拖长，
+    // 阈值太小的话那一段会意外跨过定时器，用例反过来红
+    TreeRowInteraction.View.springLoadDelay = 0.3
     defer { TreeRowInteraction.View.springLoadDelay = original }
     let expanded = Locked(0)
     let view = TreeRowInteraction.View(configuration: TreeRowInteraction(dropCheck: { _ in true }, springLoad: { expanded.value += 1 }))
     view.setTargeted(true)
-    spin(0.03)
+    spin(0.05)
     view.setTargeted(false)
-    spin(0.15)
+    spin(0.4)
     #expect(expanded.value == 0, "停得不够久就离开了")
+
     view.setTargeted(true)
-    spin(0.25, mode: .eventTracking)
+    // 等它响，最多 5 秒（原来固定转 0.25 秒：并行跑的时候这一拍常常迟到，用例就红了）。
+    // 转一小段就 yield 一次，别把别的 @MainActor 测试饿住
+    let deadline = Date().addingTimeInterval(5)
+    while expanded.value == 0, Date() < deadline {
+        spin(0.02, mode: .eventTracking)
+        await Task.yield()
+    }
     #expect(expanded.value == 1, "拖拽的事件循环模式下要响")
     view.setTargeted(false)
     spin(0.2)
@@ -209,7 +218,6 @@ import TestSupport
         window.orderBack(nil)
         window.layoutIfNeeded()
         hosting.layoutSubtreeIfNeeded()
-        try await Task.sleep(nanoseconds: 500_000_000)
         defer { window.orderOut(nil) }
 
         func find<T: NSView>(_: T.Type, in view: NSView) -> T? {
@@ -217,7 +225,18 @@ import TestSupport
             for child in view.subviews { if let match = find(T.self, in: child) { return match } }
             return nil
         }
+        // 等 SwiftUI 把行摆出来、内容比视野高（有得滚才谈得上自动滚动）。
+        // 原来是硬睡 500ms：机器忙起来不够用，行还没摆完就开始滚，滚不到底
+        let laidOut = Date().addingTimeInterval(10)
+        while Date() < laidOut {
+            hosting.layoutSubtreeIfNeeded()
+            if let scroll = find(NSScrollView.self, in: hosting),
+               (scroll.documentView?.bounds.height ?? 0) > scroll.contentView.bounds.height + 100 { break }
+            spin(0.02)
+            await Task.yield()
+        }
         let scrollView = try #require(find(NSScrollView.self, in: hosting))
+        #expect((scrollView.documentView?.bounds.height ?? 0) > scrollView.contentView.bounds.height + 100, "内容要比视野高才有得滚")
         let clip = scrollView.contentView
         /// 视野离文档顶端 / 底端还有多远（视觉上的，与坐标系翻不翻转无关）。
         func distanceFromTop() -> CGFloat {
@@ -228,7 +247,8 @@ import TestSupport
             let document = clip.documentView?.bounds ?? .zero
             return clip.isFlipped ? document.maxY - clip.documentVisibleRect.maxY : clip.documentVisibleRect.minY
         }
-        // 转一小段就 yield 一次：一口气转几秒会把并行跑的别的 @MainActor 测试饿住（见 AGENTS.md）
+        // 转一小段就 yield 一次：一口气转几秒会把并行跑的别的 @MainActor 测试饿住（见 AGENTS.md）。
+        // 超时给得宽（自动滚动是定时器驱动的，机器忙时每一拍都可能迟到），条件一成立就返回
         @MainActor func spinUntil(_ seconds: TimeInterval, _ done: () -> Bool) async {
             let deadline = Date().addingTimeInterval(seconds)
             while Date() < deadline, !done() {
@@ -252,23 +272,23 @@ import TestSupport
 
         // 贴着下边缘往下滚到底（内容高度是边滚边长的，到头那一拍不能停）
         autoscroll.start(in: scrollView)
-        await spinUntil(3) { distanceFromBottom() < 8 }
+        await spinUntil(10) { distanceFromBottom() < 8 }
         #expect(distanceFromBottom() < 8, "往下滚到头（差的那几个点是列表底部的内边距）")
         #expect(distanceFromTop() > 100)
         #expect(autoscroll.isRunning, "光标还贴着边就不停")
 
         // 光标挪到上边缘（甚至跑到列表上面一点，标题条上）：往上滚回顶
         cursor.value = NSPoint(x: frameInWindow.midX, y: frameInWindow.maxY + 10)
-        await spinUntil(3) { distanceFromTop() < 8 }
+        await spinUntil(10) { distanceFromTop() < 8 }
         #expect(distanceFromTop() < 8, "往上滚到头")
 
         // 光标回到中间：停；松开鼠标：停
         cursor.value = NSPoint(x: frameInWindow.midX, y: frameInWindow.midY)
-        await spinUntil(1) { !autoscroll.isRunning }
+        await spinUntil(5) { !autoscroll.isRunning }
         #expect(!autoscroll.isRunning)
         autoscroll.start(in: scrollView)
         mouseDown.value = false
-        await spinUntil(1) { !autoscroll.isRunning }
+        await spinUntil(5) { !autoscroll.isRunning }
         #expect(!autoscroll.isRunning)
     }
 }

@@ -16,8 +16,13 @@ private func waitUntil(_ timeout: TimeInterval = 10, _ condition: @MainActor () 
 }
 
 /// 一个有仓库的会话：status 报 m.txt 修改、n.txt 未跟踪、gone.txt 已删除；HEAD 里 m.txt 是 v1。
+///
+/// `active` 传 false 就是「这个项目不是当前项目」：**用 `applyEdit` 伪造编辑的用例要传 false**。
+/// 当前会话的 ⌘S / 关标签会先向 WebView 要一次编辑器里的最新文字（真实场景里编辑器才是文字的源头），
+/// 而伪造的编辑页面并不知道；WebView 恰好在这几拍里加载完，就会拿页面里的旧文字把刚写的草稿盖回去——
+/// 表现为「保存后磁盘上应该是 v4」偶发失败。草稿、落盘、标签生命周期都是模型这一层的事，与渲染无关。
 @MainActor
-private func makeSession(in directory: URL) -> (ProjectSession, FakeCommandRunner) {
+private func makeSession(in directory: URL, active: Bool = true) -> (ProjectSession, FakeCommandRunner) {
     let runner = FakeCommandRunner { arguments, _ in
         switch arguments.first {
         case "rev-parse" where arguments.contains("--show-toplevel"): return shellOutput(directory.path + "\n")
@@ -31,7 +36,7 @@ private func makeSession(in directory: URL) -> (ProjectSession, FakeCommandRunne
     }
     let session = ProjectSession(root: directory, git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner), renderer: ContentRenderer(),
                                  preferences: ReadingPreferences(defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!))
-    session.setActive(true)
+    session.setActive(active)
     return (session, runner)
 }
 
@@ -40,7 +45,8 @@ private func makeSession(in directory: URL) -> (ProjectSession, FakeCommandRunne
     try await withTemporaryDirectory { directory in
         let file = directory.appendingPathComponent("m.txt")
         try "v2\n".write(to: file, atomically: true, encoding: .utf8)
-        let (session, _) = makeSession(in: directory)
+        // 编辑是伪造的（applyEdit），所以会话不当「当前」：见 makeSession 的说明
+        let (session, _) = makeSession(in: directory, active: false)
         await waitUntil { session.changeGroups.total == 3 }
         let change = try #require(session.gitSnapshot.changes.first { $0.path == "m.txt" })
 
@@ -72,6 +78,7 @@ private func makeSession(in directory: URL) -> (ProjectSession, FakeCommandRunne
         #expect(session.isModified(diffTab))
         session.saveActiveTab()
         await waitUntil { session.drafts.isEmpty }
+        #expect(session.drafts.isEmpty, "⌘S 之后草稿应该已经落盘")
         #expect(try String(contentsOf: file, encoding: .utf8) == "v4\n")
 
         // 最后一个用文档的标签关掉：文档、基线一起释放
@@ -86,7 +93,8 @@ private func makeSession(in directory: URL) -> (ProjectSession, FakeCommandRunne
     try await withTemporaryDirectory { directory in
         let file = directory.appendingPathComponent("m.txt")
         try "v2\n".write(to: file, atomically: true, encoding: .utf8)
-        let (session, _) = makeSession(in: directory)
+        // 同样是伪造的编辑，同样不当「当前」
+        let (session, _) = makeSession(in: directory, active: false)
         await waitUntil { session.changeGroups.total == 3 }
         let change = try #require(session.gitSnapshot.changes.first { $0.path == "m.txt" })
         session.openDiff(change, pinned: true)

@@ -536,6 +536,10 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         let workbench = makeWorkbench(in: directory, git: runner)
         workbench.openProject(directory)
         let session = try #require(workbench.active)
+        // 编辑是用 applyEdit 伪造的，而这条用例要断言磁盘上的内容：把会话切成「非当前」，别让 WebView 掺和进来。
+        // 当前会话保存前会先向编辑器要一次最新文字（真实场景里编辑器才是文字的源头），页面并不知道这次伪造的编辑，
+        // WebView 恰好在这几拍里加载完就会用页面里的旧文字把草稿盖回去。这里还没开标签，切换本身不会触发任何往返。
+        session.setActive(false)
         await waitUntil { session.commit != nil }
 
         session.openFile(file, pinned: true)
@@ -632,6 +636,8 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         let workbench = makeWorkbench(in: directory, git: runner)
         workbench.openProject(directory)
         let session = try #require(workbench.active)
+        // 同样：伪造的编辑 + 断言磁盘内容，会话不当「当前」（原因见上一条用例的注释）
+        session.setActive(false)
         await waitUntil { session.changeGroups.total == 1 }
         let change = try #require(session.gitSnapshot.changes.first)
 

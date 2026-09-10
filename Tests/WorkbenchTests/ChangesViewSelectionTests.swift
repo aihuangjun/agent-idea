@@ -33,7 +33,9 @@ import TestSupport
         let session = ProjectSession(root: directory, git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner), renderer: ContentRenderer(),
                                      preferences: ReadingPreferences(defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!))
         session.setActive(true)
-        let deadline = Date().addingTimeInterval(3)
+        // 等 git 状态回来。超时给到 10 秒：测试是并行跑的，几十个 WKWebView / 离屏窗口一起挤主线程时
+        // 一次 status 排上几秒很正常（原来只等 3 秒，忙的时候这里会拿到空的变更列表）。条件一成立就往下走
+        let deadline = Date().addingTimeInterval(10)
         while session.changeGroups.total != 3, Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
         let tracked = session.changeGroups.tracked
         #expect(tracked.count == 2)

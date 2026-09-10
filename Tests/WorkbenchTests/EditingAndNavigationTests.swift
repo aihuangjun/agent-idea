@@ -5,12 +5,15 @@ import Testing
 import TestSupport
 @testable import Workbench
 
+/// `active` 传 false 就是「这个项目不是当前项目」：**用 `applyEdit` 伪造编辑、又要断言磁盘内容的用例传 false**。
+/// 当前会话的 ⌘S / 关标签会先向 WebView 要一次编辑器里的最新文字（真实场景里编辑器才是文字的源头），
+/// 伪造的编辑页面并不知道，WebView 恰好在这几拍里加载完就会用页面里的旧文字把草稿盖回去。
 @MainActor
-private func makeSession(in directory: URL, git: FakeCommandRunner? = nil) -> ProjectSession {
+private func makeSession(in directory: URL, git: FakeCommandRunner? = nil, active: Bool = true) -> ProjectSession {
     let client = git.map { GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: $0) }
     let session = ProjectSession(root: directory, git: client, renderer: ContentRenderer(),
                                  preferences: ReadingPreferences(defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!))
-    session.setActive(true)
+    session.setActive(active)
     return session
 }
 
@@ -29,7 +32,8 @@ private func waitUntil(_ timeout: TimeInterval = 10, _ condition: @MainActor () 
     try await withTemporaryDirectory { directory in
         let file = directory.appendingPathComponent("a.txt")
         try "one\r\ntwo\r\n".write(to: file, atomically: true, encoding: .utf8)
-        let session = makeSession(in: directory)
+        // 编辑是伪造的（applyEdit）而这条用例要断言磁盘上的内容：会话不当「当前」，见 makeSession 的说明
+        let session = makeSession(in: directory, active: false)
         session.openFile(file, pinned: false)
         let tab = try #require(session.activeTab)
         #expect(session.isEditable(tab) && !session.isModified(tab))
