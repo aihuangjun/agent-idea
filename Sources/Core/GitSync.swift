@@ -57,6 +57,10 @@ public enum GitSyncError: Error, LocalizedError, Equatable {
     case unreadableDivergence(String)
     /// rebase 没走完（多半是冲突）。`recovered` 表示已经 `rebase --abort` 回到同步前的样子。
     case rebaseFailed(message: String, recovered: Bool)
+    /// `git fetch` 连续好几秒没有任何动静，被停掉了（仓库没动：拉下来的东西要到最后才落到引用上）。
+    case fetchStalled(seconds: Int)
+    /// `git push` 连续好几秒没有任何动静，被停掉了。
+    case pushStalled(seconds: Int)
 
     public var errorDescription: String? {
         switch self {
@@ -71,6 +75,10 @@ public enum GitSyncError: Error, LocalizedError, Equatable {
         case .rebaseFailed(let message, let recovered):
             let tail = recovered ? "已经回到同步前的状态，请在终端里处理" : "仓库可能停在 rebase 中途，请在终端里处理"
             return "rebase 没能走完（\(message)）。\(tail)"
+        case .fetchStalled(let seconds):
+            return "git fetch 连续 \(seconds) 秒没有任何动静，已经停掉了，仓库没动。多半是网络不通、VPN 没连，或者 ssh 连接卡住了；可以在终端里跑 git fetch 看看卡在哪"
+        case .pushStalled(let seconds):
+            return "git push 连续 \(seconds) 秒没有任何动静，已经停掉了。多半是网络不通、VPN 没连，或者 ssh 连接卡住了；远端有没有收到，可以在终端里 git fetch 之后看 git status"
         }
     }
 }
@@ -83,5 +91,25 @@ public enum GitRevListCount {
             .compactMap { Int($0) }
         guard numbers.count == 2 else { return nil }
         return (numbers[0], numbers[1])
+    }
+}
+
+/// 带 `--progress` 跑的 git 命令，stderr 里夹着一大串进度行（`Receiving objects:  45% (450/1000)`，靠 `\r` 原地刷新）。
+/// 出错时给人看的只该是真正的错误那几行。
+public enum GitProgress {
+    public static func removingProgress(_ text: String) -> String {
+        text.split(whereSeparator: { $0 == "\n" || $0 == "\r" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !isProgress($0) }
+            .joined(separator: "\n")
+    }
+
+    /// 「Enumerating objects: 5, done.」「Receiving objects:  45% (450/1000)」「remote: Total 3 (delta 0), reused 0」这种，
+    /// 以及推送时那句「Delta compression using up to 12 threads」（没有冒号，1.2.1 发布前的 review 抓的：它曾被当成推送结果显示）。
+    /// 「fatal: …」「ssh: connect to host … port 22: …」冒号后面不是数字，不算。
+    static func isProgress(_ line: String) -> Bool {
+        let body = line.hasPrefix("remote: ") ? String(line.dropFirst("remote: ".count)) : line
+        if body.hasPrefix("Total ") || body.hasPrefix("Delta compression using up to ") { return true }
+        return body.range(of: #"^[A-Z][A-Za-z ]*: +[0-9]+(%|,| |$)"#, options: .regularExpression) != nil
     }
 }

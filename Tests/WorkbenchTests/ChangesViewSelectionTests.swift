@@ -95,6 +95,17 @@ import TestSupport
         #expect(session.activeTab?.change?.path == tracked[1].path)
         let afterSecond = (try rowColor(0), try rowColor(1))
         #expect(!isSelection(afterSecond.0) && isSelection(afterSecond.1), "点第二行后第一行的高亮没消失：\(afterSecond)")
+
+        // ⌘点击把第一行加进来：两行都亮（合成事件带不上修饰键的状态，这里直接走会话的入口）
+        session.toggleChangeSelection(tracked[0].path, order: tracked.map(\.path))
+        let deadline2 = Date().addingTimeInterval(5)
+        while Date() < deadline2, !isSelection(try rowColor(0)) {
+            spin(0.01)
+            await Task.yield()
+            hosting.layoutSubtreeIfNeeded()
+        }
+        let afterToggle = (try rowColor(0), try rowColor(1))
+        #expect(isSelection(afterToggle.0) && isSelection(afterToggle.1), "多选的两行都该亮：\(afterToggle)")
         window.orderOut(nil)
     }
 }

@@ -358,6 +358,58 @@ extension ProjectSession {
         recordUndo("删除 \(change.fileName)", .delete(original: url, trashed: trashed, isDirectory: false))
     }
 
+    /// 一次批量回滚最多备份这么多字节（单个文件另有 `RollbackBackup.sizeLimit`）。备份是在主线程上同步读、一直留在内存里的撤销栈里，
+    /// 选几百个 Agent 生成的大文件一起回滚不能把界面卡住、把内存吃掉（1.2.1 发布前的 review 抓的）。超出的照样回滚，只是撤销不回来。
+    static let batchRollbackBackupBudget = 128 * 1024 * 1024
+
+    /// 变更列表多选之后一起回滚（IDEA 的 Rollback）：未跟踪的跳过（它们不在 git 里，要删走「删除」）。
+    /// 回滚前逐个备份工作区里的样子，回滚成了的记成一步撤销。备份不了的（太大、冲突中、超出这一批的预算）照样回滚，只是撤销时不在里面。
+    func rollback(_ changes: [GitChange]) {
+        guard let commit else { return }
+        let targets = changes.filter { $0.kind != .untracked }
+        if targets.count == 1 {
+            rollback(targets[0])
+            return
+        }
+        guard !targets.isEmpty else { return }
+        var backups: [String: RollbackBackup] = [:]
+        var budget = Self.batchRollbackBackupBudget
+        for change in targets {
+            let size = url(for: change).flatMap { (try? fileManager.attributesOfItem(atPath: $0.path))?[.size] as? Int } ?? 0
+            guard size <= budget, let backup = backupForRollback(of: change) else {
+                Log.info("git", "\(change.path) 备份不了（太大、冲突中或超出这一批的预算），这次回滚撤销不了它")
+                continue
+            }
+            budget -= backup.data?.count ?? 0
+            backups[change.path] = backup
+        }
+        commit.rollback(targets) { [weak self] rolledBack in
+            guard let self else { return }
+            let operations = rolledBack.compactMap { change in
+                backups[change.path].map { UndoableOperation(title: "回滚 \(change.fileName)", kind: .rollback(change: change, backup: $0)) }
+            }
+            guard !operations.isEmpty else { return }
+            self.recordUndo(operations.count == 1 ? operations[0].title : "回滚 \(operations.count) 个文件", .batch(operations))
+        }
+    }
+
+    /// 变更列表多选之后一起删除（进废纸篓），记成一步撤销。「已删除」的变更磁盘上没有东西，跳过。
+    func delete(_ changes: [GitChange]) {
+        guard let commit else { return }
+        let targets = changes.filter(commit.canDelete)
+        if targets.count == 1 {
+            delete(targets[0])
+            return
+        }
+        let operations = commit.delete(targets).compactMap { deleted in
+            url(for: deleted.change).map {
+                UndoableOperation(title: "删除 \(deleted.change.fileName)", kind: .delete(original: $0, trashed: deleted.trashed, isDirectory: false))
+            }
+        }
+        guard !operations.isEmpty else { return }
+        recordUndo(operations.count == 1 ? operations[0].title : "删除 \(operations.count) 个文件", .batch(operations))
+    }
+
     /// 回滚前记下工作区里的样子。记不了的返回 nil（那次回滚不能撤）：文件太大（`RollbackBackup.sizeLimit`）、读不出来，
     /// 以及冲突中的文件——写回带冲突标记的文本容易，索引里三个阶段的冲突状态放不回去，「已撤销」会是假的。
     private func backupForRollback(of change: GitChange) -> RollbackBackup? {

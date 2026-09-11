@@ -57,7 +57,7 @@ private func client(_ runner: FakeCommandRunner) -> GitClient {
         ["rev-parse", "--git-path", "rebase-merge"],
         ["rev-parse", "--git-path", "rebase-apply"],
         ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-        ["fetch", "--prune"],
+        ["fetch", "--prune", "--progress"],
         ["rev-list", "--left-right", "--count", "origin/main...HEAD"],
         // --autostash：工作区有没提交的改动也能同步，不用先手动 stash
         ["rebase", "--autostash", "origin/main"],
@@ -311,5 +311,143 @@ private func makeRemoteAndClones(_ git: GitClient, in directory: URL) async thro
         let status = try await runGit(git, ["status", "--porcelain"], in: local, home: directory)
         #expect(status.contains("shared.txt"))
         try await runGit(git, ["rebase", "--abort"], in: local, home: directory)
+    }
+}
+
+// MARK: - 分支
+
+@Test func branchListParsesLocalRemoteAndDefault() {
+    let text = [
+        "refs/heads/feat/a\u{1f}\u{1f}*",
+        "refs/heads/master\u{1f}origin/master\u{1f} ",
+        "refs/heads/dev\u{1f}origin/dev\u{1f} ",
+        "refs/remotes/origin/HEAD\u{1f}\u{1f} ",
+        "refs/remotes/origin/dev\u{1f}\u{1f} ",
+        "refs/remotes/origin/master\u{1f}\u{1f} ",
+        "refs/remotes/up/stream/x\u{1f}\u{1f} ",
+    ].joined(separator: "\n") + "\n"
+    let list = GitBranchList.parse(text, remotes: ["origin", "up/stream"], remoteHead: "origin/master")
+    #expect(list.local.map(\.name) == ["feat/a", "dev", "master"], "当前分支排最前，其余按名字")
+    #expect(list.current == GitBranchList.Local(name: "feat/a", isCurrent: true))
+    #expect(list.local(named: "master")?.upstream == "origin/master")
+    #expect(list.remote == ["origin/master", "origin/dev", "up/stream/x"], "默认分支排最前，origin/HEAD 不算")
+    #expect(list.defaultRemoteBranch == "origin/master")
+    #expect(list.preferredRemote == "origin")
+    #expect(list.localName(for: "up/stream/x") == "x", "远程名里有 / 也按最长前缀去")
+    #expect(list.localName(for: "origin/feat/b") == "feat/b")
+    #expect(list.suggestedUpstream(for: "feat/a") == "origin/master", "远程没有同名分支：跟踪默认分支")
+    #expect(list.suggestedUpstream(for: "dev") == "origin/dev", "远程有同名分支：跟踪它")
+
+    // 远程没告诉我们默认分支（没有 origin/HEAD）：退回 main / master
+    let fallback = GitBranchList.parse("refs/remotes/origin/main\u{1f}\u{1f} \nrefs/remotes/origin/x\u{1f}\u{1f} \n", remotes: ["origin"], remoteHead: nil)
+    #expect(fallback.defaultRemoteBranch == "origin/main")
+    let none = GitBranchList.parse("refs/heads/main\u{1f}\u{1f}*\n", remotes: [], remoteHead: nil)
+    #expect(none.defaultRemoteBranch == nil && none.preferredRemote == nil && none.suggestedUpstream(for: "main") == nil)
+}
+
+@Test func branchNameValidation() {
+    #expect(GitBranchName.problem("", existing: []) == .empty)
+    for bad in ["a b", "-x", "a..b", "a//b", "a/", "a.lock", "x~1", "x^", "a:b", "a?", "a*", "a[", "a\\b", ".hidden", "a/.b", "@", "a@{1}", "end."] {
+        #expect(GitBranchName.problem(bad, existing: []) == .invalid, "\(bad)")
+    }
+    for good in ["feat/retrieval-four-lanes", "fix-1", "中文分支", "release/1.2"] {
+        #expect(GitBranchName.problem(good, existing: []) == nil, "\(good)")
+    }
+    #expect(GitBranchName.problem("master", existing: ["master"]) == .exists)
+}
+
+/// 跟踪的上游与本地分支不同名（从 origin/master 开出来的 feature 分支）：推到远端的同名分支，不是光秃秃的 `git push`
+/// （push.default=simple 下会被拒绝），更不能推进 master。
+@Test func pushGoesToTheSameNameWhenUpstreamIsNamedDifferently() async throws {
+    func runner(merge: String) -> FakeCommandRunner {
+        FakeCommandRunner { arguments, _ in
+            switch arguments {
+            case ["rev-parse", "--abbrev-ref", "HEAD"]: return shellOutput("feat\n")
+            case ["config", "--get", "branch.feat.merge"]: return shellOutput(merge + "\n")
+            case ["config", "--get", "branch.feat.remote"]: return shellOutput("origin\n")
+            default: return shellOutput("")
+            }
+        }
+    }
+    let differs = runner(merge: "refs/heads/master")
+    _ = try await client(differs).push(repositoryRoot: URL(fileURLWithPath: "/repo"), hasUpstream: true)
+    #expect(differs.calls(startingWith: "push") == [["push", "--porcelain", "--progress", "origin", "HEAD"]])
+    let same = runner(merge: "refs/heads/feat")
+    _ = try await client(same).push(repositoryRoot: URL(fileURLWithPath: "/repo"), hasUpstream: true)
+    #expect(same.calls(startingWith: "push") == [["push", "--porcelain", "--progress"]])
+
+    // fork 工作流：拉取跟踪 upstream/main、推送配成推到自己的 fork（pushRemote / remote.pushDefault）——git 自己会推到 fork 的同名分支，
+    // 不能改成推进主仓库；用户明确设了 push.default 的也照他的来
+    func configured(_ extra: [String: String]) -> FakeCommandRunner {
+        FakeCommandRunner { arguments, _ in
+            if arguments == ["rev-parse", "--abbrev-ref", "HEAD"] { return shellOutput("feat\n") }
+            let values = ["branch.feat.merge": "refs/heads/main", "branch.feat.remote": "upstream"].merging(extra) { $1 }
+            if arguments.count == 3, arguments[0] == "config", let value = values[arguments[2]] { return shellOutput(value + "\n") }
+            return shellOutput("")
+        }
+    }
+    for extra in [["branch.feat.pushRemote": "origin"], ["remote.pushDefault": "origin"], ["push.default": "upstream"], ["push.default": "current"]] {
+        let fork = configured(extra)
+        _ = try await client(fork).push(repositoryRoot: URL(fileURLWithPath: "/repo"), hasUpstream: true)
+        #expect(fork.calls(startingWith: "push") == [["push", "--porcelain", "--progress"]], "\(extra)：照常 git push")
+    }
+    let simple = configured(["push.default": "simple", "remote.pushDefault": "upstream"])
+    _ = try await client(simple).push(repositoryRoot: URL(fileURLWithPath: "/repo"), hasUpstream: true)
+    #expect(simple.calls(startingWith: "push") == [["push", "--porcelain", "--progress", "upstream", "HEAD"]])
+
+    // 建上游推到弹窗里说的那个远程，不写死 origin
+    let noUpstream = FakeCommandRunner(responses: [])
+    _ = try await client(noUpstream).push(repositoryRoot: URL(fileURLWithPath: "/repo"), hasUpstream: false, remote: "upstream")
+    #expect(noUpstream.calls(startingWith: "push") == [["push", "--porcelain", "--progress", "-u", "upstream", "HEAD"]])
+}
+
+/// 真实 `git push --progress` 的 stderr（git 2.53）整段都是进度：推送成功的提示里不能冒出「Delta compression using up to 12 threads」。
+@Test func realPushProgressIsFilteredCompletely() {
+    let stderr = "Enumerating objects: 5, done.\nCounting objects:  20% (1/5)\rCounting objects: 100% (5/5), done.\nDelta compression using up to 12 threads\n"
+        + "Compressing objects:  25% (1/4)\rCompressing objects: 100% (4/4), done.\nWriting objects:  20% (1/5)\rWriting objects: 100% (5/5), 4.41 KiB | 4.41 MiB/s, done.\n"
+        + "Total 5 (delta 0), reused 0 (delta 0), pack-reused 0 (from 0)\n"
+    #expect(GitProgress.removingProgress(stderr).isEmpty)
+    #expect(GitProgress.removingProgress(stderr + "remote: error: pre-receive hook declined") == "remote: error: pre-receive hook declined")
+}
+
+/// 真 git：从 origin/main 开一个跟踪它的 feature 分支 → 同步能从 main 拉 → 推送推到远端的同名分支（main 不动）；
+/// 签出远程分支建出跟踪它的本地分支；分支列表读得出来。
+@Test func realGitBranchesCreateSyncPushAndCheckout() async throws {
+    guard let git = GitClient.locate() else { return }
+    try await withTemporaryDirectory { directory in
+        let (mate, local) = try await makeRemoteAndClones(git, in: directory)
+        try await git.createBranch("feat/x", from: "origin/main", track: true, repositoryRoot: local)
+        var list = try await git.branches(repositoryRoot: local)
+        #expect(list.current?.name == "feat/x" && list.current?.upstream == "origin/main")
+        #expect(list.defaultRemoteBranch == "origin/main")
+
+        // 同事往 main 推了一个；我们在 feature 分支上提交一个，同步把 main 的拉进来
+        try "1\n2\n".write(to: mate.appendingPathComponent("shared.txt"), atomically: true, encoding: .utf8)
+        try await runGit(git, ["commit", "-q", "-am", "同事的改动"], in: mate, home: directory)
+        try await runGit(git, ["push", "-q"], in: mate, home: directory)
+        try "mine\n".write(to: local.appendingPathComponent("mine.txt"), atomically: true, encoding: .utf8)
+        try await runGit(git, ["add", "."], in: local, home: directory)
+        try await runGit(git, ["commit", "-q", "-m", "我的改动"], in: local, home: directory)
+        let synced = try await git.syncWithRemote(repositoryRoot: local)
+        #expect(synced == GitSyncResult(upstream: "origin/main", pulled: 1, replayed: 1))
+
+        // 推送：到远端的 feat/x，main 还是同事那个提交
+        let mainBefore = try await runGit(git, ["rev-parse", "main"], in: directory.appendingPathComponent("remote.git"), home: directory)
+        _ = try await git.push(repositoryRoot: local, hasUpstream: true)
+        let remoteBranches = try await runGit(git, ["branch", "--format=%(refname:short)"], in: directory.appendingPathComponent("remote.git"), home: directory)
+        #expect(remoteBranches.split(separator: "\n").map(String.init).sorted() == ["feat/x", "main"])
+        #expect(try await runGit(git, ["rev-parse", "main"], in: directory.appendingPathComponent("remote.git"), home: directory) == mainBefore)
+
+        // 同事开了个 dev 分支；我们 fetch 之后签出它：建出跟踪 origin/dev 的本地 dev
+        try await runGit(git, ["push", "-q", "origin", "HEAD:refs/heads/dev"], in: mate, home: directory)
+        try await git.fetch(repositoryRoot: local)
+        try await git.createBranch("dev", from: "origin/dev", track: true, repositoryRoot: local)
+        try await git.switchBranch(to: "main", repositoryRoot: local)
+        try await git.setUpstream("origin/dev", repositoryRoot: local)
+        list = try await git.branches(repositoryRoot: local)
+        #expect(list.local.map(\.name) == ["main", "dev", "feat/x"])
+        #expect(list.local(named: "dev")?.upstream == "origin/dev")
+        #expect(list.current?.upstream == "origin/dev", "set-upstream-to 改的是当前分支")
+        #expect(list.remote.first == "origin/main")
     }
 }

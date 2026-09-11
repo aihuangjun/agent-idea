@@ -4,14 +4,20 @@ import DesignSystem
 import SwiftUI
 
 /// 变更列表 + 提交面板（IDEA 的 Commit 工具窗口）。
+///
+/// 列表能多选（照 IDEA）：单击选一条并看它的 diff，⌘点击加减、⇧点击连选；右键点在多选里就对整个多选回滚 / 删除，
+/// ⌫ 删除选中的。选中放在会话里（`ProjectSession.changeSelection`），切走工具窗口再回来还在。
 struct ChangesView: View {
     @ObservedObject var session: ProjectSession
     @State private var trackedCollapsed = false
     @State private var untrackedCollapsed = false
     @State private var clicks = DoubleClickDetector(interval: NSEvent.doubleClickInterval)
+    @FocusState private var isFocused: Bool
     /// 正在重命名的文件。对话框挂在整个面板上而不是行上：行在 LazyVStack 里，git 一刷新就可能被回收，
     /// 挂在行上的 sheet 会跟着消失。
     @State private var renaming: FileNode?
+    /// 等确认的回滚 / 删除。同样挂在面板上而不是行上（理由同上）。
+    @State private var pending: DestructiveConfirmation?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -38,6 +44,7 @@ struct ChangesView: View {
         .sheet(item: $renaming) { node in
             RenameSheet(node: node) { session.renameProblem(for: node, newName: $0) } commit: { session.rename(node, to: $0) }
         }
+        .destructiveConfirmation($pending)
     }
 
     private func changeList(commit: CommitController) -> some View {
@@ -46,28 +53,120 @@ struct ChangesView: View {
                 if !session.changeGroups.tracked.isEmpty {
                     GroupHeader(title: "变更", changes: session.changeGroups.tracked, commit: commit, isCollapsed: $trackedCollapsed)
                     if !trackedCollapsed {
-                        ForEach(session.changeGroups.tracked) { change in
-                            ChangeRow(session: session, commit: commit, clicks: clicks, change: change, isActive: isActive(change), onRename: { renaming = $0 })
-                        }
+                        ForEach(session.changeGroups.tracked) { change in row(change, commit: commit) }
                     }
                 }
                 if !session.changeGroups.untracked.isEmpty {
                     GroupHeader(title: "未跟踪文件", changes: session.changeGroups.untracked, commit: commit, isCollapsed: $untrackedCollapsed)
                     if !untrackedCollapsed {
-                        ForEach(session.changeGroups.untracked) { change in
-                            ChangeRow(session: session, commit: commit, clicks: clicks, change: change, isActive: isActive(change), onRename: { renaming = $0 })
-                        }
+                        ForEach(session.changeGroups.untracked) { change in row(change, commit: commit) }
                     }
                 }
             }
             .padding(.vertical, 4)
         }
+        .focusable()
+        .focusEffectDisabled()
+        .focused($isFocused)
+        // ⌫ / fn⌫ 删除选中的（IDEA 的 Delete），先确认
+        .onKeyPress(.delete) { requestDeleteOfSelection(commit: commit) }
+        .onKeyPress(.deleteForward) { requestDeleteOfSelection(commit: commit) }
     }
 
-    /// 当前标签就是这条变更的 diff。由这里算好再传给行：行视图只按传进去的值重画，
-    /// 自己去读 `session.activeTab` 的话 SwiftUI 看不出行有变化，切到别的文件时上一行的高亮不会消失（0.3.0 的 bug）。
-    private func isActive(_ change: GitChange) -> Bool {
-        session.activeTab?.change?.path == change.path
+    /// 行的「选中」由这里算好再传进去：行视图只按传进去的值重画，自己去读会话的话 SwiftUI 看不出行有变化，
+    /// 选中挪走了上一行的高亮也不会消失（0.3.0 的 bug）。
+    private func row(_ change: GitChange, commit: CommitController) -> some View {
+        ChangeRow(
+            session: session, commit: commit, change: change,
+            isSelected: session.changeSelection.contains(change.path),
+            press: { press(change, modifiers: $0) },
+            release: { if $0, clicks.registerClick(on: change.path) { session.openDiff(change, pinned: true) } },
+            onRename: { renaming = $0 },
+            onRollback: { requestRollback(visible($0)) },
+            onDelete: { requestDelete(visible($0), commit: commit) }
+        )
+    }
+
+    /// 看得见的行，按列表顺序（⇧点击连选按它；折叠起来的分组不算）。
+    private var visibleOrder: [String] {
+        ((trackedCollapsed ? [] : session.changeGroups.tracked) + (untrackedCollapsed ? [] : session.changeGroups.untracked)).map(\.path)
+    }
+
+    /// 按下一行。返回这是不是一次「普通单击」（松开时才参与双击判定，双击固定标签）。
+    private func press(_ change: GitChange, modifiers: NSEvent.ModifierFlags) -> Bool {
+        isFocused = true
+        // ⌃点击是右键菜单，不动选中
+        if modifiers.contains(.control) { return false }
+        if modifiers.contains(.command) {
+            session.toggleChangeSelection(change.path, order: visibleOrder)
+            return false
+        }
+        if modifiers.contains(.shift) {
+            session.extendChangeSelection(to: change.path, order: visibleOrder)
+            return false
+        }
+        // 按下立刻出预览 diff，双击间隔内的第二下把它固定
+        session.selectChange(change.path)
+        session.openDiff(change, pinned: false)
+        return true
+    }
+
+    /// 只留看得见的：折叠起来的分组里残留的选中不该被一起删掉 / 回滚——用户根本看不见它们。
+    private func visible(_ changes: [GitChange]) -> [GitChange] {
+        let shown = Set(visibleOrder)
+        return changes.filter { shown.contains($0.path) }
+    }
+
+    private func requestDeleteOfSelection(commit: CommitController) -> KeyPress.Result {
+        let selected = visible(session.selectedChanges)
+        guard selected.contains(where: commit.canDelete) else { return .ignored }
+        requestDelete(selected, commit: commit)
+        return .handled
+    }
+
+    /// 回滚一条或几条。未跟踪的不在 git 里、没有可回滚的目标，跳过（弹窗里说一声）。
+    private func requestRollback(_ changes: [GitChange]) {
+        let targets = changes.filter { $0.kind != .untracked }
+        guard let first = targets.first else { return }
+        let added = targets.filter { $0.kind == .added }.count
+        var message: String
+        if targets.count == 1 {
+            message = first.kind == .added
+                ? "这是一个新增的文件，回滚会把它从 git 和磁盘上一起删掉。"
+                : "会把它恢复到 HEAD 的样子，本地改动会丢失。"
+        } else {
+            message = "会把它们恢复到 HEAD 的样子，本地改动会丢失。"
+            if added > 0 { message += "其中 \(added) 个是新增的文件，会从 git 和磁盘上一起删掉。" }
+        }
+        let skipped = changes.count - targets.count
+        if skipped > 0 { message += "选中的 \(skipped) 个未跟踪文件不在 git 里，不受影响（要删掉它们用「删除」）。" }
+        pending = DestructiveConfirmation(
+            id: "rollback:" + targets.map(\.path).joined(separator: "\n"),
+            title: targets.count == 1 ? "回滚 \(first.fileName)？" : "回滚 \(targets.count) 个文件？",
+            message: message,
+            buttonTitle: "回滚"
+        ) { session.rollback(targets) }
+    }
+
+    /// 删除一条或几条（进废纸篓）。「已删除」的变更磁盘上没有东西可删，跳过。
+    private func requestDelete(_ changes: [GitChange], commit: CommitController) {
+        let targets = changes.filter(commit.canDelete)
+        guard let first = targets.first else { return }
+        let allUntracked = targets.allSatisfy { $0.kind == .untracked }
+        var message: String
+        if targets.count == 1 {
+            message = allUntracked ? "文件会移到废纸篓。" : "文件会移到废纸篓，git 里会显示为已删除；要不要提交这次删除由你决定。"
+        } else {
+            message = allUntracked ? "它们会移到废纸篓。" : "它们会移到废纸篓；已跟踪的在 git 里会显示为已删除，要不要提交这次删除由你决定。"
+        }
+        let skipped = changes.count - targets.count
+        if skipped > 0 { message += "另外 \(skipped) 个是已删除的变更，磁盘上已经没有文件，跳过。" }
+        pending = DestructiveConfirmation(
+            id: "delete:" + targets.map(\.path).joined(separator: "\n"),
+            title: targets.count == 1 ? "删除 \(first.fileName)？" : "删除 \(targets.count) 个文件？",
+            message: message,
+            buttonTitle: "删除"
+        ) { session.delete(targets) }
     }
 }
 
@@ -109,12 +208,17 @@ private struct GroupHeader: View {
 private struct ChangeRow: View {
     let session: ProjectSession
     @ObservedObject var commit: CommitController
-    let clicks: DoubleClickDetector
     let change: GitChange
-    let isActive: Bool
+    let isSelected: Bool
+    /// 按下：返回这是不是一次普通单击（⌘ / ⇧点击只改选中，不算）。
+    let press: (NSEvent.ModifierFlags) -> Bool
+    /// 松开：参数是「没拖动、算一次点击」。只在按下时是普通单击才会调。
+    let release: (Bool) -> Void
     let onRename: (FileNode) -> Void
+    let onRollback: ([GitChange]) -> Void
+    let onDelete: ([GitChange]) -> Void
     @State private var isHovering = false
-    @State private var pendingAction: DestructiveConfirmation?
+    @State private var isPlainPress = false
 
     var body: some View {
         let icon = FileIcon.file(named: change.fileName)
@@ -131,17 +235,28 @@ private struct ChangeRow: View {
         }
         .padding(.trailing, 10)
         .frame(height: Theme.treeRowHeight)
-        .background(Rectangle().fill(isActive ? Theme.selection : (isHovering ? Theme.hover.opacity(0.5) : .clear)))
+        .background(Rectangle().fill(isSelected ? Theme.selection : (isHovering ? Theme.hover.opacity(0.5) : .clear)))
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        // 按下立刻出预览 diff，双击间隔内的第二下把它固定
-        .onPress { _ in
-            session.openDiff(change, pinned: false)
-        } release: { isClick in
-            if isClick, clicks.registerClick(on: change.path) { session.openDiff(change, pinned: true) }
-        }
+        .onPress(modifiers: { _, modifiers in
+            isPlainPress = press(modifiers)
+        }, release: { isClick in
+            if isPlainPress { release(isClick) }
+            isPlainPress = false
+        })
         // 没有「显示 diff」：点这一行本来就是看 diff
-        .contextMenu {
+        .contextMenu { menu }
+    }
+
+    /// 右键点在多选里：对整个多选回滚 / 删除（只对一条才有意义的打开、定位、重命名不出现）；否则只对这一条。
+    @ViewBuilder private var menu: some View {
+        let targets = session.changesForAction(on: change)
+        if targets.count > 1 {
+            let rollbackable = targets.filter { $0.kind != .untracked }.count
+            let deletable = targets.filter(commit.canDelete).count
+            if rollbackable > 0 { Button("回滚 \(rollbackable) 个文件…") { onRollback(targets) } }
+            if deletable > 0 { Button("删除 \(deletable) 个文件…") { onDelete(targets) } }
+        } else {
             // 分隔线跟着这一组走：已删除的变更这一组整个没有，菜单第一项就不该是一条线
             if change.kind != .deleted, let url = session.url(for: change) {
                 Button("打开文件") { session.openFile(url, pinned: true) }
@@ -149,34 +264,15 @@ private struct ChangeRow: View {
                 Divider()
             }
             if change.kind != .untracked {
-                Button("回滚…") {
-                    pendingAction = DestructiveConfirmation(
-                        id: "rollback:" + change.path,
-                        title: "回滚 \(change.fileName)？",
-                        message: change.kind == .added
-                            ? "这是一个新增的文件，回滚会把它从 git 和磁盘上一起删掉。"
-                            : "会把它恢复到 HEAD 的样子，本地改动会丢失。",
-                        buttonTitle: "回滚"
-                    ) { session.rollback(change) }
-                }
+                Button("回滚…") { onRollback([change]) }
             }
             if let node = session.node(for: change) {
                 Button("重命名…") { onRename(node) }
             }
             if commit.canDelete(change) {
-                Button("删除…") {
-                    pendingAction = DestructiveConfirmation(
-                        id: "delete:" + change.path,
-                        title: "删除 \(change.fileName)？",
-                        message: change.kind == .untracked
-                            ? "文件会移到废纸篓。"
-                            : "文件会移到废纸篓，git 里会显示为已删除；要不要提交这次删除由你决定。",
-                        buttonTitle: "删除"
-                    ) { session.delete(change) }
-                }
+                Button("删除…") { onDelete([change]) }
             }
         }
-        .destructiveConfirmation($pendingAction)
     }
 }
 

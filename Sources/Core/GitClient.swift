@@ -41,13 +41,15 @@ public struct GitClient: Sendable {
         return environment
     }
 
-    private func run(_ arguments: [String], in directory: URL, acceptable: Set<Int32> = [0]) async throws -> ShellOutput {
+    /// `stallTimeout`：走网络的命令给，多少秒一个字节都没输出就当卡死停掉（见 `CommandRunning.run(…stallTimeout:)`）。
+    private func run(_ arguments: [String], in directory: URL, acceptable: Set<Int32> = [0], stallTimeout: TimeInterval? = nil) async throws -> ShellOutput {
         try await runner.runChecked(
             executable: executable,
             arguments: arguments,
             currentDirectory: directory,
             environment: Self.environment,
-            acceptableStatuses: acceptable
+            acceptableStatuses: acceptable,
+            stallTimeout: stallTimeout
         )
     }
 
@@ -219,7 +221,9 @@ public struct GitClient: Sendable {
     /// 回滚：把这些路径恢复到 HEAD 的样子（索引与工作区一起）。重命名要把新旧路径都传进来。
     public func restoreToHead(paths: [String], repositoryRoot: URL) async throws {
         precondition(!paths.isEmpty)
-        _ = try await run(["restore", "--source=HEAD", "--staged", "--worktree", "--"] + Array(Set(paths)).sorted(), in: repositoryRoot)
+        for batch in Self.batches(of: paths) {
+            _ = try await run(["restore", "--source=HEAD", "--staged", "--worktree", "--"] + batch, in: repositoryRoot)
+        }
     }
 
     /// 重命名 / 移动一个已跟踪的文件或目录（`git mv`）：git 负责搬磁盘上的文件，索引里同步记成重命名，
@@ -237,9 +241,12 @@ public struct GitClient: Sendable {
         return message.contains("not under version control") || message.contains("source directory is empty") || message.contains("invalid argument")
     }
 
-    /// 回滚一个「新增」（在索引里、不在 HEAD 里）的文件：从索引和工作区一起删掉。IDEA 对 Added 的回滚也是删文件。
-    public func removeAdded(path: String, repositoryRoot: URL) async throws {
-        _ = try await run(["rm", "-f", "-q", "--", path], in: repositoryRoot)
+    /// 回滚「新增」（在索引里、不在 HEAD 里）的文件：从索引和工作区一起删掉。IDEA 对 Added 的回滚也是删文件。
+    public func removeAdded(paths: [String], repositoryRoot: URL) async throws {
+        precondition(!paths.isEmpty)
+        for batch in Self.batches(of: paths) {
+            _ = try await run(["rm", "-f", "-q", "--"] + batch, in: repositoryRoot)
+        }
     }
 
     /// 一个路径（文件或目录）下 git 还不认识的**文件**，逐个列出、不折成目录（`ls-files --others`）。
@@ -311,10 +318,24 @@ public struct GitClient: Sendable {
         return name.isEmpty ? "HEAD" : name
     }
 
+    /// 网络命令连续多少秒没有任何输出算卡死。
+    public static let networkStallTimeout: TimeInterval = 30
+
     /// 从远程取最新的引用。`--prune` 顺手清掉远端已经删掉的分支的本地跟踪引用。
     /// 不带 remote：git 自己按当前分支的配置挑（没配就是 origin）。
+    ///
+    /// 带看门狗：ssh 连不上（没连 VPN）、或者连上了却不来数据（网络抖动、代理半死）时 fetch 可以一直挂着——
+    /// 等它的同步按钮就一直灰着、转着，用户不知道为什么点不了（1.2.0 前报过）。连续 `networkStallTimeout` 秒没动静就停掉报错。
+    /// `--progress`：不是终端时 git 默认不报进度，拉得慢的大仓库会一直安静，被看门狗误当成卡死。
     public func fetch(repositoryRoot: URL) async throws {
-        _ = try await run(["fetch", "--prune"], in: repositoryRoot)
+        do {
+            _ = try await run(["fetch", "--prune", "--progress"], in: repositoryRoot, stallTimeout: Self.networkStallTimeout)
+        } catch let stalled as ShellCommandStalled {
+            throw GitSyncError.fetchStalled(seconds: Int(stalled.seconds))
+        } catch let failure as ShellCommandError {
+            // 出错时 stderr 里前面是一大串进度行，给人看的只该是真正的错误
+            throw ShellCommandError(command: failure.command, status: failure.status, message: GitProgress.removingProgress(failure.message))
+        }
     }
 
     /// 本地相对上游落后 / 领先几个提交。看不懂 git 的输出就报错——把它当成 0/0 会静悄悄地跳过 rebase，
@@ -380,11 +401,84 @@ public struct GitClient: Sendable {
 
     // MARK: - 推送
 
-    /// 推送当前分支。没有上游的话建上游（`-u origin HEAD`）。返回 git 的输出（进度在 stderr 里）。
-    public func push(repositoryRoot: URL, hasUpstream: Bool) async throws -> String {
-        let arguments = hasUpstream ? ["push", "--porcelain"] : ["push", "--porcelain", "-u", "origin", "HEAD"]
-        let output = try await run(arguments, in: repositoryRoot)
-        let text = (output.text + "\n" + output.standardError).trimmingCharacters(in: .whitespacesAndNewlines)
-        return text
+    /// 推送连续多少秒没有任何输出算卡死。比 fetch 宽：推完之后远端还要跑钩子（GitLab 的检查、提示建 MR 那几行），那一段是安静的。
+    public static let pushStallTimeout: TimeInterval = 60
+
+    /// 推送当前分支。没有上游的话建上游（`-u <remote> HEAD`，`remote` 默认 origin）。返回 git 的输出（进度行已去掉）。
+    ///
+    /// 上游与本地分支**不同名**（从 origin/master 开出来、跟踪着 origin/master 的 feature 分支）、而 `git push` 又会推回拉取的那个远程时，
+    /// 推到那个远程的**同名**分支：不带参数的 `git push` 在 `push.default=simple`（git 的默认）下会直接拒绝，而把 feature 分支推进 master
+    /// 更不是用户要的。其余情况都照常 `git push`，由 git 按用户自己的配置决定推到哪（见 `remoteWhenPlainPushWouldBeRefused`）。
+    /// 带看门狗、`--progress` 的理由与 `fetch` 一样。
+    public func push(repositoryRoot: URL, hasUpstream: Bool, remote: String = "origin") async throws -> String {
+        var arguments = ["push", "--porcelain", "--progress"]
+        if !hasUpstream {
+            arguments += ["-u", remote, "HEAD"]
+        } else if let pullRemote = await remoteWhenPlainPushWouldBeRefused(repositoryRoot: repositoryRoot) {
+            arguments += [pullRemote, "HEAD"]
+        }
+        do {
+            let output = try await run(arguments, in: repositoryRoot, stallTimeout: Self.pushStallTimeout)
+            return (output.text + "\n" + GitProgress.removingProgress(output.standardError)).trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch let stalled as ShellCommandStalled {
+            throw GitSyncError.pushStalled(seconds: Int(stalled.seconds))
+        } catch let failure as ShellCommandError {
+            throw ShellCommandError(command: failure.command, status: failure.status, message: GitProgress.removingProgress(failure.message))
+        }
+    }
+
+    /// 不带参数的 `git push` 会不会因为「上游不同名」被拒，会的话返回该推去的远程（拉取的那个），否则 nil（照常推）。
+    ///
+    /// 只在这几条同时成立时才插手：`push.default` 没设或是 `simple`（设成 upstream / current / matching 是用户自己的选择，
+    /// upstream 就是要推进 master，不替他改）；推送的远程就是拉取的远程——fork 工作流里 `branch.<名>.pushRemote` /
+    /// `remote.pushDefault` 指向自己的 fork 时，git 会按 current 推到 fork 的同名分支，那本来就是对的，别改成推进主仓库
+    /// （1.2.1 发布前的 review 抓的）；上游确实不同名；不是游离 HEAD、读得到配置。
+    func remoteWhenPlainPushWouldBeRefused(repositoryRoot: URL) async -> String? {
+        let branch = await currentBranch(repositoryRoot: repositoryRoot)
+        guard branch != "HEAD" else { return nil }
+        func config(_ key: String) async -> String? {
+            let value = (try? await run(["config", "--get", key], in: repositoryRoot))?.text
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return value?.isEmpty == false ? value : nil
+        }
+        guard let merge = await config("branch.\(branch).merge"), merge != "refs/heads/" + branch,
+              let pullRemote = await config("branch.\(branch).remote"), pullRemote != "." else { return nil }
+        if let mode = await config("push.default"), mode != "simple" { return nil }
+        var pushRemote = await config("branch.\(branch).pushRemote")
+        if pushRemote == nil { pushRemote = await config("remote.pushDefault") }
+        pushRemote = pushRemote ?? pullRemote
+        return pushRemote == pullRemote ? pullRemote : nil
+    }
+
+    // MARK: - 分支
+
+    /// 本地分支、远程跟踪分支、远程的默认分支（状态栏的分支弹窗，IDEA 的 Git Branches）。只看本地已知的引用，不联网。
+    public func branches(repositoryRoot: URL) async throws -> GitBranchList {
+        let remotes = (try? await run(["remote"], in: repositoryRoot))?.text
+            .split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } ?? []
+        let refs = try await run(["for-each-ref", "--format=" + GitBranchList.forEachRefFormat, "refs/heads", "refs/remotes"], in: repositoryRoot).text
+        var remoteHead: String?
+        if let remote = remotes.contains("origin") ? "origin" : remotes.first,
+           let output = try? await run(["symbolic-ref", "-q", "--short", "refs/remotes/\(remote)/HEAD"], in: repositoryRoot) {
+            let name = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            remoteHead = name.isEmpty ? nil : name
+        }
+        return GitBranchList.parse(refs, remotes: remotes, remoteHead: remoteHead)
+    }
+
+    /// 切到一个本地分支（`git switch`）。没提交的改动会被带过去；会被覆盖的话 git 拒绝，什么都不动。
+    public func switchBranch(to name: String, repositoryRoot: URL) async throws {
+        _ = try await run(["switch", name], in: repositoryRoot)
+    }
+
+    /// 新建分支并切过去。`startPoint` 是远程分支时 `track` 为 true：新分支跟踪它（git 自己的默认也是这样），
+    /// 同步就从它拉——从 origin/master 开出来的分支，点同步就是把 master 上的新提交 rebase 进来。
+    public func createBranch(_ name: String, from startPoint: String, track: Bool, repositoryRoot: URL) async throws {
+        _ = try await run(["switch", "-c", name, track ? "--track" : "--no-track", startPoint], in: repositoryRoot)
+    }
+
+    /// 让当前分支跟踪一个远程分支（`git branch --set-upstream-to`）。只改配置，不动工作区与提交。
+    public func setUpstream(_ upstream: String, repositoryRoot: URL) async throws {
+        _ = try await run(["branch", "--set-upstream-to=" + upstream], in: repositoryRoot)
     }
 }

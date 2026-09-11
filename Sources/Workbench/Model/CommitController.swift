@@ -112,28 +112,59 @@ final class CommitController: ObservableObject {
             delete(change)
             return
         }
+        rollback([change]) { completion(!$0.isEmpty) }
+    }
+
+    /// 一次回滚好几条（变更列表多选）。未跟踪的跳过：它们不在 git 里，「回滚」对它们就是删除，要删走 `delete`。
+    /// 能一起跑的合成一两条 git 命令（几十个文件不用起几十次 git）；一起跑失败了再逐条跑，挑出到底是哪几条不行，
+    /// 别的照样回滚掉。做完调 `completion`，参数是真回滚成了的那些（会话据此记一步撤销），会话只刷新一次。
+    func rollback(_ changes: [GitChange], completion: @escaping @MainActor ([GitChange]) -> Void) {
+        let targets = changes.filter { $0.kind != .untracked }
+        guard !targets.isEmpty else {
+            completion([])
+            return
+        }
         Task { [weak self] in
             guard let self else {
-                completion(false)
+                completion([])
                 return
             }
-            var succeeded = false
+            var succeeded: [GitChange] = []
+            var failures: [(GitChange, Error)] = []
             do {
-                switch change.kind {
-                case .added:
-                    try await git.removeAdded(path: change.path, repositoryRoot: repositoryRoot)
-                default:
-                    try await git.restoreToHead(paths: [change.path] + (change.originalPath.map { [$0] } ?? []), repositoryRoot: repositoryRoot)
+                try await revertToHead(targets)
+                succeeded = targets
+            } catch let error where targets.count > 1 {
+                Log.info("git", "一起回滚 \(targets.count) 个失败，改为逐个回滚：\(error)")
+                for change in targets {
+                    do {
+                        try await revertToHead([change])
+                        succeeded.append(change)
+                    } catch {
+                        failures.append((change, error))
+                    }
                 }
-                Log.info("git", "已回滚 \(change.path)")
-                succeeded = true
             } catch {
-                status = .failure("回滚失败：\(error.userFacingDescription)")
-                Log.warn("git", "回滚 \(change.path) 失败：\(error)")
+                failures.append((targets[0], error))
             }
-            onRepositoryChanged?([change])
+            for change in succeeded { Log.info("git", "已回滚 \(change.path)") }
+            for (change, error) in failures { Log.warn("git", "回滚 \(change.path) 失败：\(error)") }
+            if let (change, error) = failures.first {
+                status = .failure(targets.count == 1
+                    ? "回滚失败：\(error.userFacingDescription)"
+                    : "有 \(failures.count) 个没能回滚，比如 \(change.fileName)：\(error.userFacingDescription)")
+            }
+            onRepositoryChanged?(targets)
             completion(succeeded)
         }
+    }
+
+    /// 修改 / 删除 / 重命名 / 冲突 → `restore`（重命名连原路径一起）；新增（已在索引、HEAD 里没有）→ 连文件一起 `rm`。
+    private func revertToHead(_ changes: [GitChange]) async throws {
+        let restored = changes.filter { $0.kind != .added }.flatMap { [$0.path] + ($0.originalPath.map { [$0] } ?? []) }
+        let added = changes.filter { $0.kind == .added }.map(\.path)
+        if !restored.isEmpty { try await git.restoreToHead(paths: restored, repositoryRoot: repositoryRoot) }
+        if !added.isEmpty { try await git.removeAdded(paths: added, repositoryRoot: repositoryRoot) }
     }
 
     /// 撤销「回滚」的后半步：把写回来的文件重新记进索引（新增 / 重命名的状态才回得来）。
@@ -166,17 +197,33 @@ final class CommitController: ObservableObject {
     /// 返回文件在废纸篓里的位置（撤销删除从那里搬回来），删不成返回 nil。
     @discardableResult
     func delete(_ change: GitChange) -> URL? {
-        guard canDelete(change) else { return nil }
-        var trashed: URL?
-        do {
-            trashed = try Trash.move(repositoryRoot.appendingPathComponent(change.path))
-            Log.info("git", "已删除 \(change.path)")
-        } catch {
-            status = .failure("删除失败：\(error.userFacingDescription)")
-            Log.warn("git", "删除 \(change.path) 失败：\(error)")
+        delete([change]).first?.trashed
+    }
+
+    /// 删好几条（变更列表多选）：各自进废纸篓，删不成的跳过、报一句；会话只刷新一次。「已删除」的变更没有东西可删，跳过。
+    /// 返回删成了的那些和它们在废纸篓里的位置（撤销从那里搬回来）。
+    @discardableResult
+    func delete(_ changes: [GitChange]) -> [(change: GitChange, trashed: URL)] {
+        let targets = changes.filter(canDelete)
+        guard !targets.isEmpty else { return [] }
+        var deleted: [(change: GitChange, trashed: URL)] = []
+        var failures: [(GitChange, Error)] = []
+        for change in targets {
+            do {
+                deleted.append((change, try Trash.move(repositoryRoot.appendingPathComponent(change.path))))
+                Log.info("git", "已删除 \(change.path)")
+            } catch {
+                failures.append((change, error))
+                Log.warn("git", "删除 \(change.path) 失败：\(error)")
+            }
         }
-        onRepositoryChanged?([change])
-        return trashed
+        if let (change, error) = failures.first {
+            status = .failure(targets.count == 1
+                ? "删除失败：\(error.userFacingDescription)"
+                : "有 \(failures.count) 个没能删除，比如 \(change.fileName)：\(error.userFacingDescription)")
+        }
+        onRepositoryChanged?(targets)
+        return deleted
     }
 }
 

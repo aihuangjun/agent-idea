@@ -11,18 +11,25 @@ struct StatusBarView: View {
     var body: some View {
         HStack(spacing: 14) {
             if session.hasGit {
+                // IDEA 的分支小部件：点一下弹出分支列表，切分支、新建分支都在里面
                 Button {
-                    workbench.toolWindow = .commit
+                    if session.isBranchPopupShown { session.isBranchPopupShown = false } else { session.showBranches() }
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "arrow.triangle.branch").font(.system(size: 10))
                         Text(branchText).lineLimit(1)
+                        if session.isSwitchingBranch { ProgressView().controlSize(.mini) }
                     }
                 }
                 .buttonStyle(.plain)
-                .toolTip("当前分支。点击打开提交视图")
+                .toolTip("当前分支。点击切换 / 新建分支（Git → 分支…）")
+                .popover(isPresented: $session.isBranchPopupShown, arrowEdge: .top) { BranchPopup(session: session) }
                 if session.changeGroups.total > 0 {
-                    Text("\(session.changeGroups.total) 个变更").foregroundStyle(Theme.vcsModified)
+                    Button { workbench.toolWindow = .commit } label: {
+                        Text("\(session.changeGroups.total) 个变更").foregroundStyle(Theme.vcsModified)
+                    }
+                    .buttonStyle(.plain)
+                    .toolTip("点击打开提交视图（⌘0）")
                 }
                 if session.isRefreshingGit {
                     ProgressView().controlSize(.mini)
@@ -59,6 +66,23 @@ struct StatusBarView: View {
         .frame(height: Theme.statusBarHeight)
         .background(Theme.panel)
         .overlay(alignment: .top) { Rectangle().fill(Theme.border).frame(height: 1) }
+        // 新建分支的对话框与「从哪儿同步」的选择挂在状态栏上：它总在界面上（弹窗、项目工具窗口都可能关着），⌘T 也能弹出来
+        .sheet(item: $session.newBranchRequest) { request in NewBranchSheet(session: session, base: request.base) }
+        .alert(
+            session.upstreamPrompt?.title ?? "",
+            isPresented: Binding(get: { session.upstreamPrompt != nil }, set: { if !$0 { session.upstreamPrompt = nil } }),
+            presenting: session.upstreamPrompt
+        ) { prompt in
+            if let suggested = prompt.suggested, prompt.remote != nil {
+                Button("跟踪 \(suggested) 并同步") { session.trackUpstream(suggested) }
+            }
+            if let remote = prompt.remote {
+                Button("推送并建立上游") { session.pushSettingUpstream(to: remote) }
+            }
+            Button(prompt.remote == nil ? "好" : "取消", role: .cancel) {}
+        } message: { prompt in
+            Text(prompt.message)
+        }
     }
 
     private var branchText: String {

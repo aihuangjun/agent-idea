@@ -201,7 +201,7 @@ import TestSupport
         #expect(runner.calls[0].arguments == ["add", "-A", "--", "a.txt", "b.txt"])
         #expect(runner.calls[1].arguments == ["commit", "--quiet", "--only", "-m", "msg", "--", "a.txt", "b.txt"])
         _ = try await git.push(repositoryRoot: repo, hasUpstream: false)
-        #expect(runner.calls[3].arguments == ["push", "--porcelain", "-u", "origin", "HEAD"])
+        #expect(runner.calls[3].arguments == ["push", "--porcelain", "--progress", "-u", "origin", "HEAD"])
     }
 }
 
@@ -252,8 +252,8 @@ import TestSupport
     let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
     try await git.restoreToHead(paths: ["new.swift", "old.swift", "new.swift"], repositoryRoot: repo)
     #expect(runner.calls[0].arguments == ["restore", "--source=HEAD", "--staged", "--worktree", "--", "new.swift", "old.swift"])
-    try await git.removeAdded(path: "a.txt", repositoryRoot: repo)
-    #expect(runner.calls[1].arguments == ["rm", "-f", "-q", "--", "a.txt"])
+    try await git.removeAdded(paths: ["b.txt", "a.txt"], repositoryRoot: repo)
+    #expect(runner.calls[1].arguments == ["rm", "-f", "-q", "--", "a.txt", "b.txt"])
 }
 
 /// 回滚历史里的一个变更：拿那次提交的补丁反向 apply；补丁走临时文件，用完删掉。

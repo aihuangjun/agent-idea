@@ -19,19 +19,38 @@ final class ProjectSession: ObservableObject, Identifiable {
     @Published private(set) var selection = TreeSelection()
     var selectedPath: String? {
         get { selection.anchor }
-        set { selection.select(newValue) }
+        set {
+            selection.select(newValue)
+            // 选中挪到别处了，还没滚完的那次定位就作废：否则很久之后打开项目视图，会莫名其妙滚到一个旧位置
+            if let pendingReveal, pendingReveal != newValue { self.pendingReveal = nil }
+        }
     }
-    /// 定位的次数。树视图观察它，据此决定「这次选中要滚动到可见」（鼠标点选不滚）。
-    @Published private(set) var revealRequests = 0
+    /// 等着树滚过去让它露出来的路径（定位、跨目录移动、新建文件夹之后）。树视图滚完调 `didScrollToReveal` 清掉。
+    /// 放在会话里而不是树视图的 `@State` 里：从变更列表「在项目视图中显示」时树视图此刻还不在界面上，
+    /// 切过去它才被建出来——那时它得知道还欠着一次滚动（1.2.0 前切过去是选中了，但滚动条不动，要自己找）。
+    @Published private(set) var pendingReveal: String?
 
     // MARK: - Git
 
     @Published private(set) var gitSnapshot: GitSnapshot = .empty
     @Published private(set) var gitIndex: GitStatusIndex = .empty
     @Published private(set) var changeGroups = ChangeGroups(changes: [])
+    /// 变更列表里选中的变更（按 `GitChange.path`）：单击选一个，⌘ / ⇧点击多选，多选之后右键一起回滚、删除（IDEA 的提交窗口）。
+    /// 放在会话里：切到别的工具窗口再切回来，选中还在。
+    @Published private(set) var changeSelection = TreeSelection()
     @Published private(set) var isRefreshingGit = false
-    /// 正在跟远程同步（fetch + rebase）。要走网络，比 status 慢得多，所以单独一个状态。
-    @Published private(set) var isSyncingRemote = false
+    /// 正在跟远程同步（fetch + rebase，或者没有上游时「推送并建立上游」）。要走网络，比 status 慢得多，所以单独一个状态。
+    @Published var isSyncingRemote = false
+    /// 正在切分支 / 新建分支。与同步互斥：两个都在动 HEAD 和工作区。
+    @Published var isSwitchingBranch = false
+    /// 分支弹窗里列的分支（打开弹窗时读一次，切完再读）。见 `ProjectSessionBranches.swift`。
+    @Published var branchList: GitBranchList?
+    /// 状态栏的分支弹窗开着没有（状态栏的分支名、Git → 分支… 都开它）。
+    @Published var isBranchPopupShown = false
+    /// 正在新建分支（对话框）。
+    @Published var newBranchRequest: NewBranchRequest?
+    /// 当前分支没有上游、用户点了同步：问他从哪儿同步。
+    @Published var upstreamPrompt: UpstreamPrompt?
     @Published private(set) var gitError: String?
     /// 仓库确定之后才有；没有 git 的项目为 nil。
     @Published private(set) var commit: CommitController?
@@ -85,7 +104,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 需要壳切到某个工具窗口（定位文件时切到项目树）。
     var onRequestToolWindow: (@MainActor (ToolWindow) -> Void)?
 
-    private let git: GitClient?
+    let git: GitClient?
     private let renderer: ContentRenderer
     let fileManager = FileManager.default
     /// 目录树的展开状态记在这里（按项目根目录分键），下次打开同一个项目原样展开。
@@ -281,8 +300,13 @@ final class ProjectSession: ObservableObject, Identifiable {
     func revealInTree(_ url: URL) {
         tree.reveal(url.path, root: project.root.path)
         recomputeRows()
-        revealRequests += 1
         selectedPath = url.path
+        pendingReveal = url.path
+    }
+
+    /// 树视图已经把 `path` 滚进视野了。
+    func didScrollToReveal(_ path: String) {
+        if pendingReveal == path { pendingReveal = nil }
     }
 
     /// 定位当前标签对应的文件。
@@ -524,8 +548,8 @@ final class ProjectSession: ObservableObject, Identifiable {
         if oldParent.path != newParent.path {
             // 搬到别的目录：像 IDEA 那样在新位置露出来（展开目标目录、滚过去），选中它
             tree.reveal(newURL.path, root: project.root.path)
-            revealRequests += 1
             selectedPath = newURL.path
+            pendingReveal = newURL.path
         }
         recomputeRows()
         search.applyChanges([oldURL.path, newURL.path])
@@ -578,6 +602,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
         activeTabID = incoming.id
         recordNavigation(incoming.id)
+        selectChange(of: incoming)
         renderActiveTab()
     }
 
@@ -588,9 +613,36 @@ final class ProjectSession: ObservableObject, Identifiable {
         recordNavigation(tabID)
         if let tab = activeTab {
             if let url = tab.fileURL { selectedPath = url.path }
+            selectChange(of: tab)
             if contents[tab.id] == nil { tab.isDiff ? loadDiff(for: tab) : loadFile(for: tab) }
         }
         renderActiveTab()
+    }
+
+    // MARK: - 变更列表的选中
+
+    /// 单击：只选这一条。
+    func selectChange(_ path: String) { changeSelection.select(path) }
+    /// ⌘点击：加进 / 移出多选。`order` 是列表里看得见的行序（折叠的分组不算）。
+    func toggleChangeSelection(_ path: String, order: [String]) { changeSelection.toggle(path, order: order) }
+    /// ⇧点击：从锚点连选到这一条。
+    func extendChangeSelection(to path: String, order: [String]) { changeSelection.extend(to: path, order: order) }
+
+    /// 选中的变更，按列表顺序（变更在前、未跟踪在后）。
+    var selectedChanges: [GitChange] {
+        (changeGroups.tracked + changeGroups.untracked).filter { changeSelection.contains($0.path) }
+    }
+
+    /// 右键点在哪一条上，操作的是哪几条：点在多选里就是整个多选（IDEA、访达都这样），否则只是它。
+    func changesForAction(on change: GitChange) -> [GitChange] {
+        changeSelection.count > 1 && changeSelection.contains(change.path) ? selectedChanges : [change]
+    }
+
+    /// 标签切到某条工作区变更的 diff 上（F7、⌘⇥、目录树里「显示 diff」……）：变更列表的选中跟过去，
+    /// 已经在多选里的不动（不把用户挑好的多选收成一条）。
+    private func selectChange(of tab: EditorTab) {
+        guard let change = tab.change, !changeSelection.contains(change.path) else { return }
+        changeSelection.select(change.path)
     }
 
     // MARK: - 后退 / 前进
@@ -1004,6 +1056,10 @@ final class ProjectSession: ObservableObject, Identifiable {
         gitSnapshot = snapshot
         gitIndex = GitStatusIndex(snapshot: snapshot)
         changeGroups = ChangeGroups(changes: snapshot.changes)
+        // 被提交 / 回滚 / 删掉的变更从选中里去掉
+        var selection = changeSelection
+        selection.retain(Set(snapshot.changes.map(\.path)), order: (changeGroups.tracked + changeGroups.untracked).map(\.path))
+        if selection != changeSelection { changeSelection = selection }
         commit?.update(snapshot: snapshot)
         // 有了新提交（或切了分支）才重拉历史；工作区文件改动不影响 log。控制器自己比对 HEAD 去重
         history?.currentHead = snapshot.branch.headOID
@@ -1109,25 +1165,31 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 能不能跟远程同步：够得着远程，而且没在同步。
     /// 没有上游的仓库（还没 push 过、游离 HEAD）按钮直接灰掉，提交历史的刷新退回本地刷新，
     /// 不要点一下弹一条要用户手动关掉的错误。
-    var canSyncWithRemote: Bool { hasRemoteUpstream && !isSyncingRemote }
+    var canSyncWithRemote: Bool { hasRemoteUpstream && !isSyncingRemote && !isSwitchingBranch }
+
+    /// 第一次 git status 回来了没有。回来之前 `gitSnapshot` 是 `.empty`（看着像「还没有提交」），同步按钮灰着的原因得另说。
+    var hasLoadedGitStatus: Bool { gitSnapshot != .empty }
 
     /// 与远程同步（IDEA 的 Update Project）：`git fetch` 之后把上游的新提交 rebase 到本地分支下面，
     /// 完了整体刷新（目录树、开着的文件、git 状态、已经打开的提交历史）。
     ///
     /// 结果与失败都报在状态栏：成功的提示自己消失，失败的留着等用户看完关掉。
     func syncWithRemote() {
-        guard let git, let repositoryRoot = project.repositoryRoot, !isSyncingRemote else { return }
+        guard let git, let repositoryRoot = project.repositoryRoot, !isSyncingRemote, !isSwitchingBranch else { return }
         // rebase 会重写工作区里的文件，先把没保存的写盘：留在编辑器里的草稿不在 git 眼里，
         // 既进不了 --autostash，拉下来之后 reloadOpenFilesIfChanged 也不会碰改过的文档，
         // 下一次 ⌘S 就会把同事的改动覆盖掉。IDEA 的 Update Project 同样先保存。
         saveAll()
         isSyncingRemote = true
+        // 开始也记一笔：同步卡住时日志里只会有开始、没有结束，一眼看得出是卡在这儿了
+        let started = Date()
+        Log.info("git", "同步远程：开始（\(project.name)，\(gitSnapshot.branch.upstream ?? "?")）")
         // 刻意不在 tearDown 里取消：rebase 跑到一半被 SIGTERM 打断可能把仓库停在 rebase 中途，
         // 而这个应用没有解冲突的界面。任务只捕获弱引用，项目关了它自己会安静地跑完。
         Task { [weak self] in
             do {
                 let result = try await git.syncWithRemote(repositoryRoot: repositoryRoot)
-                Log.info("git", "同步远程：\(result.summary)")
+                Log.info("git", "同步远程：\(result.summary)（\(String(format: "%.1f", Date().timeIntervalSince(started))) 秒）")
                 guard let self else { return }
                 self.isSyncingRemote = false
                 // autostash 没能放回去时改动只剩在 stash 里，这条提示不能几秒后自己溜走
@@ -1140,7 +1202,7 @@ final class ProjectSession: ObservableObject, Identifiable {
                 self?.isSyncingRemote = false
                 return
             } catch {
-                Log.warn("git", "同步远程失败：\(error)")
+                Log.warn("git", "同步远程失败（\(String(format: "%.1f", Date().timeIntervalSince(started))) 秒）：\(error)")
                 guard let self else { return }
                 self.isSyncingRemote = false
                 // 出错的提示不自动消失，用户自己关

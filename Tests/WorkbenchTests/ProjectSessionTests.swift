@@ -78,7 +78,7 @@ private func gitRunner(root: String, status: @escaping @Sendable () -> String, e
         session.revealActiveTab()
         #expect(session.rows.count == 3)
         #expect(session.selectedPath == project.appendingPathComponent("src/main.py").path)
-        #expect(session.revealRequests == 1)
+        #expect(session.pendingReveal == project.appendingPathComponent("src/main.py").path, "树视图出现时要滚过去")
         #expect(workbench.toolWindow == .project)
 
         workbench.closeProject()
@@ -271,7 +271,7 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
 
         #expect(runner.calls(startingWith: "add").first == ["add", "-A", "--", "a.txt", "b.txt"])
         #expect(runner.calls(startingWith: "commit").first == ["commit", "--quiet", "--only", "-m", "feat: x", "--", "a.txt", "b.txt"])
-        #expect(runner.calls(startingWith: "push").first == ["push", "--porcelain"])
+        #expect(runner.calls(startingWith: "push").first == ["push", "--porcelain", "--progress"])
         #expect(commit.message.isEmpty)
         if case .success(let message) = commit.status { #expect(message.contains("main -> main")) } else { Issue.record("应是成功状态：\(String(describing: commit.status))") }
         await waitUntil { session.changeGroups.total == 1 }
@@ -800,7 +800,7 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         #expect(session.rows.map(\.node.name).filter { $0 != "recent.json" } == ["dst", "deep", "a.txt", "src"], "目标目录展开、源目录清空")
         #expect(session.tree.isExpanded(target.path))
         #expect(session.contents[session.tabs[0].id]?.text == "a")
-        #expect(session.revealRequests == 1, "树要滚到新位置")
+        #expect(session.pendingReveal == moved.path, "树要滚到新位置")
 
         // 不弹确认，状态栏给「撤销」：与「编辑 → 撤销」撤的是同一步（撤销栈顶），撤回去同样走 git mv，再给一次「重做」
         #expect(session.banner == "已移动 a.txt 到 dst/deep/")
@@ -951,7 +951,7 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         await waitUntil { FileManager.default.fileExists(atPath: file.path) }
         #expect(try String(contentsOf: file, encoding: .utf8) == "bye")
         await waitUntil { session.rows.contains { $0.node.name == "gone.txt" } }
-        #expect(session.selectedPath == file.path && session.revealRequests == 1)
+        #expect(session.selectedPath == file.path && session.pendingReveal == file.path)
         #expect(session.redoTitle == "重做删除 gone.txt")
 
         session.redo()
@@ -1065,7 +1065,7 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         var isDirectory: ObjCBool = false
         #expect(FileManager.default.fileExists(atPath: created.path, isDirectory: &isDirectory) && isDirectory.boolValue)
         #expect(session.rows.map(\.node.name).filter { $0 != "recent.json" } == ["sub", "docs", "taken.txt"])
-        #expect(session.selectedPath == created.path && session.revealRequests == 1)
+        #expect(session.selectedPath == created.path && session.pendingReveal == created.path)
         #expect(session.undoTitle == "撤销新建文件夹 docs")
 
         session.createFolder(named: "docs", in: sub)
@@ -1201,5 +1201,251 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         #expect(session.rows.map(\.node.name).filter { $0 != "recent.json" } == ["a", "deep", "x.txt", "b"])
         #expect(session.tree.isExpanded(directory.appendingPathComponent("a/deep").path))
         #expect(!session.tree.isExpanded(directory.appendingPathComponent("b").path))
+    }
+}
+
+/// 变更列表多选之后一起回滚、一起删除（IDEA 的提交窗口）：回滚合成一条 restore + 一条 rm，未跟踪的不碰；
+/// 删除「已删除」的变更跳过。两样都记成一步撤销，一次撤回来。
+@Test @MainActor func changeListMultiSelectionRollsBackAndDeletesTogether() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        func url(_ name: String) -> URL { directory.appendingPathComponent(name) }
+        try "edited\n".write(to: url("m.txt"), atomically: true, encoding: .utf8)
+        try "edited2\n".write(to: url("n.txt"), atomically: true, encoding: .utf8)
+        try "fresh\n".write(to: url("new.txt"), atomically: true, encoding: .utf8)
+        try "junk\n".write(to: url("junk.txt"), atomically: true, encoding: .utf8)
+        let calls = Locked<[[String]]>([])
+        let status = "# branch.head main\u{0}1 .M N... 100644 100644 100644 a a m.txt\u{0}1 .M N... 100644 100644 100644 a a n.txt\u{0}"
+            + "1 A. N... 000000 100644 100644 0 a new.txt\u{0}1 .D N... 100644 100644 000000 a a gone.txt\u{0}? junk.txt\u{0}"
+        let runner = gitRunner(root: root, status: { status }, extra: { arguments in
+            switch arguments.first {
+            case "restore":
+                calls.value.append(arguments)
+                for path in arguments.drop(while: { $0 != "--" }).dropFirst() { try? "head\n".write(toFile: root + "/" + path, atomically: true, encoding: .utf8) }
+                return shellOutput("")
+            case "rm":
+                calls.value.append(arguments)
+                for path in arguments.drop(while: { $0 != "--" }).dropFirst() { try? FileManager.default.removeItem(atPath: root + "/" + path) }
+                return shellOutput("")
+            case "add":
+                calls.value.append(arguments)
+                return shellOutput("")
+            default:
+                return nil
+            }
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.changeGroups.total == 5 }
+        let byPath = Dictionary(uniqueKeysWithValues: session.gitSnapshot.changes.map { ($0.path, $0) })
+        let order = (session.changeGroups.tracked + session.changeGroups.untracked).map(\.path)
+
+        // 单击 m、⌘点击 new 和 junk：右键点在多选里的哪一条上都是这三条，点在外面的只是它自己
+        session.selectChange("m.txt")
+        session.toggleChangeSelection("new.txt", order: order)
+        session.toggleChangeSelection("junk.txt", order: order)
+        #expect(Set(session.selectedChanges.map(\.path)) == ["m.txt", "new.txt", "junk.txt"])
+        #expect(session.changesForAction(on: try #require(byPath["new.txt"])).count == 3)
+        #expect(session.changesForAction(on: try #require(byPath["n.txt"])).map(\.path) == ["n.txt"])
+
+        session.rollback(session.selectedChanges)
+        await waitUntil { session.undoTitle == "撤销回滚 2 个文件" }
+        #expect(calls.value == [["restore", "--source=HEAD", "--staged", "--worktree", "--", "m.txt"], ["rm", "-f", "-q", "--", "new.txt"]], "合成一条 restore、一条 rm")
+        #expect(try String(contentsOf: url("m.txt"), encoding: .utf8) == "head\n")
+        #expect(!FileManager.default.fileExists(atPath: url("new.txt").path))
+        #expect(FileManager.default.fileExists(atPath: url("junk.txt").path), "未跟踪的不在 git 里，回滚不碰它")
+
+        session.undo()
+        await waitUntil { (try? String(contentsOf: url("m.txt"), encoding: .utf8)) == "edited\n" && FileManager.default.fileExists(atPath: url("new.txt").path) }
+        #expect(try String(contentsOf: url("new.txt"), encoding: .utf8) == "fresh\n")
+        await waitUntil { calls.value.contains(["add", "-A", "--", "new.txt"]) }
+        #expect(calls.value.contains(["add", "-A", "--", "new.txt"]), "新增的要放回索引")
+
+        // 一起删除：已删除的那条没有东西可删，跳过；其余进废纸篓，一步撤回来
+        session.delete([try #require(byPath["n.txt"]), try #require(byPath["junk.txt"]), try #require(byPath["gone.txt"])])
+        #expect(!FileManager.default.fileExists(atPath: url("n.txt").path) && !FileManager.default.fileExists(atPath: url("junk.txt").path))
+        #expect(session.undoTitle == "撤销删除 2 个文件")
+        session.undo()
+        await waitUntil { FileManager.default.fileExists(atPath: url("n.txt").path) && FileManager.default.fileExists(atPath: url("junk.txt").path) }
+        #expect(try String(contentsOf: url("junk.txt"), encoding: .utf8) == "junk\n")
+    }
+}
+
+/// 一起回滚失败了（比如其中一个文件被占着）：逐个再试，能回滚的照样回滚，不行的那个报出来。
+@Test @MainActor func batchRollbackFallsBackToOneByOne() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        let status = "# branch.head main\u{0}1 .M N... 100644 100644 100644 a a bad.txt\u{0}1 .M N... 100644 100644 100644 a a m.txt\u{0}"
+        let restores = Locked<[[String]]>([])
+        let runner = gitRunner(root: root, status: { status }, extra: { arguments in
+            guard arguments.first == "restore" else { return nil }
+            restores.value.append(arguments)
+            return arguments.contains("bad.txt") ? shellOutput("", status: 1, stderr: "error: unable to unlink bad.txt") : shellOutput("")
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.changeGroups.total == 2 }
+        let commit = try #require(session.commit)
+        let done = Locked<[String]?>(nil)
+        commit.rollback(session.gitSnapshot.changes) { done.value = $0.map(\.path) }
+        await waitUntil { done.value != nil }
+        #expect(done.value == ["m.txt"])
+        #expect(restores.value.count == 3, "一起一次，再逐个两次")
+        #expect(commit.status == .failure("有 1 个没能回滚，比如 bad.txt：error: unable to unlink bad.txt"))
+    }
+}
+
+/// 变更列表的选中跟着当前的 diff 标签走（F7、⌘⇥、目录树「显示 diff」切过去也亮在那一条上），但不把挑好的多选收掉；
+/// 变更没了（提交、回滚掉）从选中里去掉。
+@Test @MainActor func changeSelectionFollowsDiffTabsAndDropsVanishedChanges() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        for name in ["a.txt", "b.txt", "c.txt"] { try name.write(to: directory.appendingPathComponent(name), atomically: true, encoding: .utf8) }
+        let status = Locked("# branch.head main\u{0}1 .M N... 100644 100644 100644 a a a.txt\u{0}1 .M N... 100644 100644 100644 a a b.txt\u{0}1 .M N... 100644 100644 100644 a a c.txt\u{0}")
+        let workbench = makeWorkbench(in: directory, git: gitRunner(root: root, status: { status.value }))
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.changeGroups.total == 3 }
+        let byPath = Dictionary(uniqueKeysWithValues: session.gitSnapshot.changes.map { ($0.path, $0) })
+        let order = ["a.txt", "b.txt", "c.txt"]
+
+        session.openDiff(try #require(byPath["b.txt"]), pinned: true)
+        #expect(session.changeSelection.paths == ["b.txt"])
+        session.toggleChangeSelection("c.txt", order: order)
+        session.openDiff(try #require(byPath["c.txt"]), pinned: true)
+        #expect(session.changeSelection.paths == ["b.txt", "c.txt"], "已经在多选里的不收成一条")
+        session.openDiff(try #require(byPath["a.txt"]), pinned: true)
+        #expect(session.changeSelection.paths == ["a.txt"])
+
+        session.extendChangeSelection(to: "c.txt", order: order)
+        #expect(session.changeSelection.paths == ["a.txt", "b.txt", "c.txt"])
+        status.value = "# branch.head main\u{0}1 .M N... 100644 100644 100644 a a b.txt\u{0}"
+        session.refreshGit()
+        await waitUntil { session.changeGroups.total == 1 }
+        #expect(session.changeSelection.paths == ["b.txt"] && session.changeSelection.anchor == "b.txt")
+    }
+}
+
+/// 当前分支没有上游：同步按钮不再灰掉，点了问从哪儿同步（默认跟踪 origin/master）；选了就设上游、接着同步。
+@Test @MainActor func syncWithoutUpstreamOffersToTrackTheDefaultBranch() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        let upstream = Locked<String?>(nil)
+        let runner = gitRunner(root: root, status: {
+            "# branch.oid abc\u{0}# branch.head feat/x\u{0}" + (upstream.value.map { "# branch.upstream \($0)\u{0}# branch.ab +0 -0\u{0}" } ?? "")
+        }, extra: { arguments in
+            switch arguments.first {
+            case "remote": return shellOutput("origin\n")
+            case "for-each-ref": return shellOutput("refs/heads/feat/x\u{1f}\u{1f}*\nrefs/heads/master\u{1f}origin/master\u{1f} \nrefs/remotes/origin/master\u{1f}\u{1f} \n")
+            case "symbolic-ref": return shellOutput("origin/master\n")
+            case "branch":
+                upstream.value = arguments[1].replacingOccurrences(of: "--set-upstream-to=", with: "")
+                return shellOutput("")
+            case "rev-parse" where arguments.contains("@{upstream}"):
+                return upstream.value.map { shellOutput($0 + "\n") } ?? shellOutput("", status: 128)
+            case "rev-parse" where arguments.contains("--git-path"): return shellOutput("/nonexistent")
+            case "rev-list": return shellOutput("0\t0")
+            default: return nil
+            }
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.hasLoadedGitStatus }
+        #expect(!session.canSyncWithRemote && session.needsUpstreamChoice && session.canRequestSync, "没有上游也能点")
+
+        session.requestSync()
+        await waitUntil { session.upstreamPrompt != nil }
+        let prompt = try #require(session.upstreamPrompt)
+        #expect(prompt == UpstreamPrompt(branch: "feat/x", suggested: "origin/master", remote: "origin"))
+        #expect(prompt.message.contains("推送仍然推到远端的同名分支 origin/feat/x"))
+        #expect(runner.calls(startingWith: "fetch").isEmpty, "问之前不联网")
+
+        session.upstreamPrompt = nil
+        session.trackUpstream("origin/master")
+        await waitUntil { !runner.calls(startingWith: "fetch").isEmpty && !session.isSyncingRemote }
+        #expect(runner.calls(startingWith: "branch") == [["branch", "--set-upstream-to=origin/master"]])
+        #expect(runner.calls(startingWith: "fetch").count == 1, "设完上游马上同步")
+        await waitUntil { session.hasRemoteUpstream }
+        #expect(session.gitSnapshot.branch.upstream == "origin/master")
+    }
+}
+
+/// 分支弹窗：签出远程分支（本地没有同名的就建一个跟踪它的，有就切过去）、签出本地分支、新建分支（默认从 origin/master 开、跟踪它）。
+@Test @MainActor func branchPopupChecksOutAndCreatesBranches() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        let runner = gitRunner(root: root, status: { "# branch.oid abc\u{0}# branch.head feat/x\u{0}" }, extra: { arguments in
+            switch arguments.first {
+            case "remote": return shellOutput("origin\n")
+            case "for-each-ref":
+                return shellOutput("refs/heads/feat/x\u{1f}\u{1f}*\nrefs/heads/master\u{1f}origin/master\u{1f} \nrefs/remotes/origin/master\u{1f}\u{1f} \nrefs/remotes/origin/dev\u{1f}\u{1f} \n")
+            case "symbolic-ref": return shellOutput("origin/master\n")
+            case "switch" where arguments.contains("broken"): return shellOutput("", status: 1, stderr: "error: Your local changes to the following files would be overwritten by checkout")
+            default: return nil
+            }
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.hasLoadedGitStatus }
+
+        session.showBranches()
+        #expect(session.isBranchPopupShown)
+        await waitUntil { session.branchList != nil }
+        let list = try #require(session.branchList)
+        #expect(list.remote == ["origin/master", "origin/dev"])
+        #expect(session.defaultNewBranchBase == "origin/master", "新建分支默认从 origin/master 开")
+
+        session.checkout(remote: "origin/dev")
+        #expect(!session.isBranchPopupShown, "选了就关弹窗")
+        await waitUntil { !session.isSwitchingBranch && runner.calls(startingWith: "switch").count == 1 }
+        #expect(runner.calls(startingWith: "switch").last == ["switch", "-c", "dev", "--track", "origin/dev"])
+
+        session.checkout(remote: "origin/master")
+        await waitUntil { !session.isSwitchingBranch && runner.calls(startingWith: "switch").count == 2 }
+        #expect(runner.calls(startingWith: "switch").last == ["switch", "master"], "本地已有同名分支：切过去，不再建")
+
+        #expect(session.newBranchProblem("master") == .exists)
+        #expect(session.newBranchProblem("a b") == .invalid)
+        session.createBranch(named: " feat/y ", from: "origin/master")
+        await waitUntil { !session.isSwitchingBranch && runner.calls(startingWith: "switch").count == 3 }
+        #expect(runner.calls(startingWith: "switch").last == ["switch", "-c", "feat/y", "--track", "origin/master"])
+        session.createBranch(named: "feat/z", from: "master")
+        await waitUntil { !session.isSwitchingBranch && runner.calls(startingWith: "switch").count == 4 }
+        #expect(runner.calls(startingWith: "switch").last == ["switch", "-c", "feat/z", "--no-track", "master"], "从本地分支开的不跟踪")
+
+        // git 拒绝切（会覆盖没提交的改动）：原话报出来，不卡在「切换中」
+        session.createBranch(named: "broken", from: "master")
+        await waitUntil { session.banner?.contains("切换到 broken 失败") == true }
+        #expect(session.banner?.contains("would be overwritten") == true)
+        #expect(!session.isSwitchingBranch)
+    }
+}
+
+/// 读分支失败不等于「没有远程」：点同步时照实报错，不弹「没有配置远程仓库」；还没滚完的定位在选中挪走后作废。
+@Test @MainActor func syncPromptReportsBranchReadFailureAndStaleRevealIsDropped() async throws {
+    try await withTemporaryDirectory { directory in
+        let root = directory.resolvingSymlinksInPath().path
+        try "x".write(to: directory.appendingPathComponent("a.txt"), atomically: true, encoding: .utf8)
+        try "y".write(to: directory.appendingPathComponent("b.txt"), atomically: true, encoding: .utf8)
+        let runner = gitRunner(root: root, status: { "# branch.oid abc\u{0}# branch.head feat/x\u{0}" }, extra: { arguments in
+            arguments.first == "for-each-ref" ? shellOutput("", status: 128, stderr: "fatal: index file corrupt") : nil
+        })
+        let workbench = makeWorkbench(in: directory, git: runner)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        await waitUntil { session.hasLoadedGitStatus }
+        session.requestSync()
+        await waitUntil { session.banner != nil }
+        #expect(session.banner?.contains("index file corrupt") == true)
+        #expect(session.upstreamPrompt == nil)
+
+        session.revealInTree(directory.appendingPathComponent("a.txt"))
+        #expect(session.pendingReveal == directory.appendingPathComponent("a.txt").path)
+        session.select(directory.appendingPathComponent("b.txt").path)
+        #expect(session.pendingReveal == nil, "选中挪走了，旧的定位不再滚")
     }
 }

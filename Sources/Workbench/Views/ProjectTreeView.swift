@@ -33,13 +33,12 @@ struct ProjectTreeView: View {
                 if session.isSyncingRemote {
                     ProgressView().controlSize(.mini).padding(.trailing, 4)
                 }
-                IconButton(ToolWindowIcon.syncWithRemote, help: syncHelp, size: 22) { session.syncWithRemote() }
-                    .disabled(!session.canSyncWithRemote)
+                IconButton(ToolWindowIcon.syncWithRemote, help: syncHelp, size: 22) { session.requestSync() }
+                    .disabled(!session.canRequestSync)
                 IconButton("magnifyingglass", help: "查找文件（⌘F）", isActive: search.isActive, size: 22) {
                     if search.isActive { closeSearch() } else { search.activate() }
                 }
                 IconButton("scope", help: "定位当前打开的文件（⌥⌘L）", size: 22) {
-                    scrollOnSelection = true
                     search.isActive = false
                     session.revealActiveTab()
                 }
@@ -60,13 +59,24 @@ struct ProjectTreeView: View {
         .background(Theme.panel)
     }
 
-    /// 同步按钮的提示。不能同步时说清楚是为什么——按钮灰着，用户总得知道差什么。
+    /// 同步按钮的提示。不能同步时说清楚是为什么——按钮灰着，用户总得知道差什么（1.2.0 前同步中、状态没读回来、
+    /// 游离 HEAD 这几种灰法都没说，或者说错成「没有上游」「还没有提交」）。
     private var syncHelp: String {
         guard session.hasGit else { return "这个项目不在 git 仓库里" }
         let branch = session.gitSnapshot.branch
+        if session.isSyncingRemote {
+            return "正在与\(branch.upstream.map { " \($0) " } ?? "远程")同步…（连续 \(Int(GitClient.networkStallTimeout)) 秒没动静会自动放弃）"
+        }
+        if session.isSwitchingBranch { return "正在切换分支…" }
+        guard session.hasLoadedGitStatus else {
+            return session.gitError.map { "git 出错了：\($0)" } ?? "正在读取 git 状态…"
+        }
         if branch.isUnborn { return "仓库还没有提交，没有可同步的分支" }
+        if branch.isDetached {
+            return "HEAD 没有停在分支上（游离在 \(branch.name)，多半是正在 rebase / 切到了某个提交），没有分支可同步"
+        }
         guard let upstream = branch.upstream else {
-            return "\(branch.name) 没有跟踪远程分支，先 git push -u 建立上游"
+            return "\(branch.name) 没有跟踪远程分支。点一下选择：跟踪远程的默认分支（origin/master），或者推送并建立上游"
         }
         return "与 \(upstream) 同步：git fetch + rebase（⌘T）"
     }
@@ -76,7 +86,6 @@ struct ProjectTreeView: View {
         let url = search.url(for: match)
         session.openFile(url, pinned: true)
         closeSearch()
-        scrollOnSelection = true
         session.reveal(url)
     }
 
@@ -123,6 +132,10 @@ struct ProjectTreeView: View {
                     scrollOnSelection = false
                     proxy.scrollTo(path)
                 }
+                // 定位（⌥⌘L、搜索结果、跨目录移动……）：滚到视野中间。树此刻可能刚被建出来（从变更列表「在项目视图中显示」
+                // 切过来），出现时也要把欠着的那次滚完
+                .onChange(of: session.pendingReveal) { _, path in scrollToReveal(path, proxy: proxy) }
+                .onAppear { scrollToReveal(session.pendingReveal, proxy: proxy) }
             }
             .focusable()
             .focusEffectDisabled()
@@ -152,7 +165,6 @@ struct ProjectTreeView: View {
             }
             .contentShape(Rectangle())
             .onTapGesture { isFocused = true }
-            .onChange(of: session.revealRequests) { _, _ in scrollOnSelection = true }
             .destructiveConfirmation($pending)
             .sheet(item: $renaming) { node in
                 RenameSheet(node: node) { session.renameProblem(for: node, newName: $0) } commit: { session.rename(node, to: $0) }
@@ -164,6 +176,16 @@ struct ProjectTreeView: View {
                     session.createFolder(named: $0, in: request.directory)
                 }
             }
+        }
+    }
+
+    /// 把要定位的那一行滚到视野中间。推到下一轮再滚：刚出现（或行刚展开）的 LazyVStack 这一轮还没排版，
+    /// 这时 `scrollTo` 找不到行、什么都不做。
+    private func scrollToReveal(_ path: String?, proxy: ScrollViewProxy) {
+        guard let path else { return }
+        DispatchQueue.main.async {
+            proxy.scrollTo(path, anchor: .center)
+            session.didScrollToReveal(path)
         }
     }
 

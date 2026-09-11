@@ -1,7 +1,7 @@
 import Foundation
 
-/// 目录树的选中状态（IDEA / 访达的习惯）：单击选一个，⌘点击加减一个，⇧点击从锚点连选到这一行。
-/// `anchor` 是键盘导航、重命名这些「只对一个」的操作看的那一个；`paths` 是全部选中的。纯值类型，顺序由调用方给（树的行序）。
+/// 目录树 / 变更列表的选中状态（IDEA / 访达的习惯）：单击选一个，⌘点击加减一个，⇧点击从锚点连选到这一行。
+/// `anchor` 是键盘导航、重命名这些「只对一个」的操作看的那一个；`paths` 是全部选中的。纯值类型，顺序由调用方给（列表的行序）。
 public struct TreeSelection: Equatable, Sendable {
     public private(set) var anchor: String?
     public private(set) var paths: Set<String> = []
@@ -36,6 +36,13 @@ public struct TreeSelection: Equatable, Sendable {
             return
         }
         paths = Set(order[min(from, to)...max(from, to)])
+    }
+
+    /// 只留下还在的那些（列表刷新之后：变更被提交了、文件被删了）。锚点不在了就落到剩下的里按行序最靠前的那个。
+    public mutating func retain(_ existing: Set<String>, order: [String]) {
+        guard !paths.isSubset(of: existing) else { return }
+        paths.formIntersection(existing)
+        if let anchor, !paths.contains(anchor) { self.anchor = order.first { paths.contains($0) } ?? paths.first }
     }
 
     /// 选中里真正要操作的那些：祖先也被选中的去掉（搬了目录，里面的跟着走；删了目录，里面的也没了）。顺序照 `order`。

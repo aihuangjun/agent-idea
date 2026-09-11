@@ -155,9 +155,12 @@ public struct AgentIDEARootScene: Scene {
                     .disabled(!(workbench.active?.commit?.canPush ?? false))
                 Divider()
                 // IDEA 的 Update Project 也是 ⌘T
-                Button("与远程同步（fetch + rebase）") { workbench.active?.syncWithRemote() }
+                // 没有上游时也能点：弹出选择（跟踪 origin/master，或推送并建立上游）
+                Button("与远程同步（fetch + rebase）") { workbench.active?.requestSync() }
                     .keyboardShortcut("t", modifiers: .command)
-                    .disabled(!(workbench.active?.canSyncWithRemote ?? false))
+                    .disabled(!(workbench.active?.canRequestSync ?? false))
+                Button("分支…") { workbench.active?.showBranches() }
+                    .disabled(!(workbench.active?.hasGit ?? false))
                 Button("刷新 git 状态") { workbench.active?.refreshGit() }
                     .disabled(!(workbench.active?.hasGit ?? false))
             }

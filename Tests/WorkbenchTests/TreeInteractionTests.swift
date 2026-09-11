@@ -292,3 +292,84 @@ import TestSupport
         #expect(!autoscroll.isRunning)
     }
 }
+
+/// 从变更列表「在项目视图中显示」：定位的那一刻树视图还不在界面上（工具窗口正显示着变更列表），切过去才被建出来。
+/// 它一出现就得把那一行滚进视野（1.2.0 前选中了，但滚动条停在顶上，要自己往下找）；树已经在界面上时再定位也照滚。
+@Test @MainActor func revealScrollsTheTreeEvenWhenItAppearsAfterwards() async throws {
+    try await withTemporaryDirectory { directory in
+        for index in 0..<60 {
+            try "x".write(to: directory.appendingPathComponent(String(format: "file-%02d.txt", index)), atomically: true, encoding: .utf8)
+        }
+        let session = ProjectSession(root: directory, git: nil, renderer: ContentRenderer(),
+                                     preferences: ReadingPreferences(defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!))
+        let target = directory.appendingPathComponent("file-55.txt")
+        session.reveal(target)
+        #expect(session.pendingReveal == target.path)
+
+        let size = CGSize(width: 320, height: 300)
+        let hosting = NSHostingView(rootView: ProjectTreeView(session: session).frame(width: size.width, height: size.height))
+        hosting.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: size.width, height: size.height), styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = hosting
+        window.orderBack(nil)
+        defer { window.orderOut(nil) }
+
+        func find<T: NSView>(_: T.Type, in view: NSView) -> T? {
+            if let match = view as? T { return match }
+            for child in view.subviews { if let match = find(T.self, in: child) { return match } }
+            return nil
+        }
+        /// 第 `index` 行（不算根那一行）整个在视野里。行在文档里的位置：上边距 4 + 根那一行 22，然后每行 22。
+        func isVisible(row index: Int) -> Bool {
+            hosting.layoutSubtreeIfNeeded()
+            guard let clip = find(NSScrollView.self, in: hosting)?.contentView, let document = clip.documentView?.bounds else { return false }
+            let visible = clip.documentVisibleRect
+            let top = clip.isFlipped ? visible.minY : document.maxY - visible.maxY
+            let rowTop = 4 + 22 + CGFloat(index) * 22
+            return rowTop >= top && rowTop + 22 <= top + visible.height
+        }
+        @MainActor func spinUntil(_ seconds: TimeInterval, _ done: () -> Bool) async {
+            let deadline = Date().addingTimeInterval(seconds)
+            while Date() < deadline, !done() {
+                spin(0.02)
+                await Task.yield()
+            }
+        }
+
+        await spinUntil(10) { isVisible(row: 55) && session.pendingReveal == nil }
+        #expect(isVisible(row: 55), "树一出现就滚到定位的那一行")
+        #expect(!isVisible(row: 0))
+        #expect(session.pendingReveal == nil, "滚完就不欠了")
+
+        // 树已经在界面上：再定位到上面的一行，滚回去
+        session.reveal(directory.appendingPathComponent("file-02.txt"))
+        await spinUntil(10) { isVisible(row: 2) }
+        #expect(isVisible(row: 2))
+        #expect(session.selectedPath == directory.appendingPathComponent("file-02.txt").path)
+    }
+}
+
+/// 分支弹窗能排出来：新建分支、本地分支、远程分支三段都在。设了 AGENTIDEA_SNAPSHOT_DIR 就把样子导出来看。
+@Test @MainActor func branchPopupLaysOutSections() async throws {
+    try await withTemporaryDirectory { directory in
+        let session = ProjectSession(root: directory, git: nil, renderer: ContentRenderer(),
+                                     preferences: ReadingPreferences(defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!))
+        session.branchList = GitBranchList.parse(
+            "refs/heads/feat/retrieval-four-lanes\u{1f}\u{1f}*\nrefs/heads/master\u{1f}origin/master\u{1f} \nrefs/remotes/origin/master\u{1f}\u{1f} \nrefs/remotes/origin/dev\u{1f}\u{1f} \n",
+            remotes: ["origin"], remoteHead: "origin/master")
+        let hosting = NSHostingView(rootView: BranchPopup(session: session))
+        let size = hosting.fittingSize
+        #expect(size.width == 340 && size.height > 150, "\(size)")
+        hosting.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: size.width, height: size.height), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = hosting
+        window.orderBack(nil)
+        defer { window.orderOut(nil) }
+        hosting.layoutSubtreeIfNeeded()
+        if let snapshotDirectory = ProcessInfo.processInfo.environment["AGENTIDEA_SNAPSHOT_DIR"],
+           let bitmap = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) {
+            hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+            try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: snapshotDirectory).appendingPathComponent("branch-popup.png"))
+        }
+    }
+}

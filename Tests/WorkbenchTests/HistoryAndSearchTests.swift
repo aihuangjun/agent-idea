@@ -218,7 +218,7 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
         #expect(session.canSyncWithRemote)
         session.syncWithRemote()
         await waitUntil { !session.isSyncingRemote && session.banner != nil }
-        #expect(runner.calls(startingWith: "fetch").last == ["fetch", "--prune"])
+        #expect(runner.calls(startingWith: "fetch").last == ["fetch", "--prune", "--progress"])
         #expect(runner.calls(startingWith: "rebase").last == ["rebase", "--autostash", "origin/main"])
         #expect(session.banner == "已从 origin/main 拉取 2 个提交")
         // 同步完整体刷新一遍，历史也重拉了
