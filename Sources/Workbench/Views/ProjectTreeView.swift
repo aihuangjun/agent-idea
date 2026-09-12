@@ -103,7 +103,11 @@ struct ProjectTreeView: View {
                             name: session.project.name, path: session.project.root.path,
                             isDropTarget: dropTarget.directory == session.project.root.path,
                             dropTarget: dropTarget(row: session.project.root.path, into: session.project.root),
-                            onNewFolder: { newFolder = NewFolderRequest(directory: session.project.root) }
+                            onNewFolder: { newFolder = NewFolderRequest(directory: session.project.root) },
+                            onCopyPath: {
+                                Desktop.copyToClipboard(session.project.root.path)
+                                session.notify("已复制 \(session.project.root.path)")
+                            }
                         )
                         ForEach(session.rows) { row in
                             TreeRow(
@@ -423,6 +427,7 @@ private struct RootRow: View {
     let isDropTarget: Bool
     let dropTarget: TreeDropTarget
     let onNewFolder: () -> Void
+    let onCopyPath: () -> Void
 
     var body: some View {
         HStack(spacing: 6) {
@@ -440,6 +445,8 @@ private struct RootRow: View {
         .overlay(TreeRowInteraction(dropCheck: dropTarget.check, drop: dropTarget.drop, onTargetChange: dropTarget.targeted))
         .contextMenu {
             Button("新建文件夹…") { onNewFolder() }
+            Divider()
+            Button("复制绝对路径") { onCopyPath() }
         }
     }
 }
@@ -617,6 +624,7 @@ private struct TreeContextMenu: View {
         Button("重命名…") { requestRename(node) }
         Button("删除…") { requestDelete(node) }
         Divider()
+        Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个绝对路径" : "复制绝对路径") { copyAbsolutePaths() }
         Button("在访达中显示") { Desktop.revealInFinder(node.url) }
         if !node.isDirectory {
             Button("用默认应用打开") { Desktop.openWithDefaultApp(node.url) }
@@ -624,6 +632,17 @@ private struct TreeContextMenu: View {
                 Button("在终端中运行") { session.saveAll { Desktop.runInTerminal(node.url) } }
             }
         }
+    }
+
+    /// 复制作用到哪些行：点在多选里就是整个多选，否则只有这一行（跟删除、拖拽一个规矩）。
+    private var copyTargets: [FileNode] {
+        TreeSelection.targets(clicked: node, selection: session.selection, selected: session.selectedNodes)
+    }
+
+    private func copyAbsolutePaths() {
+        let targets = copyTargets
+        Desktop.copyToClipboard(TreeSelection.absolutePaths(of: targets))
+        session.notify(targets.count > 1 ? "已复制 \(targets.count) 个绝对路径" : "已复制 \(targets[0].url.path)")
     }
 }
 

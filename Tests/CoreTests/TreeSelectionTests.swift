@@ -41,3 +41,23 @@ import Testing
     #expect(TreeSelection.roots([dir, inner, sibling, other]) == [dir, sibling, other])
     #expect(TreeSelection.roots([inner, other]) == [inner, other], "目录没选就不算")
 }
+
+/// 右键「复制绝对路径」：点在多选里复制整片，点在多选之外只复制这一行。
+@Test func treeSelectionCopyTargetsFollowTheClickedRow() {
+    let order = ["/p/a.txt", "/p/b.txt", "/p/c.txt"]
+    let a = FileNode(url: URL(fileURLWithPath: "/p/a.txt"), name: "a.txt", isDirectory: false)
+    let b = FileNode(url: URL(fileURLWithPath: "/p/b.txt"), name: "b.txt", isDirectory: false)
+    let c = FileNode(url: URL(fileURLWithPath: "/p/c.txt"), name: "c.txt", isDirectory: false)
+
+    var selection = TreeSelection()
+    selection.select("/p/a.txt")
+    selection.toggle("/p/b.txt", order: order)
+    #expect(TreeSelection.targets(clicked: a, selection: selection, selected: [a, b]) == [a, b])
+    #expect(TreeSelection.targets(clicked: c, selection: selection, selected: [a, b]) == [c], "点在多选之外只管这一行")
+
+    selection.select("/p/c.txt")
+    #expect(TreeSelection.targets(clicked: c, selection: selection, selected: [c]) == [c])
+
+    #expect(TreeSelection.absolutePaths(of: [a, b]) == "/p/a.txt\n/p/b.txt", "一行一个绝对路径")
+    #expect(TreeSelection.absolutePaths(of: [c]) == "/p/c.txt")
+}

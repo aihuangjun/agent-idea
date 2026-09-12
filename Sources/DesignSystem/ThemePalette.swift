@@ -115,23 +115,15 @@ public enum AppTheme: String, CaseIterable, Sendable {
         }
     }
 
-    /// 状态栏那个按钮的图标：浅色是太阳、深色是月亮、跟随系统是一半一半的圆。
-    public var symbolName: String {
-        switch self {
-        case .system: return "circle.lefthalf.filled"
-        case .light: return "sun.max"
-        case .dark: return "moon"
-        }
-    }
+    /// 状态栏那个按钮的图标：只按**当前实际**是深色还是浅色来，深色月亮、浅色太阳。
+    ///
+    /// 以前按档位取图标，跟随系统时是一半一半的圆——可界面那会儿明明就是浅色或深色之一，
+    /// 于是同一个主题出现两种图标，看着像三种状态。图标现在只说实际那一档，不说来路。
+    public static func symbolName(isDark: Bool) -> String { isDark ? "moon" : "sun.max" }
 
-    /// 点一下换到的下一档，按「跟随系统 → 浅色 → 深色 → 跟随系统」转。
-    public var next: AppTheme {
-        switch self {
-        case .system: return .light
-        case .light: return .dark
-        case .dark: return .system
-        }
-    }
+    /// 状态栏那个按钮点一下换到的档：当前实际是深色就切浅色，反过来也一样。
+    /// 跟随系统只从菜单「视图 → 外观」里选，点按钮不会再转回它去。
+    public static func toggled(isDark: Bool) -> AppTheme { isDark ? .light : .dark }
 
     /// 给 `NSApp.appearance` 的值。跟随系统就是 nil（由系统的 appearance 决定）。
     public var appearance: NSAppearance? {

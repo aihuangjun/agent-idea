@@ -7,6 +7,14 @@ enum Desktop {
     static func revealInFinder(_ url: URL) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
     static func openWithDefaultApp(_ url: URL) { NSWorkspace.shared.open(url) }
 
+    /// 往剪贴板里放一段纯文本（复制路径用）。多条路径由调用方用换行拼好——
+    /// 访达、终端、编辑器都按行读。
+    static func copyToClipboard(_ text: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+    }
+
     /// 在终端里运行一个脚本：生成 `.command` 包装文件交给系统打开，默认由终端执行（见 `TerminalLauncher`）。
     /// 失败了返回错误文案，由调用方决定显示在哪。
     @discardableResult

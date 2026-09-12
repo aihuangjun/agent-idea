@@ -7,6 +7,9 @@ struct StatusBarView: View {
     @EnvironmentObject private var workbench: WorkbenchModel
     @EnvironmentObject private var preferences: ReadingPreferences
     @ObservedObject var session: ProjectSession
+    /// 当前界面实际是深是浅：跟随系统时由系统决定，钉死浅 / 深时就是钉的那一档。
+    @Environment(\.colorScheme) private var colorScheme
+    private var isDark: Bool { colorScheme == .dark }
 
     var body: some View {
         HStack(spacing: 14) {
@@ -53,12 +56,13 @@ struct StatusBarView: View {
                 Button { preferences.resetZoom() } label: { Text("\(Int((preferences.zoom * 100).rounded()))%") }
                     .buttonStyle(.plain).toolTip("点击恢复 100%")
             }
-            // 外观的快捷入口：点一下在「跟随系统 → 浅色 → 深色」之间转，图标就是当前这一档
-            Button { preferences.theme = preferences.theme.next } label: {
-                Image(systemName: preferences.theme.symbolName).font(.system(size: 11))
+            // 外观的快捷入口：只在浅色 / 深色之间来回，图标就是当前实际的那一档
+            // （跟随系统仍在「视图 → 外观」里选，这里显示的是它此刻落到的浅色或深色）
+            Button { preferences.theme = AppTheme.toggled(isDark: isDark) } label: {
+                Image(systemName: AppTheme.symbolName(isDark: isDark)).font(.system(size: 11))
             }
             .buttonStyle(.plain)
-            .toolTip("外观：\(preferences.theme.title)。点击切到\(preferences.theme.next.title)（也在「视图 → 外观」里）")
+            .toolTip("外观：\(isDark ? "深色" : "浅色")。点击切到\(isDark ? "浅色" : "深色")（跟随系统在「视图 → 外观」里）")
         }
         .font(Theme.smallFont)
         .foregroundStyle(Theme.secondaryText)

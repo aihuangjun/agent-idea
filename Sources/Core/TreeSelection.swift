@@ -45,6 +45,18 @@ public struct TreeSelection: Equatable, Sendable {
         if let anchor, !paths.contains(anchor) { self.anchor = order.first { paths.contains($0) } ?? paths.first }
     }
 
+    /// 右键某一行要作用到哪些行：点中的行在当前多选里就是整个多选（按行序），
+    /// 点在多选之外的行上就只有这一行——跟访达、IDEA 的右键一个意思。
+    public static func targets(clicked: FileNode, selection: TreeSelection, selected: [FileNode]) -> [FileNode] {
+        guard selection.count > 1, selection.contains(clicked.id), !selected.isEmpty else { return [clicked] }
+        return selected
+    }
+
+    /// 「复制绝对路径」放进剪贴板的文本：一行一个绝对路径。
+    public static func absolutePaths(of nodes: [FileNode]) -> String {
+        nodes.map(\.url.path).joined(separator: "\n")
+    }
+
     /// 选中里真正要操作的那些：祖先也被选中的去掉（搬了目录，里面的跟着走；删了目录，里面的也没了）。顺序照 `order`。
     public static func roots(_ nodes: [FileNode]) -> [FileNode] {
         nodes.filter { node in

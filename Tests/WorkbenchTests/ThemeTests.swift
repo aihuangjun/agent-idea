@@ -20,10 +20,10 @@ import Testing
     #expect(AppTheme.dark.appearance?.isDark == true)
     #expect(AppTheme.allCases.map(\.title) == ["跟随系统", "浅色", "深色"])
 
-    // 状态栏那个按钮：图标是当前这一档，点一下转到下一档，转三下回到原点
-    #expect(AppTheme.allCases.map(\.symbolName) == ["circle.lefthalf.filled", "sun.max", "moon"])
-    #expect(AppTheme.system.next == .light)
-    #expect(AppTheme.light.next == .dark)
-    #expect(AppTheme.dark.next == .system)
-    #expect(AppTheme.allCases.allSatisfy { $0.next.next.next == $0 })
+    // 状态栏那个按钮只有两档：图标说的是当前**实际**是深是浅，点一下切到另一边。
+    // 跟随系统不再进这个循环——否则它和它落到的那一档主题相同、图标却不同，看着像三种状态。
+    #expect(AppTheme.symbolName(isDark: true) == "moon")
+    #expect(AppTheme.symbolName(isDark: false) == "sun.max")
+    #expect(AppTheme.toggled(isDark: true) == .light)
+    #expect(AppTheme.toggled(isDark: false) == .dark)
 }
