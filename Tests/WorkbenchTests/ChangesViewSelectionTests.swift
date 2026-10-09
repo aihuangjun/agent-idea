@@ -44,7 +44,7 @@ import TestSupport
         let hosting = NSHostingView(rootView: ChangesView(session: session).frame(width: size.width, height: size.height))
         hosting.frame = CGRect(origin: .zero, size: size)
         // 屏幕外的窗口：合成事件要窗口真的存在于窗口服务器里才会被派发，但不能让用户看见、也不抢焦点
-        let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: size.width, height: size.height), styleMask: [.titled], backing: .buffered, defer: false)
+        let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: size.width, height: size.height), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = hosting
         // 不是当前窗口时第一下点击默认只负责激活窗口；应用启动时也是这么打开的（WindowConfigurator）
         FirstMouse.enableGlobally()
@@ -86,6 +86,9 @@ import TestSupport
             rgb.2 - rgb.0 > 40 && rgb.2 > 90
         }
 
+        // 暖场：macOS 27 起，往这个从没当过 key 的离屏窗口里点的第一下只用来激活窗口、到不了行上
+        // （FirstMouse 的补丁管不到 SwiftUI 自己重写了 acceptsFirstMouse 的视图）。点在标题条左边的空白上，不改任何状态
+        try await click(CGPoint(x: 8, y: size.height - 16))
         try await click(rowCenter(0))
         #expect(session.activeTab?.change?.path == tracked[0].path)
         let afterFirst = (try rowColor(0), try rowColor(1))

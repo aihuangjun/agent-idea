@@ -7,6 +7,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 scripts/clean_strays.sh
+. scripts/sdk_env.sh
 
 CONFIG="release"
 INSTALL=true
@@ -19,7 +20,6 @@ for arg in "$@"; do
 done
 
 APP=".build/AgentIDEA.app"
-BUILD_DIR=".build/$CONFIG"
 
 # 版本号的唯一事实来源是 VERSION 文件，由 scripts/release.sh 维护。
 VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0)"
@@ -32,6 +32,8 @@ BUILD_CHANNEL="${AGENTIDEA_BUILD_CHANNEL:-debug}"
 
 echo "==> swift build -c $CONFIG"
 swift build -c "$CONFIG"
+# 产物目录问 SwiftPM 要：老的 native 后端是 .build/<arch>/<config>，6.4 起默认的 swiftbuild 后端是 .build/out/Products/<Config>
+BUILD_DIR="$(swift build -c "$CONFIG" --show-bin-path)"
 
 echo "==> 组装 $APP"
 rm -rf "$APP"
@@ -100,10 +102,11 @@ if [ -z "$SIGNED" ]; then
   echo "==> adhoc 签名。想要稳定身份，先跑一次 scripts/make_signing_identity.sh"
 fi
 
-# 冒烟检查：前端资源必须在 bundle 里的规范位置（bundle 内部是扁平的，没有 Contents/Resources）。
-WEB="$APP/Contents/Resources/AgentIDEA_DesignSystem.bundle/web/index.html"
-if [ ! -f "$WEB" ]; then
-  echo "构建失败：${APP} 里没有前端资源（缺 ${WEB}）"
+# 冒烟检查：前端资源必须在 bundle 里。native 后端打出来的 bundle 内部是扁平的（web/ 在根上），
+# swiftbuild 后端打的是标准 macOS bundle（Contents/Resources/web）；Bundle 两种都认（WebResources.shellURL）。
+RES="$APP/Contents/Resources/AgentIDEA_DesignSystem.bundle"
+if [ ! -f "$RES/web/index.html" ] && [ ! -f "$RES/Contents/Resources/web/index.html" ]; then
+  echo "构建失败：${APP} 里没有前端资源（${RES} 下找不到 web/index.html）"
   exit 1
 fi
 

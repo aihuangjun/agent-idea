@@ -70,7 +70,8 @@ import TestSupport
 @Test func terminalLauncherQuotesPathsAndPicksRunner() throws {
     #expect(TerminalLauncher.canRun(fileNamed: "deploy.sh"))
     #expect(TerminalLauncher.canRun(fileNamed: "x.command"))
-    #expect(!TerminalLauncher.canRun(fileNamed: "main.py"))
+    #expect(TerminalLauncher.canRun(fileNamed: "main.py"))
+    #expect(!TerminalLauncher.canRun(fileNamed: "notes.md"))
     #expect(TerminalLauncher.shellQuote("it's") == "'it'\\''s'")
 
     #expect(TerminalLauncher.interpreter(for: URL(fileURLWithPath: "/a/b.zsh")) == "zsh")
@@ -81,22 +82,38 @@ import TestSupport
     #expect(TerminalLauncher.fnv1a("") == "33niihzj4ux45", "空串的 FNV-1a 偏移基准，换了算法这里会变")
     #expect(TerminalLauncher.commandFileURL(for: URL(fileURLWithPath: "/tmp/x.sh"), in: URL(fileURLWithPath: "/run")).lastPathComponent == "x-\(TerminalLauncher.fnv1a("/tmp/x.sh")).command")
 
-    let script = URL(fileURLWithPath: "/tmp/my dir/it's.sh")
-    let plain = TerminalLauncher.commandScript(for: script, isExecutable: false)
-    #expect(plain.hasPrefix("#!/bin/bash\n"))
-    #expect(plain.contains("cd '/tmp/my dir' || exit 1"))
-    #expect(plain.contains("\nbash '/tmp/my dir/it'\\''s.sh'\n"))
-    let executable = TerminalLauncher.commandScript(for: script, isExecutable: true)
-    #expect(executable.contains("\n'/tmp/my dir/it'\\''s.sh'\n") && !executable.contains("bash '"))
+    // 终端里跑的是与运行窗口同一条命令，路径逐个加引号
+    let script = URL(fileURLWithPath: "/tmp/my dir/it's.py")
+    let command = ScriptCommand(executable: URL(fileURLWithPath: "/opt/uv"), arguments: ["run", "--script", script.path],
+                                workingDirectory: script.deletingLastPathComponent(), display: "uv run --script it's.py")
+    let wrapper = TerminalLauncher.commandScript(for: script, command: command)
+    #expect(wrapper.hasPrefix("#!/bin/bash\n"))
+    #expect(wrapper.contains("cd '/tmp/my dir' || exit 1"))
+    #expect(wrapper.contains("echo '$ uv run --script it'\\''s.py'"))
+    #expect(wrapper.contains("\n'/opt/uv' 'run' '--script' '/tmp/my dir/it'\\''s.py'\n"))
 
     try withTemporaryDirectory { directory in
-        let target = directory.appendingPathComponent("run.sh")
-        try "echo hi".write(to: target, atomically: true, encoding: .utf8)
-        let wrapper = try TerminalLauncher.prepare(script: target, in: directory.appendingPathComponent("run"))
-        #expect(wrapper.pathExtension == "command")
-        #expect(FileManager.default.isExecutableFile(atPath: wrapper.path))
-        #expect(try String(contentsOf: wrapper, encoding: .utf8).contains("bash '\(target.path)'"))
+        let target = directory.appendingPathComponent("hello.py")
+        try "import sys\nprint('hi from', sys.argv[0])\nsys.exit(3)\n".write(to: target, atomically: true, encoding: .utf8)
+        guard case .ready(let python) = ScriptRunner.resolve(script: target, source: "print(1)", isExecutable: false,
+                                                             environment: ProcessInfo.processInfo.environment) else { return }
+        let file = try TerminalLauncher.prepare(command: python, for: target, in: directory.appendingPathComponent("run"))
+        #expect(file.pathExtension == "command")
+        #expect(FileManager.default.isExecutableFile(atPath: file.path))
         // 同一个脚本再准备一次：还是同一个文件
-        #expect(try TerminalLauncher.prepare(script: target, in: directory.appendingPathComponent("run")) == wrapper)
+        #expect(try TerminalLauncher.prepare(command: python, for: target, in: directory.appendingPathComponent("run")) == file)
+
+        // 真跑一遍包装脚本：输出与退出码都在
+        let process = Process()
+        process.executableURL = file
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        try process.run()
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        #expect(output.contains("$ python3 hello.py"))
+        #expect(output.contains("hi from \(target.path)"))
+        #expect(output.contains("[进程已结束，退出码 3]"))
+        #expect(process.terminationStatus == 3)
     }
 }

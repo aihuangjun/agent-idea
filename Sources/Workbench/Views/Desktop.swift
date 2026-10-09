@@ -16,13 +16,22 @@ enum Desktop {
     }
 
     /// 在终端里运行一个脚本：生成 `.command` 包装文件交给系统打开，默认由终端执行（见 `TerminalLauncher`）。
-    /// 失败了返回错误文案，由调用方决定显示在哪。
+    /// 命令与「运行」窗口是同一条（`ScriptRunner`），给要交互（`input()`、`read`）的脚本用——运行窗口的 stdin 是空的。
+    /// 读的是磁盘上的内容，调用方先 `saveAll`。失败了返回错误文案，由调用方决定显示在哪。
     @discardableResult
     static func runInTerminal(_ script: URL) -> String? {
         do {
-            let wrapper = try TerminalLauncher.prepare(script: script, in: AppPaths.runDirectory)
+            let source = String(decoding: try Data(contentsOf: script), as: UTF8.self)
+            let resolution = ScriptRunner.resolve(script: script, source: source,
+                                                  isExecutable: FileManager.default.isExecutableFile(atPath: script.path),
+                                                  environment: LoginShellEnvironment.current)
+            guard case .ready(let command) = resolution else {
+                if case .missing(_, let message) = resolution { return message }
+                return nil
+            }
+            let wrapper = try TerminalLauncher.prepare(command: command, for: script, in: AppPaths.runDirectory)
             NSWorkspace.shared.open(wrapper)
-            Log.info("terminal", "在终端中运行 \(script.path)")
+            Log.info("terminal", "在终端中运行 \(script.path)：\(command.display)")
             return nil
         } catch {
             Log.warn("terminal", "准备运行 \(script.path) 失败：\(error)")

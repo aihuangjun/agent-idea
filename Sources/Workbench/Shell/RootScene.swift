@@ -89,6 +89,9 @@ public struct AgentIDEARootScene: Scene {
                     .keyboardShortcut("0", modifiers: .command)
                 Button("提交历史") { workbench.toolWindow = workbench.toolWindow == .history ? nil : .history }
                     .keyboardShortcut("9", modifiers: .command)
+                Button(workbench.isRunWindowShown ? "收起运行窗口" : "运行窗口") { workbench.isRunWindowShown.toggle() }
+                    .keyboardShortcut("4", modifiers: .command)
+                    .disabled(workbench.active == nil)
                 Divider()
                 Button("查找文件…") {
                     workbench.toolWindow = .project
@@ -146,6 +149,22 @@ public struct AgentIDEARootScene: Scene {
                 Button("Markdown：预览 / 源码 / 分栏") { workbench.active?.cycleMarkdownView() }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
             }
+            // 键位照 IDEA 的 macOS 方案：⌃⇧R 运行当前文件、⌃R 重新运行、⌘F2 停止
+            CommandMenu("运行") {
+                Button(workbench.active?.runnableActiveFile.map { "运行 '\($0.lastPathComponent)'" } ?? "运行当前文件") {
+                    if let session = workbench.active, let url = session.runnableActiveFile { session.runScript(url) }
+                }
+                .keyboardShortcut("r", modifiers: [.control, .shift])
+                .disabled(workbench.active?.runnableActiveFile == nil)
+                Button(workbench.active?.run.script.map { "重新运行 '\($0.lastPathComponent)'" } ?? "重新运行") {
+                    if let session = workbench.active, let url = session.run.script { session.runScript(url) }
+                }
+                .keyboardShortcut("r", modifiers: .control)
+                .disabled(!(workbench.active?.run.canRerun ?? false))
+                Button("停止") { workbench.active?.run.stop() }
+                    .keyboardShortcut(.f2, modifiers: .command)
+                    .disabled(!(workbench.active?.run.isRunning ?? false))
+            }
             CommandMenu("Git") {
                 Button("提交…") { workbench.toolWindow = .commit }
                     .keyboardShortcut("k", modifiers: .command)
@@ -190,16 +209,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 窗口还没建好之前到达的打开请求。
     @MainActor private var pending: [URL] = []
 
-    /// 启动副作用放这里而不是 Scene 的 init：SwiftUI 不承诺 Scene 值只构造一次。
-    func applicationWillFinishLaunching(_ notification: Notification) {
+    /// 启动时的一次性准备放在 init 里，**不放 `applicationWillFinishLaunching`**：macOS 27 起
+    /// `@NSApplicationDelegateAdaptor` 照样建出这个对象，却一个回调都不转给它（willFinish / didFinish /
+    /// shouldTerminate 实测全都不来）。1.2.3 之前日志因此一行不写、登录 shell 的环境没载入——
+    /// 运行窗口里拿不到 `.zshrc` 里的环境变量，git 也找不到 ssh-agent。
+    /// SwiftUI 不承诺 Scene 值只构造一次，所以副作用不放 Scene 的 init，这里再用 `didPrepare` 兜一层。
+    override init() {
+        super.init()
+        MainActor.assumeIsolated { Self.prepareOnce() }
+        // 自动保存的时机（切到别的应用、退出）改听通知：通知系统总会发，不靠 delegate 转发
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(saveAllDrafts), name: NSApplication.didResignActiveNotification, object: nil)
+        center.addObserver(self, selector: #selector(saveAllDrafts), name: NSApplication.willTerminateNotification, object: nil)
+    }
+
+    @MainActor private static var didPrepare = false
+
+    @MainActor private static func prepareOnce() {
+        guard !didPrepare else { return }
+        didPrepare = true
         let build = BuildIdentity.current
         Log.start(banner: "Agent IDEA \(build.display) 启动，配置目录 \(AppPaths.configurationDirectory.path)")
         // 外观由用户选（视图 → 外观），窗口起来之前先按存下来的值定好，
         // 免得深色偏好的用户先看见一帧浅色。跟随系统时不设，交给系统。
-        NSApp.appearance = (AppTheme(rawValue: UserDefaults.standard.string(forKey: "appearance") ?? "") ?? .dark).appearance
+        NSApplication.shared.appearance = (AppTheme(rawValue: UserDefaults.standard.string(forKey: "appearance") ?? "") ?? .dark).appearance
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 800])
-        // 抓一份登录 shell 的环境给 git 用（push 要靠 SSH_AUTH_SOCK 和 PATH 里的凭据助手）
+        // 抓一份登录 shell 的环境：git push 要 SSH_AUTH_SOCK 和 PATH 里的凭据助手，「运行」的脚本要 .zshrc 里的变量
         Task.detached(priority: .utility) { await LoginShellEnvironment.load() }
+    }
+
+    /// 切到别的应用、退出：把没保存的都写回去（IDEA 的自动保存时机）。
+    @objc private func saveAllDrafts() {
+        MainActor.assumeIsolated { workbench?.saveAll() }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
@@ -220,19 +261,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for url in urls { workbench.openProject(url) }
     }
 
-    /// 切到别的应用、退出：把没保存的都写回去（IDEA 的自动保存时机）。
-    func applicationDidResignActive(_ notification: Notification) {
-        MainActor.assumeIsolated { workbench?.saveAll() }
-    }
-
     /// 自己回答「能不能退出」：交给 SwiftUI 的默认实现时，更新后「立即重启」调 `NSApp.terminate` 会石沉大海——
     /// 既不退出也不返回（它答 terminateLater 之后没了下文；sheet 挂着时则直接取消）。这个应用没有文档要问，
-    /// 没保存的草稿在 `applicationWillTerminate` 里写盘，可以直接答应（0.6.2 修的）。
+    /// 没保存的草稿在 willTerminate 通知里写盘，可以直接答应（0.6.2 修的）。macOS 27 上这个回调同样不来（见 init），
+    /// 退出走 SwiftUI 的默认处理，实测「退出」请求照样能退。
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply { .terminateNow }
-
-    func applicationWillTerminate(_ notification: Notification) {
-        MainActor.assumeIsolated { workbench?.saveAll() }
-    }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }

@@ -58,6 +58,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     var hasGit: Bool { commit != nil }
     /// 项目视图里的文件搜索。
     let search: FileSearchController
+    /// 底部「运行」工具窗口的内容。
+    let run: RunController
 
     // MARK: - 编辑区
 
@@ -103,6 +105,8 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     /// 需要壳切到某个工具窗口（定位文件时切到项目树）。
     var onRequestToolWindow: (@MainActor (ToolWindow) -> Void)?
+    /// 需要壳把底部的「运行」窗口亮出来（开始运行脚本时）。
+    var onRequestRunWindow: (@MainActor () -> Void)?
 
     let git: GitClient?
     private let renderer: ContentRenderer
@@ -128,8 +132,10 @@ final class ProjectSession: ObservableObject, Identifiable {
         return contents[activeTabID]
     }
 
-    init(root: URL, git: GitClient?, renderer: ContentRenderer, preferences: ReadingPreferences, defaults: UserDefaults = .standard) {
+    init(root: URL, git: GitClient?, renderer: ContentRenderer, preferences: ReadingPreferences, defaults: UserDefaults = .standard,
+         run: RunController? = nil) {
         self.git = git
+        self.run = run ?? RunController()
         self.renderer = renderer
         self.preferences = preferences
         self.defaults = defaults
@@ -178,6 +184,8 @@ final class ProjectSession: ObservableObject, Identifiable {
         gitTask?.cancel()
         history?.cancel()
         search.cancel()
+        // 脚本要停掉：不像同步那样故意留着跑完，它没有半截状态要收拾，关了项目也没处看输出了
+        run.tearDown()
         watcher?.stop()
         watcher = nil
     }
@@ -850,6 +858,21 @@ final class ProjectSession: ObservableObject, Identifiable {
         } else {
             writeDraft(documentID)
         }
+    }
+
+    /// 「运行」一个脚本，输出进底部的运行窗口。先把没保存的写盘：跑的得是编辑器里看到的那份。
+    func runScript(_ url: URL) {
+        saveAll { [weak self] in
+            guard let self else { return }
+            run.run(url)
+            onRequestRunWindow?()
+        }
+    }
+
+    /// 当前标签能不能「运行」（菜单的「运行当前文件」）：文件标签，且是 shell / Python。
+    var runnableActiveFile: URL? {
+        guard let url = activeTab?.fileURL, ScriptRunner.kind(forFileNamed: url.lastPathComponent) != nil else { return nil }
+        return url
     }
 
     /// 保存所有改过的标签：手头已有的草稿立刻落盘；正在编辑的那个再向编辑器要一次最新文字补写，写完调 `completion`

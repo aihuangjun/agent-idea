@@ -9,6 +9,7 @@
 | 症状 | 真实原因 | 看哪一节 |
 |---|---|---|
 | `swift test` 报 `no such module 'Testing'`，但 `swift build` 好好的 | 只装了 Command Line Tools | [2](#2-swift-官方-toolchain必装) |
+| `swift build` 报 `external macro implementation type 'SwiftUIMacros.StateMacro' could not be found` | CLT 升到了 macOS 27 SDK，它的 SwiftUI 要用 Xcode 才有的宏插件 | [2.1](#21-swiftui-宏插件macos-27-sdk-起) |
 | `build_app.sh` 打印「adhoc 签名」；重新构建后系统授权莫名失效 | 没有本机签名证书 | [3](#3-本机签名证书打包必装) |
 | `release.sh` 跑完测试、打完 dmg，最后报 `Author identity unknown` | 仓库没配 git 身份 | [4](#4-git-身份发布必装) |
 
@@ -40,7 +41,7 @@ CLT 里其实带着 swift-testing，但 SwiftPM 不去那个位置找它，于�
 `no such module 'Testing'`。而本仓库的测试全部用 swift-testing（XCTest 的 framework 不在 CLT 的 SDK 里，没有退路）。
 
 ```bash
-V=6.3.3   # ← 换成 swift --version 看到的版本号，与 CLT 对齐
+V=6.4.0   # ← 换成 swift --version 看到的版本号，与 CLT 对齐（CLT 显示 6.4 时下载地址里写 6.4.0）
 curl -L -o /tmp/swift-$V.pkg \
   https://download.swift.org/swift-$V-release/xcode/swift-$V-RELEASE/swift-$V-RELEASE-osx.pkg
 pkgutil --check-signature /tmp/swift-$V.pkg      # 应当是 Swift Open Source 的 Developer ID，且已公证
@@ -56,7 +57,11 @@ if [ -x "$__ai_swift_tc/swift" ]; then
   path=("$__ai_swift_tc" ${path:#$__ai_swift_tc})
 fi
 unset __ai_swift_tc
+# 默认 SDK 的 SwiftUI 要用 Xcode 才有的宏插件时，换一版 CLT 里编得了的 SDK（见 2.1）
+[ -f "$HOME/ai/agent-idea/scripts/sdk_env.sh" ] && . "$HOME/ai/agent-idea/scripts/sdk_env.sh"
 ```
+
+（仓库不在 `~/ai/agent-idea` 的话改成实际路径。）
 
 三个坑，都踩过：
 
@@ -67,6 +72,18 @@ unset __ai_swift_tc
   于是第二层 shell 里它明明在、却排在 `/usr/bin` 之后。上面那句是先摘掉已有的再置顶，摘的动作不能省。
 
 验（**新开终端**）：`which swift` 指向 toolchain；`zsh -lc 'zsh -lc "which swift"'` 套两层也指向它；`swift test` 裸跑。
+
+### 2.1 SwiftUI 宏插件（macOS 27 SDK 起）
+
+macOS 27 SDK 把 SwiftUI 的 `@State` 等从属性包装器改成了宏，宏的实现 `SwiftUIMacros` 插件**只随 Xcode 发**，
+CLT 和上面的官方 toolchain 都没有，于是 `swift build` 报 `SwiftUIMacros.StateMacro could not be found`。
+CLT 升级时会留着上一版 SDK（`/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk`），
+`scripts/sdk_env.sh` 在默认 SDK 需要这个插件、本机又没有时把 `SDKROOT` 指过去（已经设了 `SDKROOT` 的不动）。
+`build_app.sh`、`release.sh` 开头自己 source 它；裸跑 `swift build` / `swift test` 靠上面 `.zprofile` 那一行。
+哪天 CLT 连上一版 SDK 也不留了，它会打印一句说明——那时只能装 Xcode 或改掉对 `@State` 宏的依赖。
+
+同一次升级里 SwiftPM 默认换成了 swiftbuild 后端：产物在 `.build/out/Products/<Config>`（`.build/debug` 是指过去的链接），
+资源包是标准的 `Contents/Resources/web` 布局，各 test target 分开跑、各打一行用例数。三个脚本都已经照这些改过。
 
 > **应急**：不想装 toolchain 时可以手工指路，但 `release.sh` 里的 `swift test` 是裸跑的，加不进这些 flag。
 > ```bash
@@ -156,6 +173,7 @@ CocoaPods / Carthage、**任何 API key 或 `.env`**（应用不调用第三方�
 | 报错 / 现象 | 怎么办 |
 |---|---|
 | `no such module 'Testing'` | toolchain 没装或没排在 PATH 最前，见[第 2 节](#2-swift-官方-toolchain必装) |
+| `SwiftUIMacros.StateMacro could not be found` | `SDKROOT` 没指到旧版 SDK，见 [2.1](#21-swiftui-宏插件macos-27-sdk-起) |
 | `Library not loaded: @rpath/Testing.framework/…` | 同上；应急 flag 只加了 `-F`，没加两条 `-rpath` |
 | `build_app.sh` 说「adhoc 签名」 | 证书没建，或登录钥匙串锁着，见[第 3 节](#3-本机签名证书打包必装) |
 | `release.sh`：`Author identity unknown` | 没配 git 身份，见[第 4 节](#4-git-身份发布必装) |

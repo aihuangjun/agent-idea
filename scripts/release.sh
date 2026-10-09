@@ -26,6 +26,7 @@ if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
 fi
 
 scripts/clean_strays.sh
+. scripts/sdk_env.sh
 
 if $UPLOAD && ! gh auth status >/dev/null 2>&1; then
   echo "发布中止：gh 没有登录（brew install gh && gh auth login），建 Release 要用它。"
@@ -62,7 +63,8 @@ trap cleanup EXIT
 swift test 2>&1 | tee "$TEST_LOG"
 
 DECLARED=$(grep -rhoE '^[[:space:]]*@Test' Tests | wc -l | tr -d ' ')
-EXECUTED=$(grep -oE 'Test run with [0-9]+ test' "$TEST_LOG" | grep -oE '[0-9]+' | tail -1)
+# 6.4 起默认的 swiftbuild 后端按 test target 分开跑，每个 target 各打一行「Test run with N tests」，要加起来
+EXECUTED=$(grep -oE 'Test run with [0-9]+ test' "$TEST_LOG" | grep -oE '[0-9]+' | awk '{ sum += $1 } END { if (NR) print sum }')
 if [ -z "$EXECUTED" ]; then
   echo "发布中止：没能从测试输出里读到用例总数，八成是 test target 根本没跑起来。"
   exit 1

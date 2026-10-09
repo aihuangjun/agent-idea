@@ -22,9 +22,14 @@ public struct GitSyncResult: Equatable, Sendable {
         self.autostashConflicted = autostashConflicted
     }
 
-    /// git 有没有在说「autostash 放不回去」。环境里固定了 `LC_ALL=C`，这句话是稳定的英文。
+    /// git 有没有在说「autostash 放不回去」。环境里固定了 `LC_ALL=C`，是英文，但不同版本的说法不一样：
+    /// 2.55 及以前是一行「Applying autostash resulted in conflicts.」，2.56 起换成折了行的
+    /// 「Your local changes are stashed, however applying them / resulted in conflicts.」——
+    /// 只认旧的那句时，新 git 下界面会说「同步成功」，改动却只剩在 stash 里。空白先归一，折行在哪都不影响。
     public static func mentionsAutostashConflict(_ output: String) -> Bool {
-        output.contains("Applying autostash resulted in conflicts")
+        let text = output.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return text.contains("Applying autostash resulted in conflicts")
+            || text.contains("local changes are stashed, however applying them resulted in conflicts")
     }
 
     /// 上游没有新东西时不跑 rebase：本地什么都没动。

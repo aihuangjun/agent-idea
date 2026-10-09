@@ -171,6 +171,9 @@ private func client(_ runner: FakeCommandRunner) -> GitClient {
     #expect(result.autostashConflicted)
     #expect(result.summary.contains("git stash list"))
     #expect(GitSyncResult(upstream: "origin/main", pulled: 1, replayed: 0).autostashConflicted == false)
+    // git 2.56 起换了说法，还折了行（实际输出原样）
+    #expect(GitSyncResult.mentionsAutostashConflict("Your local changes are stashed, however applying them\nresulted in conflicts.  You can either resolve the conflicts\nand then discard the stash with \"git stash drop\", or, if you\n"))
+    #expect(!GitSyncResult.mentionsAutostashConflict("Created autostash: 60f75fd\nApplied autostash.\nSuccessfully rebased and updated refs/heads/main.\n"))
 }
 
 /// 真的跑一次系统 git：本地仓库落后远程一个提交、自己领先一个提交，同步之后本地提交重放在远程提交之上。

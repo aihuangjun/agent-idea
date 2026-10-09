@@ -70,18 +70,28 @@ private struct ProjectContent: View {
     var body: some View {
         HStack(spacing: 0) {
             ToolStrip(session: session)
-            if let toolWindow = workbench.toolWindow {
-                Group {
-                    switch toolWindow {
-                    case .project: ProjectTreeView(session: session)
-                    case .commit: ChangesView(session: session)
-                    case .history: HistoryView(session: session)
+            // 底部的运行窗口照 IDEA 横跨左边的工具窗口与编辑区，工具条除外
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    if let toolWindow = workbench.toolWindow {
+                        Group {
+                            switch toolWindow {
+                            case .project: ProjectTreeView(session: session)
+                            case .commit: ChangesView(session: session)
+                            case .history: HistoryView(session: session)
+                            }
+                        }
+                        .frame(width: workbench.toolWindowWidth)
+                        ResizeHandle(width: $workbench.toolWindowWidth, range: 180...700)
                     }
+                    EditorAreaView(session: session)
                 }
-                .frame(width: workbench.toolWindowWidth)
-                ResizeHandle(width: $workbench.toolWindowWidth, range: 180...700)
+                if workbench.isRunWindowShown {
+                    HeightResizeHandle(height: $workbench.runWindowHeight, range: 90...800)
+                    RunToolWindow(run: session.run, session: session)
+                        .frame(height: workbench.runWindowHeight)
+                }
             }
-            EditorAreaView(session: session)
         }
         StatusBarView(session: session)
     }
@@ -274,7 +284,10 @@ private struct ToolStrip: View {
             stripButton(.commit, systemName: "arrow.triangle.branch", help: "提交（⌘0）", badge: session.changeGroups.total)
             stripButton(.history, systemName: "clock.arrow.circlepath", help: "提交历史（⌘9）", badge: 0)
             Spacer()
+            // 底部窗口的开关放在最下面，照 IDEA 左下角那一组
+            RunStripButton(run: session.run)
         }
+        .padding(.bottom, 8)
         .padding(.top, 8)
         .frame(width: Theme.toolStripWidth)
         .frame(maxHeight: .infinity)
@@ -288,6 +301,23 @@ private struct ToolStrip: View {
         }
         .overlay(alignment: .topTrailing) {
             CountBadge(badge).offset(x: 6, y: -5)
+        }
+    }
+}
+
+/// 工具条最下面的「运行」开关。在跑的时候图标右上角亮个小绿点，收起了也看得出来还在跑。
+private struct RunStripButton: View {
+    @EnvironmentObject private var workbench: WorkbenchModel
+    @ObservedObject var run: RunController
+
+    var body: some View {
+        IconButton("play.rectangle", help: "运行（⌘4）", isActive: workbench.isRunWindowShown, size: 30) {
+            workbench.isRunWindowShown.toggle()
+        }
+        .overlay(alignment: .topTrailing) {
+            if run.isRunning {
+                Circle().fill(Theme.success).frame(width: 7, height: 7).offset(x: -3, y: 3)
+            }
         }
     }
 }

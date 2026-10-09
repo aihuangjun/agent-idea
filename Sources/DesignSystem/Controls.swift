@@ -37,6 +37,40 @@ public struct ResizeHandle: View {
     }
 }
 
+/// 横着的分隔条：拖它改下方面板的高度（底部「运行」窗口），往上拖变高。命中区域同样比线宽得多。
+public struct HeightResizeHandle: View {
+    @Binding var height: CGFloat
+    let range: ClosedRange<CGFloat>
+    @State private var isHovering = false
+    @State private var startHeight: CGFloat?
+
+    public init(height: Binding<CGFloat>, range: ClosedRange<CGFloat>) {
+        _height = height
+        self.range = range
+    }
+
+    public var body: some View {
+        Rectangle()
+            .fill(isHovering ? Theme.accent.opacity(0.6) : Theme.border)
+            .frame(height: 1)
+            .overlay(
+                Color.clear.frame(height: 9).contentShape(Rectangle())
+                    .onHover { hovering in
+                        isHovering = hovering
+                        if hovering { NSCursor.resizeUpDown.push() } else { NSCursor.pop() }
+                    }
+                    .gesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { value in
+                                if startHeight == nil { startHeight = height }
+                                height = min(range.upperBound, max(range.lowerBound, (startHeight ?? height) - value.translation.height))
+                            }
+                            .onEnded { _ in startHeight = nil }
+                    )
+            )
+    }
+}
+
 /// 悬停提示（AppKit 的 `NSView.toolTip`）。
 ///
 /// SwiftUI 的 `.help()` 在我们这些 `.buttonStyle(.plain)` + 自定义 label 的按钮上不落地：

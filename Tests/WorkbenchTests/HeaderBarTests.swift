@@ -62,8 +62,11 @@ import TestSupport
             .environmentObject(workbench)
         let hosting = NSHostingView(rootView: view)
         hosting.frame = CGRect(origin: .zero, size: size)
+        // 无边框：macOS 27 起，带标题栏的窗口在可拖动的空白处收到双击时，AppKit 会把事件延后重投并
+        // CFRunLoopStop 主 run loop——应用里 NSApp.run 会再转起来，测试进程跑的是 async main 那一次
+        // CFRunLoopRun，它一返回整个测试进程就 exit(0)，后面的用例全都没跑（输出断在半行，退出码还是 0）
         let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: size.width, height: size.height),
-                              styleMask: [.titled], backing: .buffered, defer: false)
+                              styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = hosting
         // 不是当前窗口时第一下点击默认只负责激活窗口（应用里由 WindowConfigurator 关掉这条）
         FirstMouse.enableGlobally()
@@ -164,7 +167,7 @@ import TestSupport
         let hosting = NSHostingView(rootView: HeaderBar(openProject: {}).frame(width: size.width, height: size.height).environmentObject(workbench))
         hosting.frame = CGRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: size.width, height: size.height),
-                              styleMask: [.titled], backing: .buffered, defer: false)
+                              styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = hosting
         FirstMouse.enableGlobally()
         window.orderBack(nil)

@@ -629,6 +629,9 @@ private struct TreeContextMenu: View {
         if !node.isDirectory {
             Button("用默认应用打开") { Desktop.openWithDefaultApp(node.url) }
             if TerminalLauncher.canRun(fileNamed: node.name) {
+                Divider()
+                // 输出进底部的运行窗口；要交互（input()、read）的脚本走终端那一项——运行窗口的 stdin 是空的
+                Button("运行 '\(node.name)'") { session.runScript(node.url) }
                 Button("在终端中运行") { session.saveAll { Desktop.runInTerminal(node.url) } }
             }
         }
