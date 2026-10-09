@@ -28,6 +28,13 @@ public struct AgentIDEARootScene: Scene {
                 .environmentObject(updater)
                 .environmentObject(workbench)
                 .environmentObject(workbench.preferences)
+                // 访达「打开方式」、拖到 Dock 图标、`open -a AgentIDEA <目录>`：macOS 27 起不再转成
+                // AppDelegate 的 application(_:open:)（见 AppDelegate.init），启动时带进来的与运行中交过来的都从这里到。
+                // 老系统上两边都来也无妨：openProject 遇到已经开着的项目只是切过去
+                .onOpenURL { url in
+                    guard url.isFileURL else { return }
+                    workbench.openProject(url)
+                }
                 .onAppear {
                     workbench.preferences.applyAppearance()
                     updater.checkInBackgroundIfDue()
@@ -210,8 +217,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor private var pending: [URL] = []
 
     /// 启动时的一次性准备放在 init 里，**不放 `applicationWillFinishLaunching`**：macOS 27 起
-    /// `@NSApplicationDelegateAdaptor` 照样建出这个对象，却一个回调都不转给它（willFinish / didFinish /
-    /// shouldTerminate 实测全都不来）。1.2.3 之前日志因此一行不写、登录 shell 的环境没载入——
+    /// `@NSApplicationDelegateAdaptor` 要等应用启动完（`isRunning` 已经是 true、窗口已经建好）才建出这个对象，
+    /// 回调一个都不转给它（willFinish / didFinish / shouldTerminate / open 实测全都不来）。1.2.3 之前日志因此一行不写、登录 shell 的环境没载入——
     /// 运行窗口里拿不到 `.zshrc` 里的环境变量，git 也找不到 ssh-agent。
     /// SwiftUI 不承诺 Scene 值只构造一次，所以副作用不放 Scene 的 init，这里再用 `didPrepare` 兜一层。
     override init() {
