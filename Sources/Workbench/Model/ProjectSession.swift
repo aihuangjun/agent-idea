@@ -599,10 +599,13 @@ final class ProjectSession: ObservableObject, Identifiable {
         rememberScrollOfActiveTab()
         if incoming.isPreview, let previewIndex = tabs.firstIndex(where: { $0.isPreview }) {
             // 预览标签被顶掉。它不会有草稿：一改就固定了（见 applyEdit）
-            let replaced = tabs[previewIndex].id
-            contents[replaced] = nil
-            navigation.remove(replaced)
+            let replaced = tabs[previewIndex]
+            contents[replaced.id] = nil
+            navigation.remove(replaced.id)
             tabs[previewIndex] = incoming
+            // 它指着的文档也要放掉：留在 contents 里的话没有标签替它盯着磁盘（reloadOpenFilesIfChanged 只看开着的），
+            // 之后再打开同一个文件，ensureDocument 拿到的是旧内容——Agent 改过的文件 diff 里一行变更都没有
+            if let documentID = documentID(for: replaced) { releaseDocumentIfUnused(documentID) }
         } else if let activeIndex = tabs.firstIndex(where: { $0.id == activeTabID }) {
             tabs.insert(incoming, at: activeIndex + 1)
         } else {
@@ -728,15 +731,21 @@ final class ProjectSession: ObservableObject, Identifiable {
             if tabs.contains(where: { self.documentID(for: $0) == documentID }) {
                 contents[documentID] = document
             } else {
-                contents[documentID] = nil
-                baseTexts[documentID] = nil
-                draftStore.discard(documentID)
+                releaseDocumentIfUnused(documentID)
             }
         }
         if activeTabID == tabID {
             activeTabID = (tabs.indices.contains(index) ? tabs[index] : tabs.last)?.id
             renderActiveTab()
         }
+    }
+
+    /// 没有标签再用这个文档了：内容、基线、草稿一起释放。
+    private func releaseDocumentIfUnused(_ documentID: String) {
+        guard !tabs.contains(where: { self.documentID(for: $0) == documentID }) else { return }
+        contents[documentID] = nil
+        baseTexts[documentID] = nil
+        draftStore.discard(documentID)
     }
 
     func closeActiveTab() {
@@ -1116,6 +1125,8 @@ final class ProjectSession: ObservableObject, Identifiable {
                 replaced.scrollTop = tab.scrollTop
                 replaced.cursor = tab.cursor
                 tabs[index] = replaced
+                // 变成「已删除」的 diff 就不再指着文档了：放掉，文件回来时才不会拿到旧内容
+                if let documentID = documentID(for: tab) { releaseDocumentIfUnused(documentID) }
             }
             contents[tab.id] = nil
             if activeTabID == tab.id, let current = tabs.first(where: { $0.id == tab.id }) { loadDiff(for: current) }

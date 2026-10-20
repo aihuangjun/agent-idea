@@ -158,3 +158,32 @@ private func makeSession(in directory: URL, active: Bool = true) -> (ProjectSess
         #expect(!session.canNavigateChanges)
     }
 }
+
+/// 变更列表里单击另一条，预览标签被顶掉：它指着的文档也要放掉。否则文件在没人看着的时候被 Agent 改了，
+/// 再点回来时 diff 用的是内存里那份旧内容——与 HEAD 一样就一行变更都没有（1.2.5 修的）。
+@Test @MainActor func replacedPreviewDiffReleasesItsDocument() async throws {
+    try await withTemporaryDirectory { directory in
+        let file = directory.appendingPathComponent("m.txt")
+        try "v1\n".write(to: file, atomically: true, encoding: .utf8)
+        try "n\n".write(to: directory.appendingPathComponent("n.txt"), atomically: true, encoding: .utf8)
+        let (session, _) = makeSession(in: directory, active: false)
+        await waitUntil { session.changeGroups.total == 3 }
+        let modified = try #require(session.gitSnapshot.changes.first { $0.path == "m.txt" })
+        let untracked = try #require(session.gitSnapshot.changes.first { $0.path == "n.txt" })
+
+        session.openDiff(modified)
+        let documentID = try #require(session.activeTab.flatMap(session.documentID(for:)))
+        await waitUntil { session.contents[session.activeTabID!] == .editableDiff(documentID: documentID) }
+        #expect(session.contents[documentID]?.text == "v1\n")
+
+        session.openDiff(untracked)
+        #expect(session.tabs.count == 1)
+        #expect(session.contents[documentID] == nil && session.baseTexts[documentID] == nil)
+
+        try "v2\n".write(to: file, atomically: true, encoding: .utf8)
+        session.openDiff(modified)
+        await waitUntil { session.contents[session.activeTabID!] == .editableDiff(documentID: documentID) }
+        #expect(session.contents[documentID]?.text == "v2\n")
+        #expect(session.baseTexts[documentID] == "v1\n")
+    }
+}
