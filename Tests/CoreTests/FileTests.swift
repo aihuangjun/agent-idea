@@ -21,6 +21,9 @@ import TestSupport
     #expect(FileCategory.forFile(named: "a.PNG") == .image)
     #expect(FileCategory.forFile(named: "doc.pdf") == .pdf)
     #expect(FileCategory.forFile(named: "notes.md") == .markdown)
+    #expect(FileCategory.isHTML(named: "page.HTML"))
+    #expect(FileCategory.isHTML(named: "page.htm"))
+    #expect(!FileCategory.isHTML(named: "page.html.swift"))
     #expect(FileCategory.forFile(named: "main.go") == .code(Language(name: "Go", highlightID: "go")))
 }
 

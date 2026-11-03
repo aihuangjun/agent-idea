@@ -44,7 +44,7 @@ extension ProjectSession {
     /// 这时同步按钮**不灰**，点了弹选项（1.2.0 前是灰着的，只有鼠标停上去才知道为什么）。
     var needsUpstreamChoice: Bool {
         let branch = gitSnapshot.branch
-        return hasGit && hasLoadedGitStatus && !isSyncingRemote && !isSwitchingBranch
+        return hasGit && hasLoadedGitStatus && !isSyncingRemote && !isSwitchingBranch && !isRollingBack
             && !branch.isUnborn && !branch.isDetached && branch.upstream == nil
     }
 
@@ -75,7 +75,7 @@ extension ProjectSession {
 
     /// 让当前分支跟踪 `upstream`，然后马上同步一次。
     func trackUpstream(_ upstream: String) {
-        guard let git, let repositoryRoot = project.repositoryRoot, !isSyncingRemote, !isSwitchingBranch else { return }
+        guard let git, let repositoryRoot = project.repositoryRoot, !isSyncingRemote, !isSwitchingBranch, !isRollingBack else { return }
         Task { [weak self] in
             do {
                 try await git.setUpstream(upstream, repositoryRoot: repositoryRoot)
@@ -95,7 +95,7 @@ extension ProjectSession {
     /// 结果报在状态栏（提交面板此刻多半不在界面上）。
     func pushSettingUpstream(to remote: String) {
         // 提交面板那边正在推的话别再并发推一次
-        guard let git, let repositoryRoot = project.repositoryRoot, !isSyncingRemote, !isSwitchingBranch, commit?.isPushing != true else { return }
+        guard let git, let repositoryRoot = project.repositoryRoot, !isSyncingRemote, !isSwitchingBranch, !isRollingBack, commit?.isPushing != true else { return }
         let branch = gitSnapshot.branch.name
         isSyncingRemote = true
         Log.info("git", "推送并建立上游：\(branch)")
@@ -136,7 +136,7 @@ extension ProjectSession {
     }
 
     /// 能不能切分支 / 建分支：有仓库、没在同步、没在切。
-    var canSwitchBranch: Bool { hasGit && !isSyncingRemote && !isSwitchingBranch }
+    var canSwitchBranch: Bool { hasGit && !isSyncingRemote && !isSwitchingBranch && !isRollingBack }
 
     /// 签出一个本地分支。
     func checkout(_ branch: GitBranchList.Local) {

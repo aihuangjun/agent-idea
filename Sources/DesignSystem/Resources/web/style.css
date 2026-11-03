@@ -253,4 +253,5 @@ article.md .mermaid { background: var(--pre-bg); border: 1px solid var(--border)
 article.md .mermaid svg { max-width: 100%; height: auto; }
 article.md details { border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; margin: 0.8em 0; }
 article.md summary { cursor: pointer; color: var(--text-2); }
+.cm-find-removed { outline: 2px solid var(--text-2); outline-offset: -2px; }
 article.md kbd { font-family: var(--mono); font-size: 0.8em; background: var(--panel); border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0.1em 0.4em; }

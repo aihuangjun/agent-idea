@@ -84,6 +84,9 @@ extension TabContent {
         case .loading:
             return .message(title: "", detail: "")
         case .code(let text, let language, _, _, _):
+            if let url = tab.fileURL, FileCategory.isHTML(named: url.lastPathComponent), tab.htmlView == .preview {
+                return .html(path: path, text: draft ?? text, documentDirectory: url.deletingLastPathComponent())
+            }
             return .code(path: path, text: draft ?? text, language: language.highlightID, editable: editable, cursor: tab.cursor, base: base, history: tab.history(matching: draft ?? text))
         case .markdown(let text, _, _, _):
             return .markdown(

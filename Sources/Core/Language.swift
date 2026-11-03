@@ -119,6 +119,10 @@ public enum FileCategory: Equatable, Sendable {
         "png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "ico", "heic", "heif", "avif",
     ]
 
+    public static func isHTML(named name: String) -> Bool {
+        ["html", "htm"].contains((name.lowercased() as NSString).pathExtension)
+    }
+
     public static func forFile(named fileName: String) -> FileCategory {
         let ext = (fileName.lowercased() as NSString).pathExtension
         if imageExtensions.contains(ext) { return .image }

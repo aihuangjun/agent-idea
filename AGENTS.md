@@ -94,5 +94,13 @@ CLT 升到 macOS 27 SDK 之后，SwiftUI 的 `@State` 成了只有 Xcode 带插�
 
 ## 本地状态
 
+diff 首次定位：`RenderPayload.revealFirstChange` 让 render.js 将第一处差异居中（包括第 0 行与纯删除）；已有位置时为 false。`EditorTab.hasDiffPosition` 只在 `currentState` 返回 `kind == "diff"` 后置为 true，未就绪的空状态不算访问过；切标签、切项目或切 diff 模式时照旧收取状态，避免重跳第一处。Swift 契约和 render.js 顶部注释同步维护。
+
+Git 元数据事件必须经过 `Core/GitMetadataEventFilter`：初始化时对根目录用 POSIX `realpath` 保留实际前缀，兼容 `/tmp` 与 `/private/tmp`、`/var` 与 `/private/var` 及符号链接。不能逐个对事件路径用 Foundation URL 解析：锁文件或原子替换的旧路径可能已经不存在，Foundation 此时可能保留另一种前缀，仍会漏事件。
+
+1.3.0 补充：HTML 文件仍按 `.code` 文档管理，`EditorTab.htmlView` 决定预览 / 源码；预览由 `ContentRenderer` 按需创建不带 message handler 的独立 WebView，通过 `HTMLPreviewHandler` 的独立资源协议加载正文与资源，`Core/HTMLPreviewDocument` 解析原文件相对路径并校验真实路径在项目目录内（拒绝 `..` 与符号链接越界），不给脚本全盘 file:// 权限；资源后台读盘，取消后不能再回调 WKURLSchemeTask。切视图仍先收取编辑状态。⌘F / Ctrl+F 是文件内查找，文件名搜索改为 ⇧⌘F；CodeMirror 全文查找在 render.js，其它正文走 WebKit find。**按用户最新约定，回滚只放在右键菜单，直接执行、不弹确认（覆盖上文的回滚确认约定），支持多选，保留工作区回滚的撤销。** diff 正文菜单由 `CursorRestoringWebView.willOpenMenu` 补入，`ContentRenderer.contextActions` 提供动作；正文与标签共用 `rollbackMenuAction`。成功回滚先用 `onRolledBack` 丢弃旧编辑标签，再刷新，避免自动保存覆盖 restore 的结果。`refreshGit` 也核对开着的文件，手动 `refreshAll` 强制重读；Git 元数据目录按 git-dir / common-dir 独立监听，兼容 worktree 与只打开仓库子目录。
+
+刷新占位按文档和请求 UUID 管理：即使原预览标签在 getState 返回前被替换，也必须释放占位，继续处理仍打开的文件标签。回滚在保存编辑器前先设 `CommitController.isPreparingRollback`，保存完成无缝交给 `isRollingBack`；同步、切分支、提交、推送、重复回滚与文件撤销都要检查这两个阶段。
+
 全部在 `~/.agentidea/`：`recent.json`（最近项目）、`logs/agentidea.log`（滚动日志，菜单「显示日志…」）、`run/`（在终端中运行的包装脚本）、`github_token`（可选）。
 UserDefaults 里放：工具窗口（显示哪个、宽度）、diff 模式、缩放、自动换行、上次开着的项目列表与当前项目、上次检查更新的时间、每个项目的目录树展开状态（`tree.expanded:<根目录>`，相对路径数组，`ProjectSession.recomputeRows` 时变了就写）。

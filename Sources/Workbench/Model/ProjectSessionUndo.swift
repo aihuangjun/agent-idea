@@ -21,7 +21,7 @@ extension ProjectSession {
     /// 撤销最近一次文件操作。`expecting` 给了的话只在栈顶还是那一次时才撤（状态栏「已移动 … 撤销」那个按钮用：
     /// 这几秒里用户要是又做了别的，按钮不该撤错东西）。
     func undo(expecting id: UUID? = nil) {
-        guard !isUndoing, let entry = undoHistory.nextUndo, id == nil || entry.id == id else { return }
+        guard !isUndoing, !isRollingBack, let entry = undoHistory.nextUndo, id == nil || entry.id == id else { return }
         _ = undoHistory.popUndo()
         isUndoing = true
         Task { [weak self] in
@@ -41,7 +41,7 @@ extension ProjectSession {
     }
 
     func redo() {
-        guard !isUndoing, let entry = undoHistory.popRedo() else { return }
+        guard !isUndoing, !isRollingBack, let entry = undoHistory.popRedo() else { return }
         isUndoing = true
         Task { [weak self] in
             guard let self else { return }
@@ -339,17 +339,11 @@ extension ProjectSession {
 
     /// 回滚一条变更，先把工作区里的样子备份到内存，成了记进撤销栈。未跟踪文件的回滚就是删除，按删除记。
     func rollback(_ change: GitChange) {
-        guard let commit else { return }
         if change.kind == .untracked {
             delete(change)
             return
         }
-        let backup = backupForRollback(of: change)
-        if backup == nil { Log.info("git", "\(change.path) 太大，这次回滚不能撤销") }
-        commit.rollback(change) { [weak self] succeeded in
-            guard let self, succeeded, let backup else { return }
-            self.recordUndo("回滚 \(change.fileName)", .rollback(change: change, backup: backup))
-        }
+        rollback([change])
     }
 
     /// 删除变更列表里的一条（进废纸篓），记进撤销栈。
@@ -365,12 +359,18 @@ extension ProjectSession {
     /// 变更列表多选之后一起回滚（IDEA 的 Rollback）：未跟踪的跳过（它们不在 git 里，要删走「删除」）。
     /// 回滚前逐个备份工作区里的样子，回滚成了的记成一步撤销。备份不了的（太大、冲突中、超出这一批的预算）照样回滚，只是撤销时不在里面。
     func rollback(_ changes: [GitChange]) {
+        guard let commit, commit.canRollback, !isSyncingRemote, !isSwitchingBranch, !isUndoing else { return }
+        commit.isPreparingRollback = true
+        // 先收取编辑器最新的文字，备份才包含尚未送达的最后几笔。
+        saveAll { [weak self] in
+            commit.isPreparingRollback = false
+            self?.performRollback(changes)
+        }
+    }
+
+    private func performRollback(_ changes: [GitChange]) {
         guard let commit else { return }
         let targets = changes.filter { $0.kind != .untracked }
-        if targets.count == 1 {
-            rollback(targets[0])
-            return
-        }
         guard !targets.isEmpty else { return }
         var backups: [String: RollbackBackup] = [:]
         var budget = Self.batchRollbackBackupBudget

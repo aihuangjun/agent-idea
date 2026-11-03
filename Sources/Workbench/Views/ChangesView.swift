@@ -16,7 +16,7 @@ struct ChangesView: View {
     /// 正在重命名的文件。对话框挂在整个面板上而不是行上：行在 LazyVStack 里，git 一刷新就可能被回收，
     /// 挂在行上的 sheet 会跟着消失。
     @State private var renaming: FileNode?
-    /// 等确认的回滚 / 删除。同样挂在面板上而不是行上（理由同上）。
+    /// 等确认的删除。同样挂在面板上而不是行上（理由同上）。
     @State private var pending: DestructiveConfirmation?
 
     var body: some View {
@@ -25,7 +25,7 @@ struct ChangesView: View {
                 if session.isRefreshingGit {
                     ProgressView().controlSize(.mini).padding(.trailing, 4)
                 }
-                IconButton(ToolWindowIcon.refresh, help: "刷新（⌘R）：重列工作区的改动，不联网", size: 22) { session.refreshGit() }
+                IconButton(ToolWindowIcon.refresh, help: "刷新（⌘R）：重读工作区文件与 diff，不联网", size: 22) { session.refreshAll() }
             }
             if let commit = session.commit {
                 if let error = session.gitError {
@@ -82,7 +82,7 @@ struct ChangesView: View {
             press: { press(change, modifiers: $0) },
             release: { if $0, clicks.registerClick(on: change.path) { session.openDiff(change, pinned: true) } },
             onRename: { renaming = $0 },
-            onRollback: { requestRollback(visible($0)) },
+            onRollback: { session.rollback(visible($0)) },
             onDelete: { requestDelete(visible($0), commit: commit) }
         )
     }
@@ -122,30 +122,6 @@ struct ChangesView: View {
         guard selected.contains(where: commit.canDelete) else { return .ignored }
         requestDelete(selected, commit: commit)
         return .handled
-    }
-
-    /// 回滚一条或几条。未跟踪的不在 git 里、没有可回滚的目标，跳过（弹窗里说一声）。
-    private func requestRollback(_ changes: [GitChange]) {
-        let targets = changes.filter { $0.kind != .untracked }
-        guard let first = targets.first else { return }
-        let added = targets.filter { $0.kind == .added }.count
-        var message: String
-        if targets.count == 1 {
-            message = first.kind == .added
-                ? "这是一个新增的文件，回滚会把它从 git 和磁盘上一起删掉。"
-                : "会把它恢复到 HEAD 的样子，本地改动会丢失。"
-        } else {
-            message = "会把它们恢复到 HEAD 的样子，本地改动会丢失。"
-            if added > 0 { message += "其中 \(added) 个是新增的文件，会从 git 和磁盘上一起删掉。" }
-        }
-        let skipped = changes.count - targets.count
-        if skipped > 0 { message += "选中的 \(skipped) 个未跟踪文件不在 git 里，不受影响（要删掉它们用「删除」）。" }
-        pending = DestructiveConfirmation(
-            id: "rollback:" + targets.map(\.path).joined(separator: "\n"),
-            title: targets.count == 1 ? "回滚 \(first.fileName)？" : "回滚 \(targets.count) 个文件？",
-            message: message,
-            buttonTitle: "回滚"
-        ) { session.rollback(targets) }
     }
 
     /// 删除一条或几条（进废纸篓）。「已删除」的变更磁盘上没有东西可删，跳过。
@@ -254,7 +230,7 @@ private struct ChangeRow: View {
         if targets.count > 1 {
             let rollbackable = targets.filter { $0.kind != .untracked }.count
             let deletable = targets.filter(commit.canDelete).count
-            if rollbackable > 0 { Button("回滚 \(rollbackable) 个文件…") { onRollback(targets) } }
+            if rollbackable > 0 { Button("回滚 \(rollbackable) 个文件（Revert）") { onRollback(targets) } }
             if deletable > 0 { Button("删除 \(deletable) 个文件…") { onDelete(targets) } }
         } else {
             // 分隔线跟着这一组走：已删除的变更这一组整个没有，菜单第一项就不该是一条线
@@ -264,7 +240,7 @@ private struct ChangeRow: View {
                 Divider()
             }
             if change.kind != .untracked {
-                Button("回滚…") { onRollback([change]) }
+                Button("回滚（Revert）") { onRollback([change]) }
             }
             if let node = session.node(for: change) {
                 Button("重命名…") { onRename(node) }

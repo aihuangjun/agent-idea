@@ -20,6 +20,34 @@ private final class ScriptMessageProxy: NSObject, WKScriptMessageHandler {
 /// 于是那个光标会一路跟到目录树、标签栏上。规矩：谁改的光标谁负责还回去。
 final class CursorRestoringWebView: WKWebView {
     private var cursorTracking: NSTrackingArea?
+    var onFind: (() -> Void)?
+    var contextActions: (() -> [ContentRenderer.ContextAction])?
+
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        super.willOpenMenu(menu, with: event)
+        let actions = contextActions?() ?? []
+        guard !actions.isEmpty else { return }
+        if !menu.items.isEmpty { menu.insertItem(.separator(), at: 0) }
+        for action in actions.reversed() {
+            let item = NSMenuItem(title: action.title, action: #selector(performContextAction(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = action
+            menu.insertItem(item, at: 0)
+        }
+    }
+
+    @objc private func performContextAction(_ item: NSMenuItem) {
+        (item.representedObject as? ContentRenderer.ContextAction)?.perform()
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.charactersIgnoringModifiers?.lowercased() == "f", modifiers == .command || modifiers == .control {
+            onFind?()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -41,6 +69,22 @@ final class CursorRestoringWebView: WKWebView {
 @MainActor
 public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     public let webView: WKWebView
+    public struct ContextAction {
+        public let title: String
+        public let perform: () -> Void
+
+        public init(title: String, perform: @escaping () -> Void) {
+            self.title = title
+            self.perform = perform
+        }
+    }
+    public var contextActions: (() -> [ContextAction])?
+    /// HTML 不装 message handler，页面脚本无法向编辑器发送 edited / openPath 等消息。
+    fileprivate var htmlWebView: CursorRestoringWebView?
+    private var showingHTML = false
+    private let htmlPreviewHandler = HTMLPreviewHandler()
+    public var onFind: (() -> Void)?
+    public var displayedWebView: WKWebView { showingHTML ? (htmlWebView ?? webView) : webView }
 
     /// 正文里点了 http(s) 链接。
     public var onOpenExternal: ((URL) -> Void)?
@@ -88,12 +132,15 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         public var cursor: EditorCursor?
         /// 编辑器的撤销历史（JSON 文本），没有编辑器时为 nil。
         public var history: String?
+        /// 实际显示的内容种类，未就绪时为 nil，避免把空页面当作已保存的 diff 位置。
+        public var kind: String?
 
-        public init(scrollTop: Double = 0, text: String? = nil, cursor: EditorCursor? = nil, history: String? = nil) {
+        public init(scrollTop: Double = 0, text: String? = nil, cursor: EditorCursor? = nil, history: String? = nil, kind: String? = nil) {
             self.scrollTop = scrollTop
             self.text = text
             self.cursor = cursor
             self.history = history
+            self.kind = kind
         }
     }
 
@@ -119,6 +166,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         messageProxy.target = self
         webView.configuration.userContentController.add(messageProxy, name: "ide")
         webView.navigationDelegate = self
+        (webView as? CursorRestoringWebView)?.onFind = { [weak self] in self?.onFind?() }
+        (webView as? CursorRestoringWebView)?.contextActions = { [weak self] in self?.contextActions?() ?? [] }
         // 正文区不接文件拖放：拖进来的目录该由窗口那一层当「打开项目」处理，WebKit 接了会当成导航。
         webView.unregisterDraggedTypes()
         loadShell()
@@ -146,7 +195,32 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
 
     /// 显示一份内容。页面没就绪就先存着，就绪后补发。
     public func render(_ payload: RenderPayload) {
+        showingHTML = payload.kindName == "html"
+        webView.isHidden = showingHTML
+        htmlWebView?.isHidden = !showingHTML
         lastPayload = payload
+        if case .html(let path, let text, let directory) = payload.content {
+            if htmlWebView == nil {
+                let configuration = WKWebViewConfiguration()
+                configuration.websiteDataStore = .nonPersistent()
+                configuration.setURLSchemeHandler(htmlPreviewHandler, forURLScheme: HTMLPreviewDocument.resourceScheme)
+                let preview = CursorRestoringWebView(frame: webView.superview?.bounds ?? webView.frame, configuration: configuration)
+                preview.navigationDelegate = self
+                preview.onFind = { [weak self] in self?.onFind?() }
+                preview.autoresizingMask = [.width, .height]
+                preview.pageZoom = zoom
+                webView.superview?.addSubview(preview)
+                htmlWebView = preview
+            }
+            htmlWebView?.isHidden = false
+            let documentURL = HTMLPreviewDocument.resourceURL(for: URL(fileURLWithPath: path))
+            htmlPreviewHandler.documentURL = documentURL
+            htmlPreviewHandler.resourceDirectory = directory
+            htmlPreviewHandler.document = Data(HTMLPreviewDocument.resolvingResources(in: text, relativeTo: documentURL).utf8)
+            htmlWebView?.load(URLRequest(url: documentURL, cachePolicy: .reloadIgnoringLocalCacheData))
+            return
+        }
+        htmlWebView?.stopLoading()
         guard isReady else {
             pendingPayload = payload
             return
@@ -157,6 +231,12 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     /// 当前状态：滚动位置、编辑器里的文字与光标。切标签前问一次，切回来时带在 payload 里恢复；
     /// 文字直接拿走，不用等编辑器那边停手 300ms 才发过来的那份。页面没就绪时立刻回一份空状态。
     public func currentState(_ completion: @escaping (ViewState) -> Void) {
+        if showingHTML {
+            htmlWebView?.evaluateJavaScript("window.scrollY") { value, _ in
+                completion(ViewState(scrollTop: (value as? NSNumber)?.doubleValue ?? 0))
+            }
+            return
+        }
         guard isReady else {
             completion(ViewState())
             return
@@ -167,7 +247,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
                 scrollTop: (dictionary["scrollTop"] as? NSNumber)?.doubleValue ?? 0,
                 text: dictionary["text"] as? String,
                 cursor: Self.cursor(from: dictionary["cursor"]),
-                history: dictionary["history"] as? String
+                history: dictionary["history"] as? String,
+                kind: dictionary["kind"] as? String
             ))
         }
     }
@@ -189,6 +270,7 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
 
     public func setZoom(_ zoom: Double) {
         self.zoom = zoom
+        htmlWebView?.pageZoom = zoom
         guard isReady else { return }
         webView.evaluateJavaScript("window.ide.setZoom(\(zoom))")
     }
@@ -213,7 +295,7 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     public func redo(_ completion: @escaping (Bool) -> Void) { performEditorCommand("redo", completion) }
 
     private func performEditorCommand(_ command: String, _ completion: @escaping (Bool) -> Void) {
-        guard isReady else {
+        guard isReady, !showingHTML else {
             completion(false)
             return
         }
@@ -230,7 +312,35 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         webView.evaluateJavaScript("window.ide.setWrap(\(wrap))")
     }
 
+    /// 编辑器查全文（包括视口外的行），其它视图用 WebKit 的原生查找。
+    public func find(_ query: String, backwards: Bool = false, caseSensitive: Bool = false, completion: @escaping (Bool) -> Void) {
+        let configuration = WKFindConfiguration()
+        configuration.backwards = backwards
+        configuration.caseSensitive = caseSensitive
+        configuration.wraps = true
+        let target = displayedWebView
+        let nativeFind = { target.find(query, configuration: configuration) { completion($0.matchFound) } }
+        guard !showingHTML, isReady,
+              let data = try? JSONSerialization.data(withJSONObject: ["query": query, "backwards": backwards, "caseSensitive": caseSensitive]),
+              let json = String(data: data, encoding: .utf8) else { nativeFind(); return }
+        webView.evaluateJavaScript("window.ide.find(\(json))") { result, _ in
+            if let found = result as? Bool { completion(found) } else { nativeFind() }
+        }
+    }
+
+    public func focusContent() {
+        displayedWebView.window?.makeFirstResponder(displayedWebView)
+        if !showingHTML, isReady { webView.evaluateJavaScript("window.ide.focusEditor()") }
+    }
+
+    public func clearFind() {
+        if !showingHTML, isReady { webView.evaluateJavaScript("window.ide.clearFind()") }
+        // WebKit 原生查找用空查询移除 HTML / Markdown / 只读视图里的搜索标记。
+        displayedWebView.find("", configuration: WKFindConfiguration()) { _ in }
+    }
+
     private func send(_ payload: RenderPayload) {
+        guard payload.kindName != "html" else { return }
         guard let data = try? JSONEncoder().encode(payload), let json = String(data: data, encoding: .utf8) else {
             Log.warn("web", "payload 编码失败")
             return
@@ -267,6 +377,13 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     // MARK: - WKNavigationDelegate
 
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if webView === htmlWebView {
+            if showingHTML, let payload = lastPayload {
+                htmlWebView?.evaluateJavaScript("window.scrollTo(0, \(payload.scrollTop))")
+                onRendered?("html", 0)
+            }
+            return
+        }
         markReadyAndFlush()
     }
 
@@ -276,6 +393,24 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
+        if webView === htmlWebView {
+            if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
+                decisionHandler(.cancel)
+                if let fragment = url.fragment, case .html(let path, _, _)? = lastPayload?.content,
+                   url.scheme == HTMLPreviewDocument.resourceScheme, url.path == path {
+                    webView.callAsyncJavaScript("document.getElementById(fragment)?.scrollIntoView()", arguments: ["fragment": fragment], in: nil, in: .page) { _ in }
+                } else if url.isFileURL || url.scheme == HTMLPreviewDocument.resourceScheme { onOpenPath?(url.path) }
+                else if ["https", "http"].contains(url.scheme ?? "") { onOpenExternal?(url) }
+            } else {
+                // 正文里的脚本可以运行，但不能把预览悄悄导航到别的主页面。
+                let url = navigationAction.request.url
+                let isPreview = url?.scheme == HTMLPreviewDocument.resourceScheme && url?.path == htmlPreviewHandler.documentURL?.path
+                // 不允许子框架绕过资源协议加载任意 file:// 文档。
+                let isLocalFile = url?.isFileURL == true
+                decisionHandler(!isLocalFile && (navigationAction.targetFrame?.isMainFrame == false || isPreview) ? .allow : .cancel)
+            }
+            return
+        }
         guard let url = navigationAction.request.url else {
             decisionHandler(.cancel)
             return
@@ -292,6 +427,10 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
 
     /// Web 内容进程被系统回收（大文档时会发生）：重新加载页面并恢复当前内容。
     public func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        if webView === htmlWebView {
+            if showingHTML, let lastPayload { render(lastPayload) }
+            return
+        }
         Log.warn("web", "内容进程被回收，重新加载渲染页")
         isRecoveringFromCrash = onShellReloaded != nil
         loadShell()
@@ -301,7 +440,7 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
 
     public func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         // 只接受来自 shell 页面的消息：Markdown 允许内嵌 HTML，文档里的脚本同样能 postMessage。
-        guard message.webView?.url?.standardizedFileURL.path == shellURL?.path else { return }
+        guard message.frameInfo.isMainFrame, message.webView?.url?.standardizedFileURL.path == shellURL?.path else { return }
         guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
         switch type {
         case "ready":
@@ -323,6 +462,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
             if let direction = (body["direction"] as? String).flatMap(NavigationDirection.init) { onNavigate?(direction) }
         case "changes":
             onChangePosition?(ChangePosition(hasPrevious: body["hasPrevious"] as? Bool ?? false, hasNext: body["hasNext"] as? Bool ?? false))
+        case "find":
+            onFind?()
         default:
             break
         }
@@ -354,10 +495,11 @@ public struct ContentWebView: NSViewRepresentable {
     }
 
     private func attach(to container: NSView) {
-        let webView = renderer.webView
-        webView.removeFromSuperview()
-        webView.frame = container.bounds
-        webView.autoresizingMask = [.width, .height]
-        container.addSubview(webView)
+        for webView in [renderer.webView, renderer.htmlWebView].compactMap({ $0 }) {
+            webView.removeFromSuperview()
+            webView.frame = container.bounds
+            webView.autoresizingMask = [.width, .height]
+            container.addSubview(webView)
+        }
     }
 }

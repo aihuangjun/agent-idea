@@ -246,7 +246,6 @@ private struct CommitFileRow: View {
     let change: GitChange
     let isActive: Bool
     @State private var isHovering = false
-    @State private var pendingRevert: DestructiveConfirmation?
 
     var body: some View {
         let icon = FileIcon.file(named: change.fileName)
@@ -271,23 +270,7 @@ private struct CommitFileRow: View {
                 Button("在项目视图中显示") { session.reveal(url) }
             }
             Divider()
-            Button("回滚这个变更…") {
-                pendingRevert = DestructiveConfirmation(
-                    id: "revert:" + commit.hash + ":" + change.path,
-                    title: "回滚 \(change.fileName) 在 \(commit.shortHash) 里的变更？",
-                    message: revertExplanation,
-                    buttonTitle: "回滚"
-                ) { history.revert(change, in: commit) }
-            }
-        }
-        .destructiveConfirmation($pendingRevert)
-    }
-
-    private var revertExplanation: String {
-        switch change.kind {
-        case .added: return "这次提交新增了这个文件，回滚会把它从工作区删掉。改动只在工作区，不会产生提交。"
-        case .deleted: return "这次提交删掉了这个文件，回滚会把它恢复到工作区。改动只在工作区，不会产生提交。"
-        default: return "会把这次提交对它的改动反向打回工作区，不产生提交。之后又改过同一处的话会失败。"
+            Button("回滚这个变更（Revert）") { history.revert(change, in: commit) }
         }
     }
 }

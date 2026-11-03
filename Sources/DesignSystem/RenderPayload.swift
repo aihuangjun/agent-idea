@@ -36,6 +36,12 @@ public enum MarkdownView: String, CaseIterable, Sendable {
     }
 }
 
+public enum HTMLView: String, CaseIterable, Sendable {
+    case preview, source
+
+    public var label: String { self == .preview ? "预览" : "源码" }
+}
+
 /// 编辑器里的光标位置（CodeMirror 的 {line, ch}，都从 0 数）。切标签时记下，切回来恢复。
 public struct EditorCursor: Equatable, Sendable, Codable {
     public var line: Int
@@ -75,6 +81,8 @@ public struct RenderPayload: Equatable, Sendable {
         case code(path: String, text: String, language: String?, editable: Bool = false, cursor: EditorCursor? = nil, base: String? = nil, history: String? = nil)
         case markdown(path: String, markdown: String, documentDirectory: URL, view: MarkdownView, editable: Bool = false, cursor: EditorCursor? = nil, base: String? = nil, history: String? = nil)
         case image(path: String, url: URL, sizeText: String)
+        /// 独立 WebView 中的 HTML 预览，与持有编辑桥的 shell 隔离；相对资源按原文件解析，读取范围由 documentDirectory 限定。
+        case html(path: String, text: String, documentDirectory: URL)
         /// `edit` 非空时是可编辑的 diff（工作区变更）：不送 rows，两份全文由编辑器自己比；否则是只读的静态表格。
         case diff(path: String, language: String?, diff: FileDiff, mode: DiffViewMode, emptyReason: String?, edit: DiffEdit? = nil)
         case message(title: String, detail: String)
@@ -87,11 +95,14 @@ public struct RenderPayload: Equatable, Sendable {
     public var scrollTop: Double
     /// 代码是否自动换行。
     public var wrap: Bool
+    /// 首次打开 diff 时定位第一处差异；恢复标签位置时为 false。
+    public var revealFirstChange: Bool
 
-    public init(_ content: Content, scrollTop: Double = 0, wrap: Bool = false) {
+    public init(_ content: Content, scrollTop: Double = 0, wrap: Bool = false, revealFirstChange: Bool = false) {
         self.content = content
         self.scrollTop = scrollTop
         self.wrap = wrap
+        self.revealFirstChange = revealFirstChange
     }
 
     public static func message(_ title: String, _ detail: String) -> RenderPayload {
@@ -105,6 +116,7 @@ public extension RenderPayload.Content {
         case .code: return "code"
         case .markdown: return "markdown"
         case .image: return "image"
+        case .html: return "html"
         case .diff: return "diff"
         case .message: return "message"
         }
@@ -113,7 +125,7 @@ public extension RenderPayload.Content {
 
 extension RenderPayload: Encodable {
     private enum Key: String, CodingKey {
-        case kind, scrollTop, wrap, path, text, language, editable, cursor, base, history, markdown, docDir, view, url, sizeText
+        case kind, scrollTop, wrap, revealFirstChange, path, text, language, editable, cursor, base, history, markdown, docDir, view, url, sizeText
         case mode, rows, binary, empty, added, removed, emptyReason, title, detail, edit, oldText, newText, filePath
     }
 
@@ -121,6 +133,7 @@ extension RenderPayload: Encodable {
         var container = encoder.container(keyedBy: Key.self)
         try container.encode(scrollTop, forKey: .scrollTop)
         try container.encode(wrap, forKey: .wrap)
+        try container.encode(revealFirstChange, forKey: .revealFirstChange)
         switch content {
         case .code(let path, let text, let language, let editable, let cursor, let base, let history):
             try container.encode("code", forKey: .kind)
@@ -146,6 +159,11 @@ extension RenderPayload: Encodable {
             try container.encode(path, forKey: .path)
             try container.encode(url.absoluteString, forKey: .url)
             try container.encode(sizeText, forKey: .sizeText)
+        case .html(let path, let text, let directory):
+            try container.encode("html", forKey: .kind)
+            try container.encode(path, forKey: .path)
+            try container.encode(text, forKey: .text)
+            try container.encode(directory.absoluteString, forKey: .docDir)
         case .diff(let path, let language, let diff, let mode, let emptyReason, let edit):
             try container.encode("diff", forKey: .kind)
             try container.encode(path, forKey: .path)

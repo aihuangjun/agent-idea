@@ -18,6 +18,8 @@ struct EditorTab: Identifiable, Equatable {
     var isPreview: Bool
     /// 切走时记下的滚动位置，切回来恢复。
     var scrollTop: Double = 0
+    /// 真正看过 diff 后才置为 true，切回来优先恢复位置。
+    var hasDiffPosition = false
     /// 切走时记下的光标位置（只有编辑器才有）。
     var cursor: EditorCursor?
     /// 切走时记下的编辑器撤销历史（CodeMirror `getHistory()` 的 JSON 文本）连同它对应的那份文本的哈希：
@@ -32,6 +34,7 @@ struct EditorTab: Identifiable, Equatable {
     }
     /// Markdown 标签：看渲染结果、看源码，还是分栏。
     var markdownView: MarkdownView = .preview
+    var htmlView: HTMLView = .preview
 
     init(kind: Kind, isPreview: Bool) {
         self.kind = kind

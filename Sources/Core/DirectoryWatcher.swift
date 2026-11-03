@@ -1,4 +1,5 @@
 import CoreServices
+import Darwin
 import Foundation
 
 /// 递归监听一个目录，文件有变化就回调（带上变了的路径）。
@@ -94,8 +95,42 @@ public final class DirectoryWatcher: @unchecked Sendable {
     /// 用户在终端里 add/commit/切分支了，得刷新。`index.lock` 是每次 git 命令的副产物，不算。
     public static func isRelevant(_ path: String) -> Bool {
         guard let range = path.range(of: "/.git/") else { return true }
-        let inside = path[range.upperBound...]
+        return isRelevantGitPath(String(path[range.upperBound...]))
+    }
+
+    /// 相对于实际 git-dir / common-dir 的路径，兼容 worktree 与自定义 git 目录。
+    public static func isRelevantGitPath(_ inside: String) -> Bool {
         if inside.hasSuffix(".lock") { return false }
-        return inside == "index" || inside == "HEAD" || inside.hasPrefix("refs/") || inside == "MERGE_HEAD"
+        return inside.isEmpty || ["index", "HEAD", "refs", "packed-refs", "config", "MERGE_HEAD", "rebase-merge", "rebase-apply"].contains(inside)
+            || inside.hasPrefix("refs/") || inside.hasPrefix("rebase-merge/") || inside.hasPrefix("rebase-apply/")
+    }
+
+}
+
+/// FSEvents 返回 /private/tmp、/private/var 等真实路径，Foundation URL 可能是 /tmp、
+/// /var 或符号链接。只对存在的根目录调用 realpath：事件里的锁文件可能已经被删掉或改名，
+/// 对事件路径调用 URL.resolvingSymlinks 会因文件存在与否得到不同的前缀。
+public struct GitMetadataEventFilter: Sendable {
+    private let roots: [String]
+
+    public init(directory: URL) {
+        let original = directory.path
+        if let physical = realpath(original, nil) {
+            defer { free(physical) }
+            roots = Array(Set([original, String(cString: physical)]))
+        } else {
+            roots = [original]
+        }
+    }
+
+    public func isRelevant(_ path: String) -> Bool {
+        for root in roots {
+            if path == root { return true }
+            let prefix = root + "/"
+            if path.hasPrefix(prefix) {
+                return DirectoryWatcher.isRelevantGitPath(String(path.dropFirst(prefix.count)))
+            }
+        }
+        return false
     }
 }

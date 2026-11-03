@@ -335,11 +335,11 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         // 开着 m.txt 的 diff 标签，回滚后应被关掉
         session.openDiff(try #require(byPath["m.txt"]), pinned: true)
         commit.rollback(try #require(byPath["m.txt"]))
-        await waitUntil { !runner.calls(startingWith: "restore").isEmpty && session.tabs.isEmpty }
+        await waitUntil { !runner.calls(startingWith: "restore").isEmpty && session.tabs.isEmpty && !commit.isRollingBack }
         #expect(runner.calls(startingWith: "restore").last == ["restore", "--source=HEAD", "--staged", "--worktree", "--", "m.txt"])
 
         commit.rollback(try #require(byPath["new.txt"]))
-        await waitUntil { runner.calls(startingWith: "restore").count == 2 }
+        await waitUntil { runner.calls(startingWith: "restore").count == 2 && !commit.isRollingBack }
         #expect(runner.calls(startingWith: "restore").last == ["restore", "--source=HEAD", "--staged", "--worktree", "--", "new.txt", "old.txt"])
 
         commit.rollback(try #require(byPath["a.txt"]))
@@ -1007,7 +1007,7 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         await waitUntil { (try? String(contentsOf: modified, encoding: .utf8)) == "edited\n" }
         #expect(!calls.value.contains { $0.first == "add" }, "修改的写回去就行，不用碰索引")
         session.redo()
-        await waitUntil { (try? String(contentsOf: modified, encoding: .utf8)) == "head\n" }
+        await waitUntil { (try? String(contentsOf: modified, encoding: .utf8)) == "head\n" && !session.isUndoing && session.commit?.isRollingBack == false }
         #expect(calls.value.filter { $0.first == "restore" }.count == 2)
 
         session.rollback(try #require(byPath["new.txt"]))

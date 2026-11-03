@@ -104,8 +104,20 @@ public struct AgentIDEARootScene: Scene {
                     workbench.toolWindow = .project
                     workbench.active?.search.activate()
                 }
-                .keyboardShortcut("f", modifiers: .command)
+                .keyboardShortcut("f", modifiers: [.command, .shift])
                 .disabled(workbench.active == nil)
+                Button("文件内查找…") { workbench.active?.showFind() }
+                    .keyboardShortcut("f", modifiers: .command)
+                    .disabled(workbench.active?.activeTab == nil)
+                Button("文件内查找（Ctrl+F）") { workbench.active?.showFind() }
+                    .keyboardShortcut("f", modifiers: .control)
+                    .disabled(workbench.active?.activeTab == nil)
+                Button("查找下一个") { workbench.active?.findInFile() }
+                    .keyboardShortcut("g", modifiers: .command)
+                    .disabled(!(workbench.active?.isFindShown ?? false))
+                Button("查找上一个") { workbench.active?.findInFile(backwards: true) }
+                    .keyboardShortcut("g", modifiers: [.command, .shift])
+                    .disabled(!(workbench.active?.isFindShown ?? false))
                 Button("在项目视图中定位当前文件") { workbench.active?.revealActiveTab() }
                     .keyboardShortcut("l", modifiers: [.command, .option])
                     .disabled(workbench.active?.activeTab == nil)
@@ -187,7 +199,7 @@ public struct AgentIDEARootScene: Scene {
                     .disabled(!(workbench.active?.canRequestSync ?? false))
                 Button("分支…") { workbench.active?.showBranches() }
                     .disabled(!(workbench.active?.hasGit ?? false))
-                Button("刷新 git 状态") { workbench.active?.refreshGit() }
+                Button("刷新 git 状态") { workbench.active?.refreshAll() }
                     .disabled(!(workbench.active?.hasGit ?? false))
             }
         }
@@ -228,6 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let center = NotificationCenter.default
         center.addObserver(self, selector: #selector(saveAllDrafts), name: NSApplication.didResignActiveNotification, object: nil)
         center.addObserver(self, selector: #selector(saveAllDrafts), name: NSApplication.willTerminateNotification, object: nil)
+        center.addObserver(self, selector: #selector(refreshOnActivation), name: NSApplication.didBecomeActiveNotification, object: nil)
     }
 
     @MainActor private static var didPrepare = false
@@ -248,6 +261,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 切到别的应用、退出：把没保存的都写回去（IDEA 的自动保存时机）。
     @objc private func saveAllDrafts() {
         MainActor.assumeIsolated { workbench?.saveAll() }
+    }
+
+    @objc private func refreshOnActivation() {
+        // 切回应用只核对磁盘变化；强制重读会重置没变化的 HTML 页面及编辑器撤销历史。
+        MainActor.assumeIsolated { workbench?.active?.refreshGit() }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {

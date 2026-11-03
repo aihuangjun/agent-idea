@@ -11,6 +11,9 @@ final class CommitController: ObservableObject {
     @Published private(set) var excludedPaths: Set<String> = []
     @Published private(set) var isCommitting = false
     @Published private(set) var isPushing = false
+    @Published private(set) var isRollingBack = false
+    /// 会话正在收取编辑器内容、准备回滚备份；这段异步窗口也要阻止其它 git 写操作。
+    @Published var isPreparingRollback = false
     /// 最近一次操作的结果或错误，显示在提交面板底部。
     @Published private(set) var status: OperationStatus?
 
@@ -19,6 +22,7 @@ final class CommitController: ObservableObject {
     private var snapshot: GitSnapshot = .empty
     /// 仓库被改了（提交、回滚、删文件之后）。参数是受影响的变更，会话据此关掉对应的 diff 标签。
     var onRepositoryChanged: (@MainActor ([GitChange]) -> Void)?
+    var onRolledBack: (@MainActor ([GitChange]) -> Void)?
 
     init(git: GitClient, repositoryRoot: URL) {
         self.git = git
@@ -48,11 +52,13 @@ final class CommitController: ObservableObject {
     // MARK: - 提交与推送
 
     var canCommit: Bool {
-        !isCommitting && !isPushing && !includedChanges.isEmpty
+        !isCommitting && !isPushing && !isRollingBack && !isPreparingRollback && !includedChanges.isEmpty
             && !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    var canPush: Bool { !isCommitting && !isPushing && !snapshot.branch.isUnborn }
+    var canPush: Bool { !isCommitting && !isPushing && !isRollingBack && !isPreparingRollback && !snapshot.branch.isUnborn }
+
+    var canRollback: Bool { !isRollingBack && !isPreparingRollback && !isCommitting && !isPushing }
 
     /// 提交勾选的变更；`push` 为 true 时接着推送。
     func commit(push: Bool) {
@@ -119,16 +125,19 @@ final class CommitController: ObservableObject {
     /// 能一起跑的合成一两条 git 命令（几十个文件不用起几十次 git）；一起跑失败了再逐条跑，挑出到底是哪几条不行，
     /// 别的照样回滚掉。做完调 `completion`，参数是真回滚成了的那些（会话据此记一步撤销），会话只刷新一次。
     func rollback(_ changes: [GitChange], completion: @escaping @MainActor ([GitChange]) -> Void) {
+        guard canRollback else { completion([]); return }
         let targets = changes.filter { $0.kind != .untracked }
         guard !targets.isEmpty else {
             completion([])
             return
         }
+        isRollingBack = true
         Task { [weak self] in
             guard let self else {
                 completion([])
                 return
             }
+            defer { isRollingBack = false }
             var succeeded: [GitChange] = []
             var failures: [(GitChange, Error)] = []
             do {
@@ -153,7 +162,10 @@ final class CommitController: ObservableObject {
                 status = .failure(targets.count == 1
                     ? "回滚失败：\(error.userFacingDescription)"
                     : "有 \(failures.count) 个没能回滚，比如 \(change.fileName)：\(error.userFacingDescription)")
+            } else {
+                status = .success("已回滚 \(succeeded.count) 个文件")
             }
+            onRolledBack?(succeeded)
             onRepositoryChanged?(targets)
             completion(succeeded)
         }

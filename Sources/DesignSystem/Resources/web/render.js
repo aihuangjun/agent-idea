@@ -2,14 +2,16 @@
  *
  * Swift 侧主要做一件事：window.ide.render(payload)。Swift 那边的事实源是 DesignSystem/RenderPayload.swift，
  * 改一边必须改另一边。每个 payload 都带 scrollTop（渲染完滚到哪）和 wrap（代码是否自动换行），kind 决定画什么：
+ * revealFirstChange 为 true 时首次定位 diff 的第一处差异；恢复标签位置时为 false。
  *   code     { path, text, language, editable, cursor?: {line, ch}, base?: HEAD 里的内容, history?: 编辑器撤销历史的 JSON 文本 }
  *   markdown { path, markdown, docDir, view: "preview" | "source" | "split", editable, cursor?, base?, history? }
  *   image    { path, url, sizeText }
+ *   html     { path, text, docDir }（宿主用独立 WebView 预览，HTML 脚本没有编辑桥）
  *   diff     { path, language, mode: "side" | "unified", rows, binary, empty, added, removed, emptyReason }
  *            或可编辑的 { path, language, mode, edit: { oldText, newText, filePath, cursor?, history? } }：左/上是基线只读，右/下是工作区可改
  *   message  { title, detail }
  * editable 为真的 code / markdown 源码用 CodeMirror 编辑器画，否则是只读的静态视图。
- * 宿主还会问 window.ide.getState() → { scrollTop, text: 编辑器里的全文或 null, cursor, history }，切标签前拿走最新文字；
+ * 宿主还会问 window.ide.getState() → { kind, scrollTop, text: 编辑器里的全文或 null, cursor, history }，切标签前拿走最新文字；
  * history 是 CodeMirror getHistory() 的 JSON 文本，下次渲染同一份内容时随 payload 送回来（setHistory），切走再切回 ⌘Z 照样能撤。
  * window.ide.undo() / redo() 是编辑器里的撤销 / 重做，回有没有编辑器接下这一步（只读视图回 false，宿主去撤文件操作）；
  * 焦点在编辑器里时 ⌘Z / ⇧⌘Z 由 CodeMirror 自己处理，不会传到应用菜单。
@@ -389,6 +391,7 @@
         if (!group.dels) continue;
         const node = document.createElement("div");
         node.className = "cm-diff-removed";
+        node.dataset.changeLine = String(group.newStart);
         for (const text of oldLines.slice(group.oldStart, group.oldStart + group.dels)) {
           const row = document.createElement("div");
           row.textContent = text || " ";
@@ -734,12 +737,14 @@
    * 单列可编辑 diff 与带基线的编辑器按行级 diff 的分组算（与标记、底色是同一份数据）。 */
   function editorChangeLines() {
     if (!editor || !current) return [];
-    if (mergeView) return (mergeView.leftChunks() || []).map((chunk) => chunk.editFrom);
+    // 纯删除的 EOF chunk 指向 lastLine + 1；光标只能停在最后一行，导航也必须用同一个可达位置。
+    const reachable = lines => [...new Set(lines.map(line => Math.min(line, editor.lastLine())))];
+    if (mergeView) return reachable((mergeView.leftChunks() || []).map((chunk) => chunk.editFrom));
     if (changeLinesCache) return changeLinesCache;
     const base = current.edit ? current.edit.oldText : current.base;
     if (typeof base !== "string") return [];
     const groups = lineChanges(base.split("\n"), editor.getValue().split("\n"));
-    changeLinesCache = (groups || []).map((group) => group.newStart);
+    changeLinesCache = reachable((groups || []).map((group) => group.newStart));
     return changeLinesCache;
   }
 
@@ -750,11 +755,15 @@
     const cursor = editor.getCursor().line;
     const index = direction === "next" ? lines.findIndex((line) => line > cursor) : lastIndex(lines, (line) => line < cursor);
     if (index < 0) return { index: lines.indexOf(cursor), total: lines.length };
-    const line = Math.min(lines[index], editor.lastLine());
+    revealEditorLine(lines[index]);
+    return { index, total: lines.length };
+  }
+
+  function revealEditorLine(target) {
+    const line = Math.min(target, editor.lastLine());
     editor.setCursor({ line, ch: 0 });   // cursorActivity 会把新位置报给宿主
     const info = editor.getScrollInfo();
     editor.scrollTo(null, Math.max(0, editor.heightAtLine(line, "local") - info.clientHeight / 2 + editor.defaultTextHeight() / 2));
-    return { index, total: lines.length };
   }
 
   /* 只读 diff 表格：一段连续的变更行算一处。上次跳到的那处还在视口里就从它往下 / 往上数一处，
@@ -790,13 +799,34 @@
     if (!runs.length) return null;
     const index = staticTarget(runs, direction);
     if (index < 0) return { index: changeIndex, total: runs.length };
+    revealStaticRun(runs, index);
+    reportChangePosition();
+    return { index, total: runs.length };
+  }
+
+  function revealStaticRun(runs, index) {
     const run = runs[index];
     for (const row of root.querySelectorAll("tr.current-change")) row.classList.remove("current-change");
     for (const row of run) row.classList.add("current-change");
     window.scrollTo(0, Math.max(0, staticTopOf(run) - window.innerHeight / 2 + run[0].getBoundingClientRect().height / 2));
     changeIndex = index;
-    reportChangePosition();
-    return { index, total: runs.length };
+  }
+
+  function revealFirstDiffChange() {
+    if (!current || current.kind !== "diff") return;
+    if (editor) {
+      const lines = editorChangeLines();
+      if (lines.length) {
+        revealEditorLine(lines[0]);
+        // 单列中的删除块在目标行上方；整块很高时仍应让删除内容进入视口。
+        if (unifiedWidgets.length && Math.min(Number(unifiedWidgets[0].node.dataset.changeLine), editor.lastLine()) === lines[0]) {
+          unifiedWidgets[0].node.scrollIntoView({block: "center"});
+        }
+      }
+    } else {
+      const runs = staticChangeRuns();
+      if (runs.length) revealStaticRun(runs, 0);
+    }
   }
 
   /* 告诉宿主前面 / 后面还有没有变更可跳（到头的箭头灰掉）。编辑器以光标行为准，只读 diff 按 staticTarget 的答案。 */
@@ -838,12 +868,87 @@
     navigateChange(event.shiftKey ? "previous" : "next");
   });
 
+  document.addEventListener("keydown", (event) => {
+    if (event.key.toLowerCase() !== "f" || !(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
+    event.preventDefault();
+    event.stopPropagation();
+    post({ type: "find" });
+  }, true);
+
+  let findState = null;
+  function clearFind() {
+    findState = null;
+    for (const widget of unifiedWidgets) widget.node.classList.remove("cm-find-removed");
+  }
+
+  function findInEditors(options) {
+    if (!editor) return null;
+    for (const widget of unifiedWidgets) widget.node.classList.remove("cm-find-removed");
+    if (!options.query) { clearFind(); return false; }
+    const editors = mergeView ? [mergeView.leftOriginal(), editor] : [editor];
+    const texts = editors.map(cm => cm.getValue());
+    const removed = [];
+    if (current && current.edit && current.mode === "unified") {
+      const oldLines = current.edit.oldText.split("\n");
+      for (const group of lineChanges(oldLines, editor.getValue().split("\n")) || []) {
+        if (group.dels) removed.push({ line: group.newStart, text: oldLines.slice(group.oldStart, group.oldStart + group.dels).join("\n") });
+      }
+      texts.push(...removed.map(group => group.text));
+    }
+    const key = JSON.stringify([options.query, options.caseSensitive, texts]);
+    const matches = [];
+    texts.forEach((text, pane) => {
+      // 正则 i 保持 UTF-16 位置不变，大小写转换会改变某些 Unicode 字符的长度。
+      const escaped = options.query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pattern = new RegExp(escaped, options.caseSensitive ? "g" : "gi");
+      let match;
+      while ((match = pattern.exec(text))) matches.push({ pane, from: match.index, to: match.index + match[0].length });
+    });
+    if (!matches.length) { findState = null; return false; }
+    let index;
+    if (findState && findState.key === key) index = (findState.index + (options.backwards ? -1 : 1) + matches.length) % matches.length;
+    else {
+      const position = editor.indexFromPos(editor.getCursor());
+      index = options.backwards
+        ? lastIndex(matches, m => m.pane === editors.length - 1 && m.from < position)
+        : matches.findIndex(m => m.pane === editors.length - 1 && m.from >= position);
+      if (index < 0) index = options.backwards ? matches.length - 1 : 0;
+    }
+    const match = matches[index], cm = editors[match.pane];
+    if (cm) {
+      const from = cm.posFromIndex(match.from), to = cm.posFromIndex(match.to);
+      cm.setSelection(from, to);
+      cm.scrollIntoView({ from, to }, 60);
+    } else {
+      // 单列 diff 中删除的文字不在 CodeMirror 文档里，要查旧文本并滚到对应的删除块。
+      const groupIndex = match.pane - editors.length;
+      const group = removed[groupIndex];
+      editor.scrollIntoView({line: Math.min(group.line, editor.lastLine()), ch: 0}, 60);
+      const widget = unifiedWidgets[groupIndex];
+      if (widget) {
+        widget.node.classList.add("cm-find-removed");
+        widget.node.scrollIntoView({block: "center"});
+      }
+    }
+    findState = { key, index, pane: match.pane };
+    return true;
+  }
+
   /* ---------- 入口 ---------- */
 
   window.ide = {
+    find(options) { return findInEditors(options); },
+    clearFind,
+    focusEditor() {
+      if (!editor) return false;
+      const target = mergeView && findState && findState.pane === 0 ? mergeView.leftOriginal() : editor;
+      target.focus();
+      return true;
+    },
     render(payload) {
       const started = performance.now();
       flushEditor();
+      findState = null;
       current = payload;
       changeIndex = -1;
       try {
@@ -860,6 +965,11 @@
       }
       // 渲染是同步的，但图片与 mermaid 会撑高页面；先按给的位置滚一次，图出来后位置大体也还对
       window.scrollTo(0, payload.scrollTop || 0);
+      if (payload.revealFirstChange) {
+        revealFirstDiffChange();
+        // 页面内部切主题 / 换行重画时，也保留已经定位后的状态。
+        payload.revealFirstChange = false;
+      }
       // 告诉宿主画完了、花了多久（宿主据此记日志、探针据此计时）
       post({ type: "rendered", kind: payload.kind, ms: Math.round(performance.now() - started) });
       reportChangePosition();
@@ -872,6 +982,7 @@
     getState() {
       const cursor = editor ? editor.getCursor() : null;
       return {
+        kind: current ? current.kind : null,
         scrollTop: window.ide.getScrollTop(),
         text: editor ? editor.getValue() : null,
         cursor: cursor ? { line: cursor.line, ch: cursor.ch } : null,

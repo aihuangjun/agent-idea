@@ -61,6 +61,19 @@ public struct GitClient: Sendable {
         return URL(fileURLWithPath: path, isDirectory: true)
     }
 
+    /// .git 可能是文件（worktree），也可能在打开的项目子目录之外。
+    public func metadataDirectories(repositoryRoot: URL) async -> [URL] {
+        var directories: [URL] = []
+        for option in ["--absolute-git-dir", "--git-common-dir"] {
+            guard let output = try? await run(["rev-parse", option], in: repositoryRoot) else { continue }
+            let path = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !path.isEmpty else { continue }
+            let url = URL(fileURLWithPath: path, relativeTo: repositoryRoot.appendingPathComponent("", isDirectory: true)).standardizedFileURL
+            if !directories.contains(url) { directories.append(url) }
+        }
+        return directories
+    }
+
     /// 分支 + 全部变更 + 被忽略的路径。
     ///
     /// `--untracked-files=all` 让未跟踪目录里的文件逐个列出（变更列表要一个个看）；

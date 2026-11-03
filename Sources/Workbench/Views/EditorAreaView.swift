@@ -13,6 +13,7 @@ struct EditorAreaView: View {
             if !session.tabs.isEmpty {
                 TabBar(session: session)
                 EditorHeader(session: session)
+                if session.isFindShown { FileFindBar(session: session) }
             }
             // WebView 常驻：没有标签时盖一层空态，而不是把它从视图树里拿掉——
             // WKWebView 挂上/摘下一次要几十毫秒，第一次打开文件、关掉最后一个标签都会顿一下。
@@ -54,7 +55,8 @@ private struct EmptyEditorView: View {
                 shortcut("项目视图", "⌘1")
                 shortcut("提交视图", "⌘0")
                 shortcut("提交历史", "⌘9")
-                shortcut("查找文件", "⌘F")
+                shortcut("文件内查找", "⌘F / Ctrl+F")
+                shortcut("查找文件", "⇧⌘F")
                 shortcut("定位当前文件", "⌥⌘L")
                 shortcut("后退 / 前进", "⌥← / ⌥→")
                 shortcut("上一处 / 下一处变更", "⇧F7 / F7")
@@ -157,6 +159,10 @@ private struct TabItem: View {
             if clicks.registerClick(on: tab.id) { session.pin(tab.id) }
         }
         .contextMenu {
+            if let change = tab.change, let action = session.rollbackMenuAction(for: change) {
+                Button(action.title, action: action.perform)
+                Divider()
+            }
             Button("关闭") { session.closeTab(tab.id) }
             Button("关闭其他") { session.closeOtherTabs(tab.id) }
             Button("关闭全部") { session.closeAllTabs() }
@@ -209,6 +215,7 @@ private struct EditorHeader: View {
 
     @ViewBuilder
     private func controls(for tab: EditorTab) -> some View {
+        IconButton("magnifyingglass", help: "文件内查找（⌘F / Ctrl+F）", size: 22) { session.showFind() }
         if session.canNavigateChanges {
             // IDEA diff 视图工具条上的上下箭头：跳到上一处 / 下一处变更（⇧F7 / F7）
             HStack(spacing: 0) {
@@ -219,6 +226,7 @@ private struct EditorHeader: View {
             }
         }
         if tab.isDiff {
+            IconButton(ToolWindowIcon.refresh, help: "刷新文件与 diff（⌘R）", size: 22) { session.refreshAll() }
             Picker("", selection: $preferences.diffMode) {
                 ForEach(DiffViewMode.allCases, id: \.self) { Text($0.label).tag($0) }
             }
@@ -238,6 +246,11 @@ private struct EditorHeader: View {
             .pickerStyle(.segmented)
             .controlSize(.small)
             .frame(width: 160)
+        } else if let url = tab.fileURL, FileCategory.isHTML(named: url.lastPathComponent) {
+            Picker("HTML 显示方式", selection: Binding(get: { tab.htmlView }, set: { session.setHTMLView($0) })) {
+                ForEach(HTMLView.allCases, id: \.self) { Text($0.label).tag($0) }
+            }
+            .labelsHidden().pickerStyle(.segmented).controlSize(.small).frame(width: 110)
         } else if case .code = session.activeContent {
             if !session.isEditable(tab) {
                 Text("只读（文件太大）").font(Theme.smallFont).foregroundStyle(Theme.mutedText)

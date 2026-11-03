@@ -43,6 +43,151 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     return result
 }
 
+@Test @MainActor func findSearchesTheWholeEditorAndWrapsLiterally() async throws {
+    let result = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.txt", text: "First [x]\n" + String(repeating: "other\n", count: 300) + "last [X]\n", language: nil, editable: true)),
+        inspect: """
+        (() => {
+          const cm = document.querySelector('.CodeMirror').CodeMirror;
+          const search = (backwards = false, caseSensitive = false, query = '[x]') => window.ide.find({query, backwards, caseSensitive});
+          const result = [search(), cm.getCursor('from').line, cm.getSelection()];
+          result.push(search(), cm.getCursor('from').line, cm.getSelection());
+          result.push(search(), cm.getCursor('from').line);
+          result.push(search(true), cm.getCursor('from').line);
+          result.push(search(false, true), cm.getSelection());
+          result.push(search(false, true, 'missing'));
+          window.ide.focusEditor();
+          result.push(cm.hasFocus());
+          return result.join('|');
+        })()
+        """
+    )
+    #expect(result as? String == "true|0|[x]|true|301|[X]|true|0|true|301|true|[x]|false|true")
+}
+
+@Test @MainActor func findIncludesTheBaseSideOfEditableDiff() async throws {
+    let result = try await renderAndInspect(
+        RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil,
+                            edit: DiffEdit(oldText: "deleted only", newText: "new text", filePath: "/x/a.txt"))),
+        inspect: "[window.ide.find({query: 'deleted', backwards: false, caseSensitive: false}), document.querySelector('.CodeMirror-merge-left .CodeMirror').CodeMirror.getSelection()].join('|')"
+    )
+    #expect(result as? String == "true|deleted")
+}
+
+@Test @MainActor func findIncludesDeletedTextOutsideTheUnifiedEditorViewport() async throws {
+    let prefix = String(repeating: "same\n", count: 300)
+    let result = try await renderAndInspect(
+        RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .unified, emptyReason: nil,
+                            edit: DiffEdit(oldText: prefix + "deleted needle\n", newText: prefix + "replacement\n", filePath: "/x/a.txt"))),
+        inspect: """
+        (() => {
+          const find = query => window.ide.find({query, backwards: false, caseSensitive: false});
+          const marks = () => document.querySelectorAll('.cm-find-removed').length;
+          const result = [find('deleted needle'), marks(), document.querySelector('.cm-find-removed')?.textContent];
+          result.push(find('missing'), marks(), find('deleted needle'));
+          window.ide.clearFind();
+          result.push(marks(), find('deleted needle'), find(''), marks());
+          return result.join('|');
+        })()
+        """
+    )
+    #expect(result as? String == "true|1|deleted needle|false|0|true|0|true|false|0")
+}
+
+@Test @MainActor func newEditableDiffRevealsTheFirstDifferenceAndRestoresVisitedPositions() async throws {
+    let oldLines = (0..<700).map { "line \($0)" }
+    var newLines = oldLines
+    newLines[400] = "FIRST DIFFERENCE"
+    newLines[600] = "SECOND DIFFERENCE"
+    for mode in DiffViewMode.allCases {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                edit: DiffEdit(oldText: oldLines.joined(separator: "\n"), newText: newLines.joined(separator: "\n"), filePath: "/x/a.txt")), revealFirstChange: true),
+            inspect: """
+            (() => {
+              const cm = document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
+              const state = window.ide.getState();
+              const visible = cm.getViewport();
+              return [state.cursor.line, state.scrollTop > 1000, visible.from <= 400 && visible.to > 400,
+                      window.ide.navigateChange('next').index, cm.getCursor().line].join('|');
+            })()
+            """
+        )
+        #expect(result as? String == "400|true|true|1|600", "\(mode)")
+        let restored = try await renderAndInspect(
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                edit: DiffEdit(oldText: oldLines.joined(separator: "\n"), newText: newLines.joined(separator: "\n"), filePath: "/x/a.txt", cursor: EditorCursor(line: 10, ch: 2))), scrollTop: 0, revealFirstChange: false),
+            inspect: "[window.ide.getState().cursor.line, window.ide.getState().cursor.ch, window.ide.getState().scrollTop].join('|')"
+        )
+        #expect(restored as? String == "10|2|0", "回到页首的已访问标签也不能再次自动跳走：\(mode)")
+    }
+}
+
+@Test @MainActor func initialDiffRevealHandlesLineZeroDeletionAndIdenticalFiles() async throws {
+    let examples: [(String, String, Int)] = [("old\nrest", "new\nrest", 0), ("a\nremoved\nb", "a\nb", 1), ("same", "same", 0)]
+    for (old, new, expected) in examples {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .unified, emptyReason: nil,
+                                edit: DiffEdit(oldText: old, newText: new, filePath: "/x/a.txt")), revealFirstChange: true),
+            inspect: "window.ide.getState().cursor.line"
+        )
+        #expect((result as? NSNumber)?.intValue == expected)
+    }
+}
+
+@Test @MainActor func newReadOnlyDiffSelectsTheFirstChangedRun() async throws {
+    let diff = UnifiedDiffParser.parse("--- a/a.txt\n+++ b/a.txt\n@@ -1,4 +1,4 @@\n-first\n+FIRST\n same\n-second\n+SECOND\n end\n")
+    for mode in DiffViewMode.allCases {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: diff, mode: mode, emptyReason: nil), revealFirstChange: true),
+            inspect: "[document.querySelector('tr.current-change td.src').textContent.includes('first') || document.querySelector('tr.current-change td.src').textContent.includes('FIRST'), window.ide.navigateChange('next').index].join('|')"
+        )
+        #expect(result as? String == "true|1")
+    }
+}
+
+@Test @MainActor func firstDifferenceAtDeletedEOFHasNoUnreachableNextChange() async throws {
+    for mode in DiffViewMode.allCases {
+        let positions = Locked<[ContentRenderer.ChangePosition]>([])
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                edit: DiffEdit(oldText: "kept\nremoved", newText: "kept", filePath: "/x/a.txt")), revealFirstChange: true),
+            configure: { $0.onChangePosition = { positions.value.append($0) } },
+            inspect: "[window.ide.getState().cursor.line, window.ide.navigateChange('next').index, window.ide.navigateChange('next').total].join('|')"
+        )
+        #expect(result as? String == "0|0|1", "\(mode)")
+        #expect(positions.value.last == ContentRenderer.ChangePosition(), "唯一差异已自动定位，两侧都应到头：\(mode)")
+    }
+}
+
+@Test @MainActor func htmlPreviewLoadsLocalResourcesAndScriptsWithoutTheEditorBridge() async throws {
+    try await withTemporaryDirectory { directory in
+        let web = directory.appendingPathComponent("web", isDirectory: true)
+        try FileManager.default.createDirectory(at: web, withIntermediateDirectories: true)
+        try "h1 { color: rgb(12, 34, 56); }".write(to: web.appendingPathComponent("style.css"), atomically: true, encoding: .utf8)
+        try "document.querySelector('h1').textContent = 'HTML ready';".write(to: web.appendingPathComponent("local.js"), atomically: true, encoding: .utf8)
+        try "window.outsideRan = true".write(to: directory.appendingPathComponent("outside.js"), atomically: true, encoding: .utf8)
+        let html = "<!doctype html><html><head><link rel='stylesheet' href='style.css'></head><body><h1>Loading</h1><script src='local.js'></script><script src='../outside.js' onerror='window.outsideBlocked = true'></script><script>window.inlineRan = true</script></body></html>"
+        let renderer = ContentRenderer()
+        renderer.render(RenderPayload(.html(path: web.appendingPathComponent("page.html").path, text: html, documentDirectory: web)))
+        let webView = renderer.displayedWebView
+        let window = NSWindow(contentRect: CGRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = webView
+        var result: String?
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            result = try? await webView.evaluateJavaScript("[document.querySelector('h1')?.textContent, document.querySelector('h1') ? getComputedStyle(document.querySelector('h1')).color : '', window.inlineRan, typeof window.webkit?.messageHandlers?.ide, window.outsideBlocked, typeof window.outsideRan].join('|')") as? String
+            if result == "HTML ready|rgb(12, 34, 56)|true|undefined|true|undefined" { break }
+            await Task.yield()
+        }
+        #expect(result == "HTML ready|rgb(12, 34, 56)|true|undefined|true|undefined")
+        let found = await withCheckedContinuation { continuation in renderer.find("HTML ready") { continuation.resume(returning: $0) } }
+        #expect(found)
+        renderer.render(RenderPayload(.code(path: "/x/a.txt", text: "source", language: nil, editable: true)))
+        #expect(renderer.displayedWebView === renderer.webView)
+    }
+}
+
 @Test @MainActor func codeRendersWithLineNumbersAndHighlight() async throws {
     let source = """
     import Foundation

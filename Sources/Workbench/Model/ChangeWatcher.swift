@@ -7,6 +7,7 @@ import Foundation
 @MainActor
 final class ChangeWatcher {
     private let watcher: DirectoryWatcher
+    private var gitWatchers: [DirectoryWatcher] = []
     private let debouncer = Debouncer(delay: 0.35)
     private var pending: Set<String> = []
     private var isStopped = false
@@ -45,11 +46,32 @@ final class ChangeWatcher {
         }
     }
 
+    func watchGitDirectories(_ directories: [URL]) {
+        guard !isStopped else { return }
+        for directory in directories where FileManager.default.fileExists(atPath: directory.path) {
+            let root = directory.path
+            let filter = GitMetadataEventFilter(directory: directory)
+            let watcher = DirectoryWatcher(url: directory) { [weak self] paths in
+                let relevant = paths.filter(filter.isRelevant)
+                guard !relevant.isEmpty else { return }
+                Task { @MainActor [weak self] in self?.note(relevant) }
+            }
+            if watcher.start() {
+                gitWatchers.append(watcher)
+                Log.info("watch", "监听 Git 元数据：\(root)")
+            } else {
+                Log.warn("watch", "Git 元数据监听启动失败：\(root)")
+            }
+        }
+    }
+
     /// 项目关掉时调。已经排队的那一批也作废，不再对一个关掉的项目跑 git。
     func stop() {
         isStopped = true
         debouncer.cancel()
         pending = []
         watcher.stop()
+        for watcher in gitWatchers { watcher.stop() }
+        gitWatchers = []
     }
 }

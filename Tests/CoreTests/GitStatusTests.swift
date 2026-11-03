@@ -106,4 +106,11 @@ private func porcelain(_ records: [String]) -> String {
     #expect(!DirectoryWatcher.isRelevant("/p/.git/index.lock"))
     #expect(!DirectoryWatcher.isRelevant("/p/.git/objects/ab/cdef"))
     #expect(!DirectoryWatcher.isRelevant("/p/.git/FETCH_HEAD"))
+    #expect(DirectoryWatcher.isRelevant("/p/.git/packed-refs"))
+    #expect(DirectoryWatcher.isRelevant("/p/.git/config"))
+    #expect(DirectoryWatcher.isRelevantGitPath("HEAD"))
+    #expect(DirectoryWatcher.isRelevantGitPath("refs/remotes/origin/main"))
+    #expect(DirectoryWatcher.isRelevantGitPath("rebase-merge/head-name"))
+    #expect(!DirectoryWatcher.isRelevantGitPath("objects/ab/cdef"))
+    #expect(!DirectoryWatcher.isRelevantGitPath("index.lock"))
 }

@@ -105,6 +105,13 @@ final class WorkbenchModel: ObservableObject {
             self?.active?.applyEdit(path: path, text: text)
         }
         self.renderer.onShellReloaded = { [weak self] in self?.active?.renderActiveTab() }
+        self.renderer.onFind = { [weak self] in self?.active?.showFind() }
+        self.renderer.contextActions = { [weak self] in
+            guard let session = self?.active, let change = session.activeTab?.change,
+                  let action = session.rollbackMenuAction(for: change) else { return [] }
+            return [action]
+        }
+        self.renderer.onRendered = { [weak self] _, _ in self?.active?.findInFile() }
         self.renderer.onChangePosition = { [weak self] position in self?.active?.setChangePosition(position) }
         self.renderer.onNavigate = { [weak self] direction in
             switch direction {
