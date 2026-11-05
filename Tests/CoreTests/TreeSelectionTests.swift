@@ -61,3 +61,12 @@ import Testing
     #expect(TreeSelection.absolutePaths(of: [a, b]) == "/p/a.txt\n/p/b.txt", "一行一个绝对路径")
     #expect(TreeSelection.absolutePaths(of: [c]) == "/p/c.txt")
 }
+
+@Test func treeSelectionCopyFileNamesPreservesNamesAndOrder() {
+    let file = FileNode(url: URL(fileURLWithPath: "/p/报告 v2.tar.gz"), name: "报告 v2.tar.gz", isDirectory: false)
+    let hidden = FileNode(url: URL(fileURLWithPath: "/p/.gitignore"), name: ".gitignore", isDirectory: false)
+    let directory = FileNode(url: URL(fileURLWithPath: "/p/Sources"), name: "Sources", isDirectory: true)
+    #expect(TreeSelection.fileNames(of: [file]) == "报告 v2.tar.gz", "保留中文、空格与完整扩展名，不带父路径")
+    #expect(TreeSelection.fileNames(of: [directory, hidden, file]) == "Sources\n.gitignore\n报告 v2.tar.gz", "多选按行序复制，包含目录与隐藏文件")
+    #expect(TreeSelection.fileNames(of: []) == "")
+}

@@ -57,6 +57,11 @@ public struct TreeSelection: Equatable, Sendable {
         nodes.map(\.url.path).joined(separator: "\n")
     }
 
+    /// 「复制文件名」保留扩展名和行序，一行一个名称（目录也只取名字）。
+    public static func fileNames(of nodes: [FileNode]) -> String {
+        nodes.map(\.name).joined(separator: "\n")
+    }
+
     /// 选中里真正要操作的那些：祖先也被选中的去掉（搬了目录，里面的跟着走；删了目录，里面的也没了）。顺序照 `order`。
     public static func roots(_ nodes: [FileNode]) -> [FileNode] {
         nodes.filter { node in

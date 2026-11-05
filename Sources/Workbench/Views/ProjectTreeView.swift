@@ -107,6 +107,11 @@ struct ProjectTreeView: View {
                             onCopyPath: {
                                 Desktop.copyToClipboard(session.project.root.path)
                                 session.notify("已复制 \(session.project.root.path)")
+                            },
+                            onCopyName: {
+                                let name = session.project.root.lastPathComponent
+                                Desktop.copyToClipboard(name)
+                                session.notify("已复制 \(name)")
                             }
                         )
                         ForEach(session.rows) { row in
@@ -428,6 +433,7 @@ private struct RootRow: View {
     let dropTarget: TreeDropTarget
     let onNewFolder: () -> Void
     let onCopyPath: () -> Void
+    let onCopyName: () -> Void
 
     var body: some View {
         HStack(spacing: 6) {
@@ -447,6 +453,7 @@ private struct RootRow: View {
             Button("新建文件夹…") { onNewFolder() }
             Divider()
             Button("复制绝对路径") { onCopyPath() }
+            Button("复制文件名") { onCopyName() }
         }
     }
 }
@@ -625,6 +632,7 @@ private struct TreeContextMenu: View {
         Button("删除…") { requestDelete(node) }
         Divider()
         Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个绝对路径" : "复制绝对路径") { copyAbsolutePaths() }
+        Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个文件名" : "复制文件名") { copyFileNames() }
         Button("在访达中显示") { Desktop.revealInFinder(node.url) }
         if !node.isDirectory {
             Button("用默认应用打开") { Desktop.openWithDefaultApp(node.url) }
@@ -646,6 +654,12 @@ private struct TreeContextMenu: View {
         let targets = copyTargets
         Desktop.copyToClipboard(TreeSelection.absolutePaths(of: targets))
         session.notify(targets.count > 1 ? "已复制 \(targets.count) 个绝对路径" : "已复制 \(targets[0].url.path)")
+    }
+
+    private func copyFileNames() {
+        let targets = copyTargets
+        Desktop.copyToClipboard(TreeSelection.fileNames(of: targets))
+        session.notify(targets.count > 1 ? "已复制 \(targets.count) 个文件名" : "已复制 \(targets[0].name)")
     }
 }
 
