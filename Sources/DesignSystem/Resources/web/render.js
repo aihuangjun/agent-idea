@@ -111,6 +111,7 @@
 
   let editor = null;       // 当前的 CodeMirror 实例（可编辑那一侧）；换别的内容时随 DOM 一起丢掉
   let mergeView = null;    // 并排可编辑 diff 时的 MergeView（editor 是它右边那个）
+  const diffGutterMarks = new Map(); // 各窗格的行句柄；重算时只清理自己的装饰，不动 MergeView 的差异底色
   let editTimer = null;    // 停手之后再发 edited，别每敲一个键就把整份文本送过去
   const EDIT_DEBOUNCE = 300;
 
@@ -305,6 +306,7 @@
     if (diffTimer) { clearTimeout(diffTimer); diffTimer = null; }
     editor = null;
     mergeView = null;
+    diffGutterMarks.clear();
     unifiedWidgets = [];
     changeLinesCache = null;
   }
@@ -334,6 +336,35 @@
     return groups;
   }
 
+  /* 与摘要共用行级差异，避免 MergeView 把临近的新增 / 删除并成一个大修改块。
+   * 整行 gutter 背景跟着折行高度和固定行号栏走；文末虚拟空行不算一条增删。 */
+  function decorateSideBySideGutters(groups) {
+    if (!mergeView) return;
+    const left = mergeView.leftOriginal();
+    const contentLines = cm => cm.lineCount() - (cm.getLine(cm.lastLine()) === "" ? 1 : 0);
+    const oldCount = contentLines(left), newCount = contentLines(editor);
+    const panes = [
+      { cm: left, original: true, kind: "removed" },
+      { cm: editor, original: false, kind: "added" },
+    ];
+    for (const pane of panes) pane.cm.operation(() => {
+      for (const mark of diffGutterMarks.get(pane.cm) || []) pane.cm.removeLineClass(mark.line, "gutter", mark.className);
+      const marks = [];
+      for (const group of groups || []) {
+        const removed = Math.max(0, Math.min(group.dels, oldCount - group.oldStart));
+        const added = Math.max(0, Math.min(group.adds.length, newCount - group.newStart));
+        const paired = Math.min(removed, added);
+        const start = pane.original ? group.oldStart : group.newStart;
+        const count = pane.original ? removed : added;
+        for (let index = 0; index < count; index++) {
+          const className = "diff-gutter-" + (index < paired ? "modified" : pane.kind);
+          marks.push({ line: pane.cm.addLineClass(start + index, "gutter", className), className });
+        }
+      }
+      diffGutterMarks.set(pane.cm, marks);
+    });
+  }
+
   /* 并排：CodeMirror 的 MergeView，左边基线只读、右边是工作区文件。chunk 之间有连接带和「撤回这一块」按钮。 */
   function renderSideBySideEditable(payload) {
     const edit = payload.edit;
@@ -350,11 +381,11 @@
     editor = mergeView.editor();
     attachEditorEvents(() => {
       if (diffTimer) clearTimeout(diffTimer);
-      diffTimer = setTimeout(() => { diffTimer = null; updateDiffSummary(); }, EDIT_DEBOUNCE);
+      diffTimer = setTimeout(() => { diffTimer = null; decorateSideBySideGutters(updateDiffSummary()); }, EDIT_DEBOUNCE);
     });
     if (edit.cursor) editor.setCursor(edit.cursor);
     restoreHistory(edit.history);
-    updateDiffSummary();
+    decorateSideBySideGutters(updateDiffSummary());
     editor.scrollTo(null, payload.scrollTop || 0);
   }
 
@@ -716,8 +747,11 @@
           ranges = changedRanges(l.t, r.t);
         }
         const changed = l.k === "del" || l.k === "add" || r.k === "del" || r.k === "add";
-        parts.push(`<tr${changed ? ' class="changed"' : ""}><td class="ln ${l.k}">${l.n == null ? "" : l.n}</td>${cell(l, language, ranges && ranges.left)}` +
-          `<td class="ln right-ln ${r.k}">${r.n == null ? "" : r.n}</td>${cell(r, language, ranges && ranges.right)}</tr>`);
+        const modified = l.k === "del" && r.k === "add";
+        const leftMark = l.k === "del" ? "diff-gutter-" + (modified ? "modified" : "removed") : "";
+        const rightMark = r.k === "add" ? "diff-gutter-" + (modified ? "modified" : "added") : "";
+        parts.push(`<tr${changed ? ' class="changed"' : ""}><td class="ln ${l.k} ${leftMark}">${l.n == null ? "" : l.n}</td>${cell(l, language, ranges && ranges.left)}` +
+          `<td class="ln right-ln ${r.k} ${rightMark}">${r.n == null ? "" : r.n}</td>${cell(r, language, ranges && ranges.right)}</tr>`);
       }
       parts.push(`</tbody></table>`);
     }

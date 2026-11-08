@@ -177,6 +177,16 @@ body { font-family: var(--sans); -webkit-font-smoothing: antialiased; overflow-x
 .CodeMirror-merge-l-inserted { background-image: none; background: var(--add-bg-strong); }
 .CodeMirror-merge-l-deleted { background-image: none; background: var(--del-bg-strong); }
 .CodeMirror-merge-collapsed-widget { background: var(--panel); border-color: var(--border); color: var(--text-2); }
+/* IDEA 式行号旁色条：新增绿、删除红、修改蓝。共用主题变量，只画条，不占正文或行号空间。 */
+.diff-gutter-added { --diff-gutter-color: var(--add-fg); }
+.diff-gutter-removed { --diff-gutter-color: var(--del-fg); }
+.diff-gutter-modified { --diff-gutter-color: var(--link); }
+.CodeMirror-gutter-background:is(.diff-gutter-added, .diff-gutter-removed, .diff-gutter-modified)::after,
+table.diff.side td.ln::after {
+  content: ""; position: absolute; top: 0; bottom: 0; right: 0; width: 4px;
+  background: var(--diff-gutter-color, transparent); pointer-events: none;
+}
+table.diff.side td.ln { position: relative; }
 /* 单列可编辑 diff：新增行底色、被删行的只读小块 */
 .CodeMirror-linebackground.cm-diff-added { background: var(--add-bg); }
 .cm-diff-removed { background: var(--del-bg); font-family: var(--mono); font-size: var(--code-size); line-height: 1.6; color: var(--text-2); white-space: pre; padding: 0 12px 0 14px; border-left: 3px solid var(--del-line); }

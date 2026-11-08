@@ -10,7 +10,8 @@ import TestSupport
 /// 每条约几百毫秒。顺手把渲染结果截成图放到 AGENTIDEA_SNAPSHOT_DIR（若设了），给人眼看。
 @MainActor
 /// `prepare` 先跑（比如往编辑器里敲字），等 `settle` 秒让去抖的东西落地，再跑 `inspect` 取值。
-private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(width: 900, height: 600), snapshotName: String? = nil, prepare: String? = nil, settle: TimeInterval = 0, configure: (ContentRenderer) -> Void = { _ in }, inspect: String) async throws -> Any? {
+/// 新增的异步断言用 `waitFor` 等 JS 条件成立，避免固定时长等待。
+private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(width: 900, height: 600), snapshotName: String? = nil, prepare: String? = nil, settle: TimeInterval = 0, waitFor: String? = nil, configure: (ContentRenderer) -> Void = { _ in }, inspect: String) async throws -> Any? {
     let renderer = ContentRenderer()
     configure(renderer)
     let webView = renderer.webView
@@ -32,6 +33,15 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     if let prepare {
         _ = try? await webView.evaluateJavaScript("(function(){ try { \(prepare); return true } catch (e) { return String(e) } })()")
         if settle > 0 { try? await Task.sleep(nanoseconds: UInt64(settle * 1_000_000_000)) }
+    }
+    if let waitFor {
+        let deadline = Date().addingTimeInterval(10)
+        var ready = false
+        while !ready, Date() < deadline {
+            ready = (try? await webView.evaluateJavaScript("(() => { try { return !!(\(waitFor)); } catch (_) { return false; } })()")) as? Bool ?? false
+            if !ready { try? await Task.sleep(nanoseconds: 20_000_000) }
+        }
+        #expect(ready, "等待渲染条件超时：\(waitFor)")
     }
     let result = try? await webView.evaluateJavaScript("(function(){ try { return \(inspect) } catch (e) { return String(e) } })()")
     if let directory = ProcessInfo.processInfo.environment["AGENTIDEA_SNAPSHOT_DIR"], let snapshotName {
@@ -381,6 +391,89 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     )
     // 1 hunk + 1 ctx + 3 配对 + 1 ctx = 6 行；2 删 3 增 1 空；有词级高亮
     #expect(summary as? String == "6,2,3,1,1")
+}
+
+@Test @MainActor func sideDiffGuttersDistinguishChangesAndFollowWrappingAndTheme() async throws {
+    let long = String(repeating: "value ", count: 45)
+    let edit = DiffEdit(oldText: "start\nold \(long)\nkeep A\nkeep B\nremoved\nkeep C\nkeep D\nend\n",
+                        newText: "start\nnew \(long)\nkeep A\nkeep B\nkeep C\nkeep D\nadded\nend\n", filePath: "/x/a.txt")
+    let result = try await renderAndInspect(
+        RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil, edit: edit)),
+        size: CGSize(width: 600, height: 600), snapshotName: "diff-gutter-wrapped-light",
+        prepare: """
+        const before = getComputedStyle(document.querySelector('.CodeMirror-gutter-background.diff-gutter-added'), '::after').backgroundColor;
+        window.__darkGutter = before;
+        window.ide.setTheme('light'); window.ide.setWrap(true);
+        """,
+        waitFor: "document.querySelector('.CodeMirror-merge-editor .CodeMirror').CodeMirror.getOption('lineWrapping')",
+        inspect: """
+        (() => {
+          const panes = ['left', 'editor'].map(side => document.querySelector('.CodeMirror-merge-' + side + ' .CodeMirror').CodeMirror);
+          const describe = cm => { const out = []; cm.eachLine(line => { const marker = /diff-gutter-(\\w+)/.exec(line.gutterClass || ''); if (marker) out.push(cm.getLineNumber(line) + ':' + marker[1]); }); return out.join(','); };
+          const mark = document.querySelector('.CodeMirror-merge-editor .CodeMirror-gutter-background.diff-gutter-modified');
+          const css = getComputedStyle(mark, '::after');
+          const pre = mark.parentElement.querySelector('pre.CodeMirror-line');
+          return [describe(panes[0]), describe(panes[1]), window.__darkGutter, getComputedStyle(document.querySelector('.CodeMirror-gutter-background.diff-gutter-added'), '::after').backgroundColor,
+                  css.width, mark.getBoundingClientRect().height >= pre.getBoundingClientRect().height, pre.getBoundingClientRect().height > panes[1].defaultTextHeight() * 2].join('|');
+        })()
+        """
+    )
+    #expect(result as? String == "1:modified,4:removed|1:modified,6:added|rgb(95, 173, 101)|rgb(6, 125, 23)|4px|true|true")
+}
+
+@Test @MainActor func sideDiffGuttersRefreshAfterEditingAndClearAfterReverting() async throws {
+    let payload = RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil,
+                                      edit: DiffEdit(oldText: "a\nb\nc\n", newText: "a\nB\nc\n", filePath: "/x/a.txt")))
+    let added = try await renderAndInspect(payload,
+        prepare: "document.querySelector('.CodeMirror-merge-editor .CodeMirror').CodeMirror.replaceRange('new\\n', {line: 3, ch: 0})",
+        waitFor: "document.querySelectorAll('.CodeMirror-gutter-background.diff-gutter-added').length == 1",
+        inspect: "[document.querySelectorAll('.CodeMirror-gutter-background.diff-gutter-modified').length, document.querySelectorAll('.CodeMirror-gutter-background.diff-gutter-added').length].join('|')")
+    #expect(added as? String == "2|1")
+    let cleared = try await renderAndInspect(payload,
+        prepare: "document.querySelector('.CodeMirror-merge-editor .CodeMirror').CodeMirror.setValue('a\\nb\\nc\\n')",
+        waitFor: "document.querySelectorAll('.CodeMirror-gutter-background[class*=diff-gutter-]').length == 0",
+        inspect: "document.querySelectorAll('.CodeMirror-gutter-background[class*=diff-gutter-]').length")
+    #expect((cleared as? NSNumber)?.intValue == 0)
+}
+
+@Test @MainActor func sideDiffGuttersHandleEmptyFilesAndPureInsertionOrDeletion() async throws {
+    for (old, new, side, kind) in [("", "new\n", "editor", "added"), ("old\n", "", "left", "removed"), ("", "new", "editor", "added"), ("old", "", "left", "removed")] {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil,
+                                edit: DiffEdit(oldText: old, newText: new, filePath: "/x/a.txt"))),
+            inspect: "[document.querySelectorAll('.CodeMirror-gutter-background.diff-gutter-\(kind)').length, document.querySelectorAll('.CodeMirror-merge-\(side) .CodeMirror-gutter-background.diff-gutter-\(kind)').length, document.querySelectorAll('.diff-gutter-modified').length].join('|')")
+        #expect(result as? String == "1|1|0")
+    }
+}
+
+@Test @MainActor func readOnlySideDiffUsesTheSameGutterColors() async throws {
+    let diff = UnifiedDiffParser.parse("""
+    --- a/a.txt
+    +++ b/a.txt
+    @@ -1,8 +1,8 @@
+     start
+    -old
+    +new
+     keep A
+     keep B
+    -removed
+     keep C
+     keep D
+    +added
+     end
+    """)
+    let result = try await renderAndInspect(
+        RenderPayload(.diff(path: "a.txt", language: nil, diff: diff, mode: .sideBySide, emptyReason: nil)), snapshotName: "diff-gutter-readonly",
+        inspect: """
+        (() => {
+          const marker = document.querySelector('td.ln.diff-gutter-removed');
+          return [document.querySelectorAll('td.ln.diff-gutter-modified').length, document.querySelectorAll('td.ln.diff-gutter-added').length,
+                  document.querySelectorAll('td.ln.diff-gutter-removed').length, getComputedStyle(marker, '::after').backgroundColor,
+                  getComputedStyle(marker, '::after').width, document.querySelectorAll('td.ln.empty[class*=diff-gutter-]').length].join('|');
+        })()
+        """
+    )
+    #expect(result as? String == "2|1|1|rgb(229, 87, 101)|4px|0")
 }
 
 /// 可编辑的工作区 diff：并排是 MergeView（左基线只读、右可改），单列是编辑器 + 新增行底色 + 被删行小块；改了会报 edited。
