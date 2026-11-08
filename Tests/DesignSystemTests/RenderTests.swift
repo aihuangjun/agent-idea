@@ -54,6 +54,365 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     return result
 }
 
+@Test @MainActor func diffContextExpansionPreservesWholeDocumentsAndSearchesHiddenLines() async throws {
+    let old = (0..<150).map { "original line \($0)" }.joined(separator: "\n") + "\n"
+    let new = old.replacingOccurrences(of: "original line 60\n", with: "changed line 60\n")
+        .replacingOccurrences(of: "original line 130\n", with: "changed line 130\n")
+    for mode in DiffViewMode.allCases {
+        for readOnly in [false, true] {
+            let result = try await renderAndInspect(
+                RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                    edit: DiffEdit(oldText: old, newText: new, filePath: "/x/a.txt", readOnly: readOnly)),
+                              wrap: true, revealChange: .first, diffReading: .init(collapseUnchanged: true)),
+                size: CGSize(width: 580, height: 440),
+                inspect: """
+                (() => {
+                  const cm = document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
+                  const before = cm.getValue(), history = JSON.stringify(cm.historySize());
+                  const first = cm.getCursor().line;
+                  const fold = document.querySelector('.diff-context-fold');
+                  const singleAction = fold.querySelectorAll('button').length === 1;
+                  fold.querySelector('button').click();
+                  const expanded = singleAction && cm.getAllMarks().every(mark => !mark.collapsed || mark.find().from.line > 15 || mark.find().to.line < 15);
+                  const nav = window.ide.navigateChange('next');
+                  const next = cm.getCursor().line;
+                  const found = window.ide.find({query:'original line 15', caseSensitive:true});
+                  const visible = cm.getAllMarks().every(mark => { const r = mark.find(); return !r || r.from.line > 15 || r.to.line < 15; });
+                  return [first, expanded, nav.index, nav.total, next, found, visible, cm.getValue() === before,
+                    JSON.stringify(cm.historySize()) === history, cm.getOption('readOnly')].join('|');
+                })()
+                """
+            )
+            #expect(result as? String == "60|true|1|2|130|true|true|true|true|\(readOnly)", "\(mode), readOnly=\(readOnly): \(String(describing: result))")
+        }
+    }
+}
+
+@Test @MainActor func expandingContextKeepsExistingCodeAtTheSameScreenPosition() async throws {
+    let old = (0..<250).map { "line \($0)\n" }.joined()
+    let new = old.replacingOccurrences(of: "line 90\n", with: "CHANGED 90\n").replacingOccurrences(of: "line 200\n", with: "CHANGED 200\n")
+    for mode in DiffViewMode.allCases {
+        for readOnly in [false, true] {
+            let result = try await renderAndInspect(
+                RenderPayload(.diff(path: "stable", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                    edit: DiffEdit(oldText: old, newText: new, filePath: "/x/stable", readOnly: readOnly)),
+                              wrap: true, revealChange: .first, diffReading: .init(collapseUnchanged: true)),
+                size: CGSize(width: 640, height: 440),
+                prepare: """
+                const cm = document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
+                const panes = [...document.querySelectorAll('.CodeMirror')].map(node => node.CodeMirror);
+                const y = pane => pane.charCoords({line:90,ch:0}, 'window').top;
+                (async () => {
+                  panes.forEach(pane => pane.refresh());
+                  await new Promise(resolve => setTimeout(resolve, 0));
+                  const before = panes.map(y), text = cm.getValue(), history = JSON.stringify(cm.historySize());
+                  window.__expansionPositions = {before, tops: panes.map(pane => pane.getScrollInfo().top)};
+                  const button = document.querySelector('.CodeMirror-merge-editor .diff-context-fold button, .diff-host .diff-context-fold button');
+                  window.__oneExpandButton = button.parentNode.querySelectorAll('button').length === 1;
+                  button.click();
+                  window.__maximumMovement = 0;
+                  for (let i = 0; i < 6; i++) {
+                    panes.forEach(pane => pane.refresh());
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                    panes.forEach((pane, index) => window.__maximumMovement = Math.max(window.__maximumMovement, Math.abs(y(pane) - before[index])));
+                  }
+                  // A middle fold has visible context above it. Opening it must retain
+                  // that context rather than moving to the next change below the fold.
+                  const middle = cm.getAllMarks().find(mark => mark.collapsed && mark.find().from.line > 90);
+                  middle.replacedWith.querySelector('button').click();
+                  for (let i = 0; i < 6; i++) {
+                    panes.forEach(pane => pane.refresh());
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                    panes.forEach((pane, index) => window.__maximumMovement = Math.max(window.__maximumMovement, Math.abs(y(pane) - before[index])));
+                  }
+                  window.__expansionResult = [window.__maximumMovement < 1.5, cm.getValue() === text,
+                    JSON.stringify(cm.historySize()) === history, window.__oneExpandButton,
+                    cm.getAllMarks().every(mark => !mark.collapsed || mark.find().from.line > 15 || mark.find().to.line < 15)].join('|');
+                  window.__expansionPositions.after = panes.map(y);
+                  window.__expansionPositions.afterTops = panes.map(pane => pane.getScrollInfo().top);
+                })();
+                """,
+                waitFor: "window.__expansionResult != null",
+                inspect: "window.__expansionResult + '|' + window.__maximumMovement + '|' + JSON.stringify(window.__expansionPositions)"
+            )
+            #expect((result as? String)?.hasPrefix("true|true|true|true|true|") == true, "\(mode), readOnly=\(readOnly): \(String(describing: result))")
+        }
+    }
+}
+
+@Test @MainActor func editingExpandedContextPreservesScrollAndDoesNotRefoldIt() async throws {
+    let old = (0..<1000).map { "line \($0)\n" }.joined()
+    let new = old.replacingOccurrences(of: "line 100\n", with: "CHANGED 100\n")
+        .replacingOccurrences(of: "line 500\n", with: "CHANGED 500\n").replacingOccurrences(of: "line 900\n", with: "CHANGED 900\n")
+    for mode in DiffViewMode.allCases {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "typing", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                edit: DiffEdit(oldText: old, newText: new, filePath: "/x/typing")), wrap: true, revealChange: .first, diffReading: .init(collapseUnchanged: true)),
+            size: CGSize(width: 700, height: 450),
+            prepare: """
+            (async () => {
+            const cm = document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
+            // Expand every region, including those outside CodeMirror's virtual viewport.
+            while (cm.getAllMarks().some(mark => mark.collapsed)) {
+              const mark = cm.getAllMarks().find(mark => mark.collapsed);
+              mark.replacedWith.querySelector('button').click();
+            }
+            cm.refresh();
+            await new Promise(resolve => setTimeout(resolve, 0));
+            cm.getWrapperElement().dispatchEvent(new WheelEvent('wheel', {bubbles:true}));
+            cm.setCursor(480, cm.getLine(480).length);
+            cm.scrollTo(null, cm.heightAtLine(474, 'local'));
+            cm.replaceRange(' inserted\\nnew user line', cm.getCursor(), null, '+input');
+            cm.setCursor(481, 13);
+            // Offscreen WebKit defers the wrapper's native scroll event. Deliver it so
+            // CodeMirror can reset that outer wrapper before measuring the real scroller.
+            cm.getWrapperElement().dispatchEvent(new Event('scroll'));
+            window.__typingY = cm.charCoords(cm.getCursor(), 'window').top;
+            window.__typingTop = cm.getScrollInfo().top;
+            })();
+            """,
+            waitFor: "window.__typingY != null && document.querySelector('.diff-summary .add').textContent === '+5'",
+            inspect: """
+            (() => { const cm = document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
+              return [Math.abs(cm.charCoords(cm.getCursor(),'window').top - window.__typingY) < 1.5,
+                Math.abs(cm.getScrollInfo().top - window.__typingTop) < cm.defaultTextHeight() * 2 + 2,
+                cm.getAllMarks().every(mark => !mark.collapsed), cm.getValue().includes('inserted\\nnew user line'),
+                cm.getCursor().line, cm.getScrollInfo().top - window.__typingTop,
+                cm.charCoords(cm.getCursor(),'window').top - window.__typingY].join('|'); })()
+            """
+        )
+        #expect((result as? String)?.hasPrefix("true|true|true|true|481|") == true, "\(mode): \(String(describing: result))")
+    }
+}
+
+@Test @MainActor func passiveDiffPaneCannotPullTheActiveEditorBackwards() async throws {
+    let text = (0..<300).map { "line \($0)\n" }.joined()
+    let result = try await renderAndInspect(
+        RenderPayload(.diff(path: "sync", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil,
+                            edit: DiffEdit(oldText: text, newText: text, filePath: "/x/sync"))),
+        prepare: """
+        (async () => {
+          const l = document.querySelector('.CodeMirror-merge-left .CodeMirror').CodeMirror;
+          const r = document.querySelector('.CodeMirror-merge-editor .CodeMirror').CodeMirror;
+          r.getWrapperElement().dispatchEvent(new WheelEvent('wheel', {bubbles:true}));
+          r.scrollTo(null, 1000); await new Promise(resolve => setTimeout(resolve, 0));
+          const top = r.getScrollInfo().top;
+          l.scrollTo(null, 0); await new Promise(resolve => setTimeout(resolve, 0));
+          const stable = r.getScrollInfo().top === top;
+          l.getWrapperElement().dispatchEvent(new WheelEvent('wheel', {bubbles:true}));
+          l.scrollTo(null, 500);
+          await new Promise(resolve => setTimeout(resolve, 0));
+          window.__syncResult = [stable, Math.abs(r.getScrollInfo().top - 500) < 1].join('|');
+        })();
+        """,
+        waitFor: "window.__syncResult != null",
+        inspect: "window.__syncResult"
+    )
+    #expect(result as? String == "true|true")
+}
+
+@Test @MainActor func diffReadingStateSurvivesModeTabAndThemeChanges() async throws {
+    let old = (0..<600).map { "line \($0)\n" }.joined()
+    let new = old.replacingOccurrences(of: "line 100\n", with: "CHANGED 100\n").replacingOccurrences(of: "line 500\n", with: "CHANGED 500\n")
+    for mode in DiffViewMode.allCases {
+        for readOnly in [false, true] {
+            let content = RenderPayload.Content.diff(path: "restore", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                                      edit: DiffEdit(oldText: old, newText: new, filePath: "/x/restore", readOnly: readOnly))
+            let payload = RenderPayload(content, wrap: true, revealChange: .first, diffReading: .init(collapseUnchanged: true))
+            let encoded = String(decoding: try JSONEncoder().encode(payload), as: UTF8.self)
+            let result = try await renderAndInspect(payload, size: CGSize(width: 700, height: 450), prepare: """
+            (async () => {
+              const working = () => document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
+              let cm = working();
+              // Open the prefix and middle, then read in the middle of the expanded context.
+              while (cm.getAllMarks().some(mark => mark.collapsed && mark.find().from.line < 500))
+                cm.getAllMarks().find(mark => mark.collapsed && mark.find().from.line < 500).replacedWith.querySelector('button').click();
+              cm.getWrapperElement().dispatchEvent(new WheelEvent('wheel', {bubbles:true}));
+              cm.scrollTo(null, cm.heightAtLine(120, 'local') - 70);
+              cm.refresh(); await new Promise(resolve => setTimeout(resolve, 0));
+              cm.getWrapperElement().dispatchEvent(new Event('scroll'));
+              const y = cm.charCoords({line:120,ch:0}, 'window').top, state = window.ide.getState();
+              const next = \(encoded);
+              next.revealChange = null; next.mode = next.mode === 'side' ? 'unified' : 'side';
+              next.scrollTop = state.scrollTop; next.diffViewState = state.diffViewState;
+              next.edit.cursor = state.cursor;
+              // Switching another tab flushes the old document before the saved state returns.
+              window.ide.render({kind:'message',title:'another tab',detail:'',scrollTop:0,wrap:false});
+              window.ide.render(next);
+              cm = working(); cm.refresh(); await new Promise(resolve => setTimeout(resolve, 0));
+              cm.getWrapperElement().dispatchEvent(new Event('scroll'));
+              const afterMode = Math.abs(cm.charCoords({line:120,ch:0}, 'window').top - y) < 2;
+              const beforeTheme = cm.charCoords({line:120,ch:0}, 'window').top;
+              window.ide.setTheme('light');
+              cm = working(); cm.refresh(); await new Promise(resolve => setTimeout(resolve, 0));
+              cm.getWrapperElement().dispatchEvent(new Event('scroll'));
+              window.__restoreResult = [afterMode, Math.abs(cm.charCoords({line:120,ch:0}, 'window').top - beforeTheme) < 2,
+                cm.getAllMarks().every(mark => !mark.collapsed || mark.find().from.line > 50 || mark.find().to.line < 50),
+                cm.getValue() === next.edit.newText, cm.getOption('readOnly')].join('|');
+            })();
+            """, waitFor: "window.__restoreResult != null", inspect: "window.__restoreResult")
+            #expect(result as? String == "true|true|true|true|\(readOnly)", "\(mode): \(String(describing: result))")
+        }
+    }
+}
+
+@Test @MainActor func ignoredWhitespaceControlsHighlightCountsNavigationAndLiveEdits() async throws {
+    let old = "a  \n  b\nc\nOLD\ne\nf\nSECOND\nend\n"
+    let new = "a\n\tb\nc\nNEW\ne\nf\nCHANGED\nend\n"
+    for mode in DiffViewMode.allCases {
+        let positions = Locked<[ContentRenderer.ChangePosition]>([])
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                edit: DiffEdit(oldText: old, newText: new, filePath: "/x/a.txt")),
+                          revealChange: .first, diffReading: .init(collapseUnchanged: true, whitespace: .all)),
+            prepare: """
+            const cm = document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
+            window.__first = [cm.getCursor().line, document.querySelector('.diff-summary .add').textContent];
+            cm.replaceRange('OLD', {line:3,ch:0}, {line:3,ch:3});
+            """,
+            waitFor: "document.querySelector('.diff-summary .add').textContent === '+1'",
+            configure: { $0.onChangePosition = { positions.value.append($0) } },
+            inspect: """
+            (() => { const cm = document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
+              const nav = window.ide.navigateChange('next');
+              return [window.__first.join(','), nav.total, cm.getCursor().line, cm.getLine(0), cm.getLine(1)].join('|'); })()
+            """
+        )
+        #expect(result as? String == "3,+2|1|6|a|\tb", "\(mode): \(String(describing: result))")
+        #expect(positions.value.last?.total == 1)
+    }
+}
+
+@Test @MainActor func sideDiffAlignsWrappedContextAfterFoldingAndResize() async throws {
+    let long = String(repeating: "unchanged content ", count: 50)
+    let old = "start\nold\nold two\n\(long)\n" + (0..<80).map { "keep \($0)\n" }.joined() + "end\n"
+    let new = "start\nnew\n\(long)\n" + (0..<80).map { "keep \($0)\n" }.joined() + "END\n"
+    let result = try await renderAndInspect(
+        RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil,
+                            edit: DiffEdit(oldText: old, newText: new, filePath: "/x/a.txt")), wrap: true, diffReading: .init(collapseUnchanged: true)),
+        size: CGSize(width: 1000, height: 600), resizeTo: CGSize(width: 540, height: 420),
+        waitFor: """
+        (() => {
+          const l = document.querySelector('.CodeMirror-merge-left .CodeMirror').CodeMirror, r = document.querySelector('.CodeMirror-merge-editor .CodeMirror').CodeMirror;
+          const wrappedHeight = l.charCoords({line:3,ch:l.getLine(3).length},'local').bottom - l.charCoords({line:3,ch:0},'local').top;
+          return innerWidth === 540 && l.getLineHandle(3).height >= wrappedHeight - 1
+            && Math.abs(l.heightAtLine(3,'local')-r.heightAtLine(2,'local')) < 1 && Math.abs(l.heightAtLine(4,'local')-r.heightAtLine(3,'local')) < 1;
+        })()
+        """,
+        inspect: """
+        (() => {
+          const l = document.querySelector('.CodeMirror-merge-left .CodeMirror').CodeMirror, r = document.querySelector('.CodeMirror-merge-editor .CodeMirror').CodeMirror;
+          return [Math.abs(l.heightAtLine(4,'local') - r.heightAtLine(3,'local')) < 1,
+            l.getLine(3) === r.getLine(2), document.documentElement.scrollWidth <= innerWidth + 1,
+            [...document.querySelectorAll('.CodeMirror')].every(x => x.getBoundingClientRect().right <= innerWidth + 1)].join('|');
+        })()
+        """
+    )
+    #expect(result as? String == "true|true|true|true")
+}
+
+@Test @MainActor func clearingOldFoldMarkersDoesNotExpandUnrelatedRegions() async throws {
+    let old = (0..<150).map { "line \($0)\n" }.joined()
+    let new = old.replacingOccurrences(of: "line 60\n", with: "CHANGED 60\n").replacingOccurrences(of: "line 130\n", with: "CHANGED 130\n")
+    for mode in DiffViewMode.allCases {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                edit: DiffEdit(oldText: old, newText: new, filePath: "/x/a", cursor: .init(line: 10, ch: 0), readOnly: true)),
+                          diffReading: .init(collapseUnchanged: true, whitespace: .all)),
+            prepare: "window.ide.setTheme('light'); setTimeout(() => window.__foldCallbacksDrained = true, 0)",
+            waitFor: "window.__foldCallbacksDrained",
+            inspect: """
+            (() => { const cm = document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
+              return [cm.getAllMarks().some(mark => mark.collapsed && mark.find()?.from.line > 60), cm.getValue().includes('CHANGED 130'),
+                document.querySelector('.diff-summary .add').textContent, window.ide.getState().text === null, window.ide.undo()].join('|'); })()
+            """
+        )
+        #expect(result as? String == "true|true|+2|true|false", "\(mode): \(String(describing: result))")
+    }
+}
+
+@Test @MainActor func diffRevertRestoresCompleteChunksIncludingEOFAndCanUndo() async throws {
+    for (old, new) in [("a", "a\nb"), ("a\n", "a"), ("a\nb\n", "a\n"), ("", "new\n"), ("a\nb\nc\n", "a\nB\nc\n")] {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil,
+                                edit: DiffEdit(oldText: old, newText: new, filePath: "/x/a")), diffReading: .init(collapseUnchanged: true)),
+            prepare: "window.__beforeRevert = window.ide.getState().text; document.querySelector('.diff-revert-button').click()",
+            waitFor: "document.querySelector('.diff-summary .add').textContent === '+0' && document.querySelector('.diff-summary .del').textContent === '−0'",
+            inspect: "(() => { const text = window.ide.getState().text; window.ide.undo(); return [text, window.ide.getState().text === window.__beforeRevert]; })()"
+        )
+        let values = result as? [Any]
+        #expect(values?[0] as? String == old, "\(old.debugDescription) → \(new.debugDescription): \(String(describing: result))")
+        #expect(values?[1] as? Bool == true)
+    }
+}
+
+@Test @MainActor func diffArrowImmediatelyAfterEditingUsesTheLatestChangeRegions() async throws {
+    for mode in DiffViewMode.allCases {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                edit: DiffEdit(oldText: "a\nb\nc\nd\ne\nf\ng\n", newText: "a\nB\nc\nd\ne\nF\ng\n", filePath: "/x/a")),
+                          revealChange: .first, diffReading: .init(collapseUnchanged: true)),
+            prepare: """
+            const cm = document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
+            cm.replaceRange('b', {line:1,ch:0}, {line:1,ch:1});
+            cm.replaceRange('D', {line:3,ch:0}, {line:3,ch:1}); cm.setCursor(1,0);
+            document.dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowDown', bubbles:true, cancelable:true}));
+            """,
+            waitFor: "window.ide.getState().cursor.line === 3",
+            configure: { renderer in renderer.onDiffNavigate = { [weak renderer] step, _ in renderer?.navigateChange(step) } },
+            inspect: "[window.ide.getState().cursor.line, document.querySelector('.diff-summary .add').textContent].join('|')"
+        )
+        #expect(result as? String == "3|+2", "\(mode): \(String(describing: result))")
+    }
+}
+
+@Test @MainActor func deletedWholeFileStartsAtTheFirstDeletedLine() async throws {
+    let result = try await renderAndInspect(
+        RenderPayload(.diff(path: "deleted", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil,
+                            edit: DiffEdit(oldText: (0..<120).map { "removed \($0)\n" }.joined(), newText: "", filePath: "deleted", readOnly: true)),
+                      revealChange: .first, diffReading: .init(collapseUnchanged: true)),
+        waitFor: "document.querySelector('.CodeMirror-merge-left .CodeMirror').CodeMirror.getScrollInfo().top < 1",
+        inspect: "[document.querySelector('.CodeMirror-merge-left .CodeMirror').CodeMirror.getScrollInfo().top < 1, document.querySelector('.diff-summary .del').textContent].join('|')"
+    )
+    #expect(result as? String == "true|−120")
+}
+
+@Test @MainActor func mixedInsertionsDeletionsAndEditsKeepAlignmentBoundedAcrossRefreshes() async throws {
+    let old = (0..<50).map { "line \($0)\n" }.joined()
+    let new = old.replacingOccurrences(of: "line 3\n", with: "CHANGED 3\n")
+        .replacingOccurrences(of: "line 10\n", with: "line 10\ninserted A\ninserted B\n")
+        .replacingOccurrences(of: "line 20\nline 21\n", with: "")
+        .replacingOccurrences(of: "line 30\n", with: "CHANGED 30\n")
+    let result = try await renderAndInspect(
+        RenderPayload(.diff(path: "mixed", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil,
+                            edit: DiffEdit(oldText: old, newText: new, filePath: "/x/mixed")), wrap: true, diffReading: .init(collapseUnchanged: true)),
+        size: CGSize(width: 720, height: 450),
+        prepare: """
+        window.__alignmentDone = false;
+        (async () => {
+          const left = document.querySelector('.CodeMirror-merge-left .CodeMirror').CodeMirror;
+          const right = document.querySelector('.CodeMirror-merge-editor .CodeMirror').CodeMirror;
+          right.replaceRange('temporary\\n', {line:0,ch:0}); right.undo();
+          window.__maximumHeight = 0;
+          for (let i = 0; i < 10; i++) {
+            left.refresh(); right.refresh();
+            await new Promise(resolve => setTimeout(resolve, 0));
+            window.__maximumHeight = Math.max(window.__maximumHeight, left.getScrollInfo().height, right.getScrollInfo().height);
+          }
+          window.__alignmentDone = true;
+        })();
+        """,
+        waitFor: "window.__alignmentDone",
+        inspect: """
+        (() => { const l = document.querySelector('.CodeMirror-merge-left .CodeMirror').CodeMirror;
+          const r = document.querySelector('.CodeMirror-merge-editor .CodeMirror').CodeMirror;
+          return [window.__maximumHeight < 2000, [[12,14],[23,23],[39,39]].every(([a,b]) => Math.abs(l.heightAtLine(a,'local')-r.heightAtLine(b,'local')) < 1),
+            r.getValue().includes('inserted B'), document.querySelectorAll('.diff-revert-button').length > 0].join('|'); })()
+        """
+    )
+    #expect(result as? String == "true|true|true|true", "\(String(describing: result))")
+}
+
 @Test @MainActor func findSearchesTheWholeEditorAndWrapsLiterally() async throws {
     let result = try await renderAndInspect(
         RenderPayload(.code(path: "/x/a.txt", text: "First [x]\n" + String(repeating: "other\n", count: 300) + "last [X]\n", language: nil, editable: true)),
@@ -167,7 +526,7 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
             inspect: "[window.ide.getState().cursor.line, window.ide.navigateChange('next').index, window.ide.navigateChange('next').total].join('|')"
         )
         #expect(result as? String == "0|0|1", "\(mode)")
-        #expect(positions.value.last == ContentRenderer.ChangePosition(), "唯一差异已自动定位，两侧都应到头：\(mode)")
+        #expect(positions.value.last == ContentRenderer.ChangePosition(index: 1, total: 1), "唯一差异已自动定位，两侧都应到头：\(mode)")
     }
 }
 
@@ -583,6 +942,7 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
         RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil,
                             edit: DiffEdit(oldText: "before\n", newText: "after\n", filePath: "/x/a.txt"))),
         prepare: "window.ide.setBase({path: '/x/a.txt', base: 'after\\n'})",
+        waitFor: "document.querySelector('.diff-summary .add').textContent === '+0'",
         inspect: "[document.querySelectorAll('.CodeMirror-gutter-background[class*=diff-gutter-]').length, document.querySelector('.diff-summary .add').textContent, document.querySelector('.diff-summary .del').textContent, window.ide.getState().text].join('|')"
     )
     #expect(result as? String == "0|+0|−0|after\n")
@@ -748,8 +1108,8 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
         inspect: "window.__seq + '|' + document.querySelector('tr.current-change td.ln').textContent"
     )
     #expect(table as? String == "{\"index\":0,\"total\":2,\"moved\":true}|1|{\"index\":1,\"total\":2,\"moved\":true}|2|{\"index\":1,\"total\":2,\"moved\":false}|{\"index\":0,\"total\":2,\"moved\":true}|5")
-    #expect(positions.value.first == ContentRenderer.ChangePosition(hasPrevious: false, hasNext: true))
-    #expect(positions.value.last == ContentRenderer.ChangePosition(hasPrevious: true, hasNext: false))
+    #expect(positions.value.first == ContentRenderer.ChangePosition(hasPrevious: false, hasNext: true, index: 1, total: 2))
+    #expect(positions.value.last == ContentRenderer.ChangePosition(hasPrevious: true, hasNext: false, index: 2, total: 2))
 
     let unified = try await renderAndInspect(
         RenderPayload(.diff(path: "a.txt", language: nil, diff: diff, mode: .unified, emptyReason: nil)),
@@ -777,8 +1137,8 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     )
     #expect(editorResult as? String == "0,1,1,3")
     // 光标停在第一处改动上时前面没有、后面有；跳到最后一处后只有前面
-    #expect(editorPositions.value.first == ContentRenderer.ChangePosition(hasPrevious: false, hasNext: true))
-    #expect(editorPositions.value.last == ContentRenderer.ChangePosition(hasPrevious: true, hasNext: false))
+    #expect(editorPositions.value.first == ContentRenderer.ChangePosition(hasPrevious: false, hasNext: true, index: 1, total: 2))
+    #expect(editorPositions.value.last == ContentRenderer.ChangePosition(hasPrevious: true, hasNext: false, index: 2, total: 2))
     let noBase = try await renderAndInspect(
         RenderPayload(.code(path: "/x/a.txt", text: "a\n", language: nil, editable: true)),
         inspect: "String(window.ide.navigateChange('next'))"

@@ -20,6 +20,8 @@ struct EditorTab: Identifiable, Equatable {
     var scrollTop: Double = 0
     /// 真正看过 diff 后才置为 true，切回来优先恢复位置。
     var hasDiffPosition = false
+    /// 布局无关的 diff 阅读现场，切模式 / 切标签时一起恢复。
+    var diffViewState: String?
     /// 切走时记下的光标位置（只有编辑器才有）。
     var cursor: EditorCursor?
     /// 切走时记下的编辑器撤销历史（CodeMirror `getHistory()` 的 JSON 文本）连同它对应的那份文本的哈希：
@@ -101,6 +103,7 @@ enum TabContent: Equatable {
     case binary(sizeBytes: Int)
     case tooLarge(sizeBytes: Int, limit: Int)
     case diff(FileDiff, language: Language)
+    case textDiff(oldText: String, newText: String, language: Language)
     /// 可编辑的工作区 diff：两份全文由编辑器自己比。文件本身的内容在 `contents[documentID]`（与文件标签共用）。
     case editableDiff(documentID: String)
     case message(title: String, detail: String)

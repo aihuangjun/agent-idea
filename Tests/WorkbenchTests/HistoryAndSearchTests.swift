@@ -47,6 +47,7 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
                 return shellOutput("M\0src/a.swift\0A\0b.md\0")
             case "diff":
                 return shellOutput("diff --git a/src/a.swift b/src/a.swift\n--- a/src/a.swift\n+++ b/src/a.swift\n@@ -1 +1 @@\n-old\n+new\n")
+            case "show": return shellOutput("", status: 128, stderr: "object unavailable")
             default: return shellOutput("")
             }
         }

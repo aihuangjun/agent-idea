@@ -8,10 +8,14 @@
  *   image    { path, url, sizeText }
  *   html     { path, text, docDir }（宿主用独立 WebView 预览，HTML 脚本没有编辑桥）
  *   diff     { path, language, mode: "side" | "unified", rows, binary, empty, added, removed, emptyReason }
- *            或可编辑的 { path, language, mode, edit: { oldText, newText, filePath, cursor?, history? } }：左/上是基线只读，右/下是工作区可改
+ *            或全文的 { path, language, mode, edit: { oldText, newText, baseIdentity, filePath, cursor?, history?, readOnly },
+ *              diffViewState?: 阅读现场的 JSON（逻辑行、偏移、展开区间、基线标识），
+ *              diffReading: {collapseUnchanged, contextLines, whitespace: "none" | "trailing" | "all"},
+ *              analysis: Core/DiffReviewAnalysis（changes、unchanged、folds、行数统计） }。
+ *            updateDiffReview({path,newText,analysis,baseIdentity}) 接收编辑后的分析，原文不匹配时丢弃。
  *   message  { title, detail }
  * editable 为真的 code / markdown 源码用 CodeMirror 编辑器画，否则是只读的静态视图。
- * 宿主还会问 window.ide.getState() → { kind, scrollTop, text: 编辑器里的全文或 null, cursor, history }，切标签前拿走最新文字；
+ * 宿主还会问 window.ide.getState() → { kind, scrollTop, text: 编辑器里的全文或 null, cursor, history, diffViewState }，切标签前拿走最新文字和阅读现场；
  * history 是 CodeMirror getHistory() 的 JSON 文本，下次渲染同一份内容时随 payload 送回来（setHistory），切走再切回 ⌘Z 照样能撤。
  * window.ide.undo() / redo() 是编辑器里的撤销 / 重做，回有没有编辑器接下这一步（只读视图回 false，宿主去撤文件操作）；
  * 焦点在编辑器里时 ⌘Z / ⇧⌘Z 由 CodeMirror 自己处理，不会传到应用菜单。
@@ -110,8 +114,10 @@
   /* ---------- 编辑器（CodeMirror 5） ---------- */
 
   let editor = null;       // 当前的 CodeMirror 实例（可编辑那一侧）；换别的内容时随 DOM 一起丢掉
-  let mergeView = null;    // 并排可编辑 diff 时的 MergeView（editor 是它右边那个）
-  const diffGutterMarks = new Map(); // 各窗格的行句柄；重算时只清理自己的装饰，不动 MergeView 的差异底色
+  let sideDiff = null;    // DiffReviewView，管理两侧原文、对齐、上下文与逐块回退
+  let diffViewport = null; // diff 装饰重算时保留逻辑行及屏幕位置
+  const diffGutterMarks = new Map();
+  let diffWordMarks = [];
   let editTimer = null;    // 停手之后再发 edited，别每敲一个键就把整份文本送过去
   let editorLayoutTimer = null;
   const EDIT_DEBOUNCE = 300;
@@ -146,6 +152,7 @@
 
   function postEdited() {
     if (!editor || !current) return;
+    if (current.edit && current.edit.readOnly) return;
     post({ type: "edited", path: editedPath(), text: editor.getValue() });
   }
 
@@ -272,7 +279,7 @@
       editTimer = setTimeout(() => { editTimer = null; postEdited(); updateChangeMarkers(); reportChangePosition(); }, EDIT_DEBOUNCE);
       if (onChange) onChange();
     });
-    // 纯光标移动才即时上报；刚敲过字的那 300ms 交给上面的定时器——否则并排 diff 的 leftChunks() 会每敲一个键就同步重算整份 diff
+    // 纯光标移动才即时上报；刚敲过字的那 300ms 交给上面的定时器——避免每敲一个键就同步重算全文差异
     editor.on("cursorActivity", () => { if (!editTimer) reportChangePosition(); });
   }
 
@@ -304,11 +311,16 @@
   /* 换内容前把还没发出去的最后几笔发掉，别丢。 */
   function flushEditor() {
     if (editTimer) { clearTimeout(editTimer); editTimer = null; postEdited(); }
-    if (diffTimer) { clearTimeout(diffTimer); diffTimer = null; }
     if (editorLayoutTimer !== null) { clearTimeout(editorLayoutTimer); editorLayoutTimer = null; }
+    if (sideDiff) sideDiff.destroy();
+    else if (diffViewport) diffViewport.destroy();
+    if (contextFolds) { contextFolds.clear(); contextFolds = null; }
     editor = null;
-    mergeView = null;
+    sideDiff = null;
+    diffViewport = null;
+    unifiedBase = null;
     diffGutterMarks.clear();
+    diffWordMarks = [];
     unifiedWidgets = [];
     changeLinesCache = null;
   }
@@ -317,10 +329,13 @@
    * 只 refresh 会留下旧的组件宽度；合并到下一轮处理，后台窗口也需要更新尺寸。 */
   function refreshEditorLayout() {
     if (!editor) return;
-    for (const cm of mergeView ? [mergeView.leftOriginal(), editor] : [editor]) {
-      cm.operation(() => { cm.setSize(null, null); cm.refresh(); });
-    }
-    for (const widget of unifiedWidgets) widget.changed();
+    const refresh = () => {
+      for (const cm of sideDiff ? [sideDiff.leftOriginal(), editor] : [editor]) {
+        cm.operation(() => { cm.setSize(null, null); cm.refresh(); });
+      }
+      for (const widget of unifiedWidgets) widget.changed();
+    };
+    if (diffViewport) diffViewport.preserve(refresh); else refresh();
   }
 
   function scheduleEditorLayout() {
@@ -332,35 +347,38 @@
 
   /* ---------- 可编辑的 diff（工作区变更） ---------- */
 
-  let diffTimer = null;
   let unifiedWidgets = [];   // 单列模式里表示「被删的行」的小块
+  let contextFolds = null;
+  let unifiedBase = null;
 
   function diffSummaryHTML(payload, added, removed) {
-    return `<div class="diff-summary"><span class="path">${escapeHTML(payload.path || "")}</span><span class="add">+${added}</span><span class="del">−${removed}</span><span class="hint">基线是 HEAD，右边 / 下边可以直接改</span></div>`;
-  }
-
-  function diffCounts(groups) {
-    let added = 0, removed = 0;
-    for (const group of groups || []) { added += group.adds.length; removed += group.dels; }
-    return { added, removed };
+    const hint = payload.edit.readOnly ? "版本对比 · 只读" : "基线是 HEAD，右边 / 下边可以直接改";
+    return `<div class="diff-summary"><span class="path">${escapeHTML(payload.path || "")}</span><span class="add">+${added}</span><span class="del">−${removed}</span><span class="hint">${hint}</span></div>`;
   }
 
   function updateDiffSummary() {
     if (!current || !current.edit || !editor) return;
-    const groups = lineChanges(current.edit.oldText.split("\n"), editor.getValue().split("\n"));
-    const counts = diffCounts(groups);
+    const analysis = current.analysis;
+    const groups = analysis.changes.map(region => ({oldStart: region.oldStart, newStart: region.newStart,
+      dels: region.oldCount, adds: Array.from({length: region.newCount}, (_, i) => region.newStart + i)}));
+    const counts = analysis;
     const add = root.querySelector(".diff-summary .add"), del = root.querySelector(".diff-summary .del");
     if (add) add.textContent = `+${counts.added}`;
     if (del) del.textContent = `−${counts.removed}`;
+    const hint = root.querySelector(".diff-summary .hint");
+    if (hint) hint.textContent = analysis.simplified ? "大范围改写：以整块显示，原文完整保留" :
+      (!analysis.changes.length ? "当前比较规则下没有差异" : (current.edit.readOnly ? "版本对比 · 只读" : "基线是 HEAD，右边 / 下边可以直接改"));
     post({type: "diffStatistics", path: current.edit.filePath, added: counts.added, removed: counts.removed});
     return groups;
   }
 
-  /* 与摘要共用行级差异，避免 MergeView 把临近的新增 / 删除并成一个大修改块。
+  /* 与摘要、导航共用 Core 的行级差异。
    * 整行 gutter 背景跟着折行高度和固定行号栏走；文末虚拟空行不算一条增删。 */
   function decorateSideBySideGutters(groups) {
-    if (!mergeView) return;
-    const left = mergeView.leftOriginal();
+    if (!sideDiff) return;
+    const left = sideDiff.leftOriginal();
+    for (const mark of diffWordMarks) mark.clear();
+    diffWordMarks = [];
     const contentLines = cm => cm.lineCount() - (cm.getLine(cm.lastLine()) === "" ? 1 : 0);
     const oldCount = contentLines(left), newCount = contentLines(editor);
     const panes = [
@@ -383,26 +401,32 @@
       }
       diffGutterMarks.set(pane.cm, marks);
     });
+    for (const group of groups || []) {
+      for (let i = 0; i < Math.min(group.dels, group.adds.length); i++) {
+        const oldText = left.getLine(group.oldStart + i), newText = editor.getLine(group.newStart + i);
+        if (oldText.length > WORD_DIFF_LIMIT || newText.length > WORD_DIFF_LIMIT) continue;
+        const ranges = changedRanges(oldText, newText);
+        if (!ranges) continue;
+        for (const [cm, line, spans, className] of [[left, group.oldStart + i, ranges.left, "CodeMirror-merge-l-deleted"],
+          [editor, group.newStart + i, ranges.right, "CodeMirror-merge-l-inserted"]]) {
+          for (const span of spans) diffWordMarks.push(cm.markText({line, ch: span[0]}, {line, ch: span[1]}, {className}));
+        }
+      }
+    }
   }
 
-  /* 并排：CodeMirror 的 MergeView，左边基线只读、右边是工作区文件。chunk 之间有连接带和「撤回这一块」按钮。 */
+  /* 并排：完整原文的两个 CodeMirror，比较与折叠由 DiffReviewView 编排。 */
   function renderSideBySideEditable(payload) {
     const edit = payload.edit;
     root.innerHTML = diffSummaryHTML(payload, 0, 0) + `<div class="editor-host merge-host"></div>`;
-    mergeView = window.CodeMirror.MergeView(root.querySelector(".merge-host"), editorOptions(editorMode(payload.language, edit.filePath), {
+    sideDiff = new window.DiffReviewView(root.querySelector(".merge-host"), editorOptions(editorMode(payload.language, edit.filePath), {
       value: edit.newText,
       origLeft: edit.oldText,
-      connect: "align",
-      revertButtons: true,
-      collapseIdentical: false,
-      allowEditingOriginals: false,
-      showDifferences: true,
-    }));
-    editor = mergeView.editor();
-    attachEditorEvents(() => {
-      if (diffTimer) clearTimeout(diffTimer);
-      diffTimer = setTimeout(() => { diffTimer = null; decorateSideBySideGutters(updateDiffSummary()); }, EDIT_DEBOUNCE);
-    });
+      readOnly: !!edit.readOnly,
+    }), payload.analysis, payload.diffReading);
+    editor = sideDiff.editor();
+    diffViewport = sideDiff.viewport;
+    attachEditorEvents();
     if (edit.cursor) editor.setCursor(edit.cursor);
     restoreHistory(edit.history);
     decorateSideBySideGutters(updateDiffSummary());
@@ -415,12 +439,12 @@
     root.innerHTML = diffSummaryHTML(payload, 0, 0) + `<div class="editor-host diff-host"></div>`;
     editor = window.CodeMirror(root.querySelector(".diff-host"), editorOptions(editorMode(payload.language, edit.filePath), {
       value: edit.newText,
+      readOnly: !!edit.readOnly,
       gutters: ["CodeMirror-linenumbers", CHANGE_GUTTER],
     }));
-    attachEditorEvents(() => {
-      if (diffTimer) clearTimeout(diffTimer);
-      diffTimer = setTimeout(() => { diffTimer = null; decorateUnified(); }, EDIT_DEBOUNCE);
-    });
+    diffViewport = new window.DiffViewport([editor], editor);
+    diffViewport.didResize = () => { for (const widget of unifiedWidgets) widget.changed(); };
+    attachEditorEvents();
     if (edit.cursor) editor.setCursor(edit.cursor);
     restoreHistory(edit.history);
     decorateUnified();
@@ -429,7 +453,8 @@
 
   function decorateUnified() {
     if (!editor || !current || !current.edit) return;
-    editor.operation(() => {
+    diffViewport.preserve(() => editor.operation(() => {
+      const hadFolds = !!contextFolds;
       for (const widget of unifiedWidgets) widget.clear();
       unifiedWidgets = [];
       editor.eachLine((line) => editor.removeLineClass(line, "background", "cm-diff-added"));
@@ -452,11 +477,42 @@
         const at = Math.min(group.newStart, lastLine);
         unifiedWidgets.push(editor.addLineWidget(at, node, { above: group.newStart <= lastLine, coverGutter: false, noHScroll: !!current.wrap }));
       }
-    });
+      const regions = current.diffReading.collapseUnchanged ? current.analysis.folds : [];
+      if (contextFolds) contextFolds.update(regions, unifiedBase !== current.edit.oldText);
+      else contextFolds = new window.DiffContextFolds([{cm: editor, original: false}], regions, diffViewport, scheduleEditorLayout);
+      unifiedBase = current.edit.oldText;
+      if (hadFolds) contextFolds.reveal(editor, editor.getCursor().line);
+    }), diffViewport.editingAnchor(editor));
   }
 
   function renderEditableDiff(payload) {
     if (payload.mode === "side") renderSideBySideEditable(payload); else renderUnifiedEditable(payload);
+  }
+
+  function restoreDiffViewState(payload) {
+    if (!diffViewport || !payload.diffViewState || payload.revealChange) return;
+    let state;
+    try { state = JSON.parse(payload.diffViewState); } catch (_) { return; }
+    if (!state || !Number.isInteger(state.line) || state.line < 0 || !Number.isFinite(state.offset) || !Number.isFinite(state.left)) return;
+    const folds = sideDiff ? sideDiff.folds : contextFolds;
+    const regions = payload.diffReading.collapseUnchanged ? payload.analysis.folds : [];
+    folds.restore(regions, state.baseIdentity === payload.edit.baseIdentity ? state.expanded : []);
+    if (!state.folded) folds.reveal(editor, Math.min(state.line, editor.lastLine()));
+    if (sideDiff) { sideDiff.resetAlignment(); sideDiff.align(); }
+    else refreshEditorLayout();
+    diffViewport.restore(editor, state);
+  }
+
+  function diffViewSnapshot() {
+    if (!diffViewport) return null;
+    const state = diffViewport.snapshot(editor);
+    state.baseIdentity = current.edit.baseIdentity;
+    state.expanded = (sideDiff ? sideDiff.folds : contextFolds).expanded;
+    state.folded = editor.getAllMarks().some(mark => {
+      const range = mark.collapsed && mark.find();
+      return range && state.line >= range.from.line && state.line <= range.to.line;
+    });
+    return JSON.stringify(state);
   }
 
   /* ---------- 代码（只读视图） ---------- */
@@ -787,13 +843,12 @@
 
   let changeLinesCache = null;   // editorChangeLines 的结果；光标每动一下都要问，文本一变就作废
 
-  /* 编辑器里每处改动在工作区文本里的起始行（从 0 数）：并排可编辑 diff 问 MergeView 的 chunk（它自己有缓存），
-   * 单列可编辑 diff 与带基线的编辑器按行级 diff 的分组算（与标记、底色是同一份数据）。 */
+  /* 全文 diff 的起始行来自 Core 比较结果；普通编辑器沿用相对 HEAD 的行级分组。 */
   function editorChangeLines() {
     if (!editor || !current) return [];
     // 纯删除的 EOF chunk 指向 lastLine + 1；光标只能停在最后一行，导航也必须用同一个可达位置。
     const reachable = lines => [...new Set(lines.map(line => Math.min(line, editor.lastLine())))];
-    if (mergeView) return reachable((mergeView.leftChunks() || []).map((chunk) => chunk.editFrom));
+    if (current.edit) return reachable(current.analysis.changes.map(change => change.newStart));
     if (changeLinesCache) return changeLinesCache;
     const base = current.edit ? current.edit.oldText : current.base;
     if (typeof base !== "string") return [];
@@ -815,9 +870,17 @@
 
   function revealEditorLine(target) {
     const line = Math.min(target, editor.lastLine());
+    if (diffViewport) diffViewport.use(editor);
+    if (sideDiff) sideDiff.folds.reveal(editor, line);
+    if (contextFolds) contextFolds.reveal(editor, line);
     editor.setCursor({ line, ch: 0 });   // cursorActivity 会把新位置报给宿主
     const info = editor.getScrollInfo();
-    editor.scrollTo(null, Math.max(0, editor.heightAtLine(line, "local") - info.clientHeight / 2 + editor.defaultTextHeight() / 2));
+    let top = editor.heightAtLine(line, "local");
+    if (sideDiff) {
+      const deleted = current.analysis.changes.find(change => !change.newCount && Math.min(change.newStart, editor.lastLine()) === line);
+      if (deleted) top = sideDiff.leftOriginal().heightAtLine(deleted.oldStart, "local");
+    }
+    editor.scrollTo(null, Math.max(0, top - info.clientHeight / 2 + editor.defaultTextHeight() / 2));
   }
 
   /* 只读 diff 表格：一段连续的变更行算一处。上次跳到的那处还在视口里就从它往下 / 往上数一处，
@@ -889,19 +952,25 @@
   /* 告诉宿主前面 / 后面还有没有变更可跳（到头的箭头灰掉）。编辑器以光标行为准，只读 diff 按 staticTarget 的答案。 */
   function reportChangePosition() {
     let hasPrevious = false, hasNext = false;
+    let index = 0, total = 0;
     if (editor) {
       const lines = editorChangeLines();
       const cursor = editor.getCursor().line;
       hasPrevious = lines.some((line) => line < cursor);
       hasNext = lines.some((line) => line > cursor);
+      total = lines.length;
+      const previous = lastIndex(lines, line => line <= cursor);
+      index = total ? Math.max(0, previous) + 1 : 0;
     } else if (current && current.kind === "diff") {
       const runs = staticChangeRuns();
+      total = runs.length;
+      index = total ? Math.max(0, changeIndex) + 1 : 0;
       if (runs.length) {
         hasPrevious = staticTarget(runs, "previous") >= 0;
         hasNext = staticTarget(runs, "next") >= 0;
       }
     }
-    post({ type: "changes", hasPrevious, hasNext });
+    post({ type: "changes", hasPrevious, hasNext, index, total });
   }
 
   // 只读 diff 里用户自己滚动之后，「前面 / 后面」的答案会变
@@ -953,7 +1022,7 @@
     if (!editor) return null;
     for (const widget of unifiedWidgets) widget.node.classList.remove("cm-find-removed");
     if (!options.query) { clearFind(); return false; }
-    const editors = mergeView ? [mergeView.leftOriginal(), editor] : [editor];
+    const editors = sideDiff ? [sideDiff.leftOriginal(), editor] : [editor];
     const texts = editors.map(cm => cm.getValue());
     const removed = [];
     if (current && current.edit && current.mode === "unified") {
@@ -985,6 +1054,9 @@
     const match = matches[index], cm = editors[match.pane];
     if (cm) {
       const from = cm.posFromIndex(match.from), to = cm.posFromIndex(match.to);
+      if (diffViewport) diffViewport.use(cm);
+      if (sideDiff) sideDiff.folds.reveal(cm, from.line);
+      if (contextFolds) contextFolds.reveal(cm, from.line);
       cm.setSelection(from, to);
       cm.scrollIntoView({ from, to }, 60);
     } else {
@@ -1009,7 +1081,7 @@
     clearFind,
     focusEditor() {
       if (!editor) return false;
-      const target = mergeView && findState && findState.pane === 0 ? mergeView.leftOriginal() : editor;
+      const target = sideDiff && findState && findState.pane === 0 ? sideDiff.leftOriginal() : editor;
       target.focus();
       return true;
     },
@@ -1032,8 +1104,9 @@
         // 渲染出错宁可把错误摆出来，也不能留一页空白让人以为文件是空的
         renderMessage({ title: "渲染失败", detail: String(error && error.stack || error) });
       }
-      // MergeView 建立两栏后再量一次 gutter；跨文件立即定位时，首批上下文行可能仍沿用建栏前的缩进。
-      if (mergeView) refreshEditorLayout();
+      // 建立两栏后再量一次 gutter，初始定位必须使用两栏建立后的尺寸。
+      if (sideDiff) refreshEditorLayout();
+      restoreDiffViewState(payload);
       // 渲染是同步的，但图片与 mermaid 会撑高页面；先按给的位置滚一次，图出来后位置大体也还对
       window.scrollTo(0, payload.scrollTop || 0);
       if (payload.revealChange) {
@@ -1055,19 +1128,20 @@
       return {
         kind: current ? current.kind : null,
         scrollTop: window.ide.getScrollTop(),
-        text: editor ? editor.getValue() : null,
+        text: editor && !(current.edit && current.edit.readOnly) ? editor.getValue() : null,
         cursor: cursor ? { line: cursor.line, ch: cursor.ch } : null,
         history: editor ? JSON.stringify(editor.getHistory()) : null,
+        diffViewState: diffViewSnapshot(),
       };
     },
     /* 编辑器里的撤销 / 重做；没有编辑器（只读视图）回 false，宿主去撤文件操作。 */
     undo() {
-      if (!editor) return false;
+      if (!editor || editor.getOption("readOnly")) return false;
       editor.undo();
       return true;
     },
     redo() {
-      if (!editor) return false;
+      if (!editor || editor.getOption("readOnly")) return false;
       editor.redo();
       return true;
     },
@@ -1078,9 +1152,8 @@
         if (current.edit.filePath !== message.path) return;
         current.edit.oldText = typeof message.base === "string" ? message.base : "";
         changeLinesCache = null;
-        if (mergeView) mergeView.leftOriginal().setValue(current.edit.oldText);
-        if (current.mode === "unified") decorateUnified(); else decorateSideBySideGutters(updateDiffSummary());
-        reportChangePosition();
+        if (sideDiff) diffViewport.preserve(() => sideDiff.leftOriginal().setValue(current.edit.oldText));
+        post({type: "diffReview", path: current.edit.filePath, text: editor.getValue(), base: current.edit.oldText});
         return;
       }
       if (current.path !== message.path) return;
@@ -1088,6 +1161,17 @@
       changeLinesCache = null;
       updateChangeMarkers();
       reportChangePosition();
+    },
+    updateDiffReview(message) {
+      if (!current || !current.edit || !editor || current.edit.filePath !== message.path || editor.getValue() !== message.newText) return false;
+      current.edit.newText = message.newText;
+      current.edit.baseIdentity = message.baseIdentity;
+      current.analysis = message.analysis;
+      changeLinesCache = null;
+      if (sideDiff) { sideDiff.update(message.analysis); decorateSideBySideGutters(updateDiffSummary()); }
+      else decorateUnified();
+      reportChangePosition();
+      return true;
     },
     /* 上一处 / 下一处变更；回 { index, total }，没有可跳的回 null。 */
     navigateChange(direction) {
@@ -1107,11 +1191,12 @@
         if (editor) {
           const state = window.ide.getState();
           const target = current.edit || current;
-          if (current.edit) target.newText = state.text;
+          if (current.edit) target.newText = editor.getValue();
           else if (current.kind === "markdown") target.markdown = state.text;
           else target.text = state.text;
           target.cursor = state.cursor;
           target.history = state.history;
+          current.diffViewState = state.diffViewState;
         }
         current.scrollTop = window.ide.getScrollTop();
         window.ide.render(current);
@@ -1126,10 +1211,13 @@
       if (!current) return;
       current.wrap = !!wrap;
       if (editor) {
-        editor.setOption("lineWrapping", current.wrap);
-        if (mergeView) mergeView.leftOriginal().setOption("lineWrapping", current.wrap);
-        if (current.kind === "diff" && current.mode === "unified") decorateUnified();
-        refreshEditorLayout();
+        const update = () => {
+          editor.setOption("lineWrapping", current.wrap);
+          if (sideDiff) sideDiff.leftOriginal().setOption("lineWrapping", current.wrap);
+          if (current.kind === "diff" && current.mode === "unified") decorateUnified();
+          refreshEditorLayout();
+        };
+        if (diffViewport) diffViewport.preserve(update); else update();
         return;
       }
       // 只读代码视图换行与否是两种 DOM 结构，切换要重画；保持滚动位置

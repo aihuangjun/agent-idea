@@ -124,6 +124,13 @@ public struct GitClient: Sendable {
         return nil
     }
 
+    /// 指定版本的全文，供历史 diff 展开任意上下文。失败与空文件分开处理。
+    public func textContent(path: String, revision: String, repositoryRoot: URL) async throws -> String? {
+        let output = try await run(["show", revision + ":" + path], in: repositoryRoot)
+        if case .text(let text, _, _) = TextFileLoader.decode(output.standardOutput), text.utf8.count <= 2 * 1024 * 1024 { return text }
+        return nil
+    }
+
     // MARK: - Diff 行数统计
 
     /// 工作区对比 HEAD（包含暂存与未暂存），未跟踪文件按整份新增计数。

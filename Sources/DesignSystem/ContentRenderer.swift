@@ -115,10 +115,14 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     public struct ChangePosition: Equatable, Sendable {
         public var hasPrevious: Bool
         public var hasNext: Bool
+        public var index: Int
+        public var total: Int
 
-        public init(hasPrevious: Bool = false, hasNext: Bool = false) {
+        public init(hasPrevious: Bool = false, hasNext: Bool = false, index: Int = 0, total: Int = 0) {
             self.hasPrevious = hasPrevious
             self.hasNext = hasNext
+            self.index = index
+            self.total = total
         }
     }
 
@@ -134,13 +138,15 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         public var history: String?
         /// 实际显示的内容种类，未就绪时为 nil，避免把空页面当作已保存的 diff 位置。
         public var kind: String?
+        public var diffViewState: String?
 
-        public init(scrollTop: Double = 0, text: String? = nil, cursor: EditorCursor? = nil, history: String? = nil, kind: String? = nil) {
+        public init(scrollTop: Double = 0, text: String? = nil, cursor: EditorCursor? = nil, history: String? = nil, kind: String? = nil, diffViewState: String? = nil) {
             self.scrollTop = scrollTop
             self.text = text
             self.cursor = cursor
             self.history = history
             self.kind = kind
+            self.diffViewState = diffViewState
         }
     }
 
@@ -148,11 +154,60 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     private var pendingPayload: RenderPayload?
     /// 最近一次渲染的内容。Web 内容进程被系统回收后用它恢复现场。
     private var lastPayload: RenderPayload?
+    private var renderRequest = UUID()
+    private struct DiffReviewInput: Equatable {
+        let path: String
+        let oldText: String
+        let newText: String
+        let options: DiffReadingOptions
+    }
+    private struct DiffReviewResult: Sendable {
+        let analysis: DiffReviewAnalysis
+        let rawCounts: DiffLineCounts
+    }
+    private var completedDiffReview: DiffReviewInput?
+    private var pendingDiffReview: (input: DiffReviewInput, task: Task<DiffReviewResult, Never>)?
     private var shellURL: URL?
     private var zoom: Double = 1
     /// 页面当前是浅色还是深色。页面重载（内容进程被回收）后要补发。
     private var isLightTheme = false
     private let messageProxy = ScriptMessageProxy()
+
+    /// 编辑去抖后复用 Core 的比较模型。异步结果必须同时匹配请求、文件和页面原文。
+    @discardableResult private func updateDiffReview(path: String, text: String, base: String? = nil) async -> Bool {
+        guard var payload = lastPayload,
+              case .diff(let displayPath, let language, let diff, let mode, let reason, var edit?) = payload.content,
+              edit.filePath == path, !edit.readOnly else { return false }
+        if let base { edit.oldText = base }
+        edit.newText = text
+        payload.content = .diff(path: displayPath, language: language, diff: diff, mode: mode, emptyReason: reason, edit: edit)
+        lastPayload = payload
+        let request = renderRequest
+        let oldText = edit.oldText, options = payload.diffReading
+        let input = DiffReviewInput(path: path, oldText: oldText, newText: text, options: options)
+        if completedDiffReview == input { return true }
+        let task: Task<DiffReviewResult, Never>
+        if let pendingDiffReview, pendingDiffReview.input == input { task = pendingDiffReview.task }
+        else {
+            task = Task.detached(priority: .userInitiated) {
+                let analysis = DiffReviewAnalysis(oldText: oldText, newText: text, options: options)
+                let raw = options.whitespace == .none ? analysis : DiffReviewAnalysis(oldText: oldText, newText: text)
+                return DiffReviewResult(analysis: analysis, rawCounts: DiffLineCounts(added: raw.added, removed: raw.removed))
+            }
+            pendingDiffReview = (input, task)
+        }
+        let result = await task.value
+        guard renderRequest == request, lastPayload == payload else { return false }
+        if completedDiffReview == input { return true }
+        guard let data = try? JSONEncoder().encode(RenderPayload.DiffReviewUpdate(path: path, newText: text, analysis: result.analysis, baseIdentity: String(oldText.hashValue))),
+              let json = String(data: data, encoding: .utf8),
+              (try? await webView.evaluateJavaScript("window.ide.updateDiffReview(\(json))")) as? Bool == true else { return false }
+        guard renderRequest == request else { return false }
+        completedDiffReview = input
+        if pendingDiffReview?.input == input { pendingDiffReview = nil }
+        if options.whitespace != .none { onDiffStatistics?(path, result.rawCounts) }
+        return true
+    }
 
     override public init() {
         let configuration = WKWebViewConfiguration()
@@ -195,6 +250,11 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
 
     /// 显示一份内容。页面没就绪就先存着，就绪后补发。
     public func render(_ payload: RenderPayload) {
+        renderRequest = UUID()
+        pendingDiffReview = nil
+        if case .diff(_, _, _, _, _, let edit?) = payload.content {
+            completedDiffReview = DiffReviewInput(path: edit.filePath, oldText: edit.oldText, newText: edit.newText, options: payload.diffReading)
+        } else { completedDiffReview = nil }
         showingHTML = payload.kindName == "html"
         webView.isHidden = showingHTML
         htmlWebView?.isHidden = !showingHTML
@@ -248,7 +308,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
                 text: dictionary["text"] as? String,
                 cursor: Self.cursor(from: dictionary["cursor"]),
                 history: dictionary["history"] as? String,
-                kind: dictionary["kind"] as? String
+                kind: dictionary["kind"] as? String,
+                diffViewState: dictionary["diffViewState"] as? String
             ))
         }
     }
@@ -284,10 +345,24 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     /// 跳到当前内容里的下一处 / 上一处变更：编辑器按光标找，只读 diff 按变更段落找（都在 render.js 里）。
     public func navigateChange(_ step: ChangeStep, completion: @escaping (ChangeNavigationResult) -> Void = { _ in }) {
         guard isReady else { completion(.unavailable); return }
-        webView.evaluateJavaScript("window.ide.navigateChange(\"\(step.rawValue)\")") { value, error in
-            if let error { Log.warn("web", "navigateChange 失败：\(error)") }
-            if error != nil { completion(.unavailable) }
-            else { completion((value as? [String: Any])?["moved"] as? Bool == true ? .moved : .boundary) }
+        let request = renderRequest
+        Task { [weak self] in
+            guard let self else { completion(.unavailable); return }
+            do {
+                // 键盘导航可以早于 300ms 编辑去抖；先比较眼前的原文，不能按旧分组跨文件。
+                if case .diff(_, _, _, _, _, let edit?) = self.lastPayload?.content, !edit.readOnly,
+                   let text = try await self.webView.evaluateJavaScript("window.ide.getState().text") as? String {
+                    guard self.renderRequest == request else { completion(.unavailable); return }
+                    self.onEdited?(edit.filePath, text)
+                    guard await self.updateDiffReview(path: edit.filePath, text: text) else { completion(.unavailable); return }
+                }
+                guard self.renderRequest == request else { completion(.unavailable); return }
+                let value = try await self.webView.evaluateJavaScript("window.ide.navigateChange(\"\(step.rawValue)\")")
+                completion((value as? [String: Any])?["moved"] as? Bool == true ? .moved : .boundary)
+            } catch {
+                Log.warn("web", "navigateChange 失败：\(error)")
+                completion(.unavailable)
+            }
         }
     }
 
@@ -459,14 +534,25 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         case "error":
             Log.warn("web", "页面脚本出错：\(body["message"] as? String ?? "") @ \(body["where"] as? String ?? "")")
         case "edited":
-            if let path = body["path"] as? String, let text = body["text"] as? String { onEdited?(path, text) }
+            if let path = body["path"] as? String, let text = body["text"] as? String {
+                onEdited?(path, text)
+                Task { [weak self] in await self?.updateDiffReview(path: path, text: text) }
+            }
+        case "diffReview":
+            if let path = body["path"] as? String, let text = body["text"] as? String {
+                let base = body["base"] as? String
+                Task { [weak self] in await self?.updateDiffReview(path: path, text: text, base: base) }
+            }
         case "navigate":
             if let direction = (body["direction"] as? String).flatMap(NavigationDirection.init) { onNavigate?(direction) }
         case "changes":
-            onChangePosition?(ChangePosition(hasPrevious: body["hasPrevious"] as? Bool ?? false, hasNext: body["hasNext"] as? Bool ?? false))
+            onChangePosition?(ChangePosition(hasPrevious: body["hasPrevious"] as? Bool ?? false, hasNext: body["hasNext"] as? Bool ?? false,
+                                            index: body["index"] as? Int ?? 0, total: body["total"] as? Int ?? 0))
         case "diffNavigate":
             if let step = (body["direction"] as? String).flatMap(ChangeStep.init), let path = body["path"] as? String { onDiffNavigate?(step, path) }
         case "diffStatistics":
+            // 正文显示过滤后的统计，文件列表始终保留原始增删数；过滤模式下由后台分析回传原始数。
+            guard lastPayload?.diffReading.whitespace == DiffWhitespaceMode.none else { break }
             if let path = body["path"] as? String, let added = body["added"] as? Int, let removed = body["removed"] as? Int, added >= 0, removed >= 0 {
                 onDiffStatistics?(path, DiffLineCounts(added: added, removed: removed))
             }

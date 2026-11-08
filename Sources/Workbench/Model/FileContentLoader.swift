@@ -46,7 +46,22 @@ enum FileContentLoader {
             } else {
                 raw = try await git.diff(change: change, repositoryRoot: repositoryRoot)
             }
-            return .diff(UnifiedDiffParser.parse(raw), language: Language.forFile(named: change.fileName))
+            let diff = UnifiedDiffParser.parse(raw)
+            let language = Language.forFile(named: change.fileName)
+            guard !diff.isBinary else { return .diff(diff, language: language) }
+            // 大文件仍可阅读 git 补丁；全文读取失败时不把缺失的一侧冒充为空文件。
+            do {
+                let old: String?
+                if change.kind == .added || change.kind == .untracked { old = "" }
+                else { old = try await git.textContent(path: change.originalPath ?? change.path, revision: commit?.diffBase ?? "HEAD", repositoryRoot: repositoryRoot) }
+                let new: String?
+                if change.kind == .deleted { new = "" }
+                else if let commit { new = try await git.textContent(path: change.path, revision: commit.hash, repositoryRoot: repositoryRoot) }
+                else if case .text(let text, _, _) = TextFileLoader.load(repositoryRoot.appendingPathComponent(change.path), limit: 2 * 1024 * 1024) { new = text }
+                else { new = nil }
+                if let old, let new { return .textDiff(oldText: old, newText: new, language: language) }
+            } catch { /* 保留可读的补丁，不隐藏已有差异。 */ }
+            return .diff(diff, language: language)
         } catch {
             return .message(title: "取不到 diff", detail: error.userFacingDescription)
         }
@@ -103,6 +118,10 @@ extension TabContent {
         case .diff(let diff, let language):
             let emptyReason = diff.isEmpty && tab.diffChange?.kind == .untracked ? "这是一个空文件。" : nil
             return .diff(path: path, language: language.highlightID, diff: diff, mode: diffMode, emptyReason: emptyReason)
+        case .textDiff(let old, let new, let language):
+            return .diff(path: path, language: language.highlightID,
+                         diff: FileDiff(oldPath: nil, newPath: path, isBinary: false, hunks: []), mode: diffMode, emptyReason: nil,
+                         edit: DiffEdit(oldText: old, newText: new, filePath: path, cursor: tab.cursor, readOnly: true))
         case .editableDiff:
             // 要文档内容才画得出来，由 ProjectSession.renderActiveTab 走 editableDiff(change:document:…)
             return .message(title: "", detail: "")

@@ -741,11 +741,28 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 同一份文件顺序供键盘、正文和工具栏使用；折叠目录仍可跨入，列表负责露出选中的文件。
     private func adjacentDiff(_ step: ContentRenderer.ChangeStep) -> GitChange? {
         guard let tab = activeTab, let current = tab.diffChange else { return nil }
-        let changes: [GitChange]
-        if let commit = tab.commitDiff?.commit { changes = history?.filesByCommit[commit.id] ?? [] }
-        else { changes = (changeGroups.trackedTree.rows + changeGroups.untrackedTree.rows).compactMap(\.change) }
+        let changes = diffNavigationChanges
         guard let path = DiffFileNavigation.adjacentPath(in: changes.map(\.path), current: current.path, direction: step) else { return nil }
         return changes.first { $0.path == path }
+    }
+
+    private var diffNavigationChanges: [GitChange] {
+        if let commit = activeTab?.commitDiff?.commit { return history?.filesByCommit[commit.id] ?? [] }
+        return (changeGroups.trackedTree.rows + changeGroups.untrackedTree.rows).compactMap(\.change)
+    }
+
+    var diffReviewProgress: DiffReviewProgress {
+        let changes = diffNavigationChanges
+        let index = activeTab?.diffChange.flatMap { current in changes.firstIndex { $0.path == current.path } }
+        return DiffReviewProgress(fileIndex: index.map { $0 + 1 } ?? 0, fileCount: changes.count,
+                                  changeIndex: changePosition.index, changeCount: changePosition.total)
+    }
+
+    var supportsDiffReading: Bool {
+        switch activeContent {
+        case .editableDiff, .textDiff: return true
+        default: return false
+        }
     }
 
     func canNavigateChange(_ step: ContentRenderer.ChangeStep) -> Bool {
@@ -915,7 +932,10 @@ final class ProjectSession: ObservableObject, Identifiable {
     private func remember(_ state: ContentRenderer.ViewState, of tabID: String) -> EditorTab? {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return nil }
         tabs[index].scrollTop = state.scrollTop
-        if state.kind == "diff" { tabs[index].hasDiffPosition = true }
+        if state.kind == "diff" {
+            tabs[index].hasDiffPosition = true
+            tabs[index].diffViewState = state.diffViewState
+        }
         if let cursor = state.cursor { tabs[index].cursor = cursor }
         // 撤销历史与当时的文字一起保存；只读视图不清掉之前的编辑历史。
         if let text = state.text, let history = state.history { tabs[index].history = EditorHistory(json: history, text: text) }
@@ -1006,7 +1026,10 @@ final class ProjectSession: ObservableObject, Identifiable {
         renderer.currentState { state in
             if let index = self.tabs.firstIndex(where: { $0.id == id }) {
                 self.tabs[index].scrollTop = state.scrollTop
-                if state.kind == "diff" { self.tabs[index].hasDiffPosition = true }
+                if state.kind == "diff" {
+                    self.tabs[index].hasDiffPosition = true
+                    self.tabs[index].diffViewState = state.diffViewState
+                }
                 if let cursor = state.cursor { self.tabs[index].cursor = cursor }
                 // 重命名 / 移动之后编辑器会重建（内容重读），历史也得是此刻的这份
                 if let text = state.text, let history = state.history { self.tabs[index].history = EditorHistory(json: history, text: text) }
@@ -1165,7 +1188,8 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
         let edge = pendingDiffReveal.flatMap { $0.tabID == tab.id ? $0.edge : nil }
         renderer.render(RenderPayload(rendered, scrollTop: tab.scrollTop, wrap: preferences.wordWrap,
-                                      revealChange: edge ?? (tab.isDiff && !tab.hasDiffPosition ? .first : nil)))
+                                      revealChange: edge ?? (tab.isDiff && !tab.hasDiffPosition ? .first : nil), diffReading: preferences.diffReading,
+                                      diffViewState: tab.diffViewState))
         if edge != nil { pendingDiffReveal = nil }
     }
 

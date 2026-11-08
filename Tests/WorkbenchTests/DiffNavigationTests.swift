@@ -63,12 +63,16 @@ import TestSupport
             try await waitForDiff { try await diffLine(renderer) == 20 }
             #expect(!session.canNavigateChange(.previous))
 
-            func press(_ key: String, path: String, line: Int) async throws {
+            @MainActor func press(_ key: String, path: String, line: Int) async throws {
                 _ = try await renderer.webView.evaluateJavaScript("document.dispatchEvent(new KeyboardEvent('keydown', {key: '\(key)', bubbles: true, cancelable: true})); true")
                 try await waitForDiff {
                     guard session.activeTab?.diffChange?.path == path else { return false }
                     return try await diffLine(renderer) == line
                 }
+                #expect(session.diffReviewProgress.fileCount == 2)
+                #expect(session.diffReviewProgress.fileIndex == (path == "a.txt" ? 1 : 2))
+                #expect(session.diffReviewProgress.changeCount == 2)
+                #expect(session.diffReviewProgress.changeIndex == ([20, 30].contains(line) ? 1 : 2))
             }
             try await press("ArrowDown", path: "a.txt", line: 80)
             _ = try await renderer.webView.evaluateJavaScript("document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror.replaceRange('DRAFT_', {line: 80, ch: 0}); true")
@@ -108,6 +112,7 @@ import TestSupport
             if arguments.first == "diff", arguments.contains("--name-status") { return shellOutput("M\0z.txt\0M\0a.txt\0") }
             if arguments.first == "diff", arguments.contains("--numstat") { return shellOutput("2\t2\tz.txt\02\t2\ta.txt\0") }
             if arguments.first == "diff" { return shellOutput(patch) }
+            if arguments.first == "show" { return shellOutput("", status: 128, stderr: "object unavailable") }
             return shellOutput("")
         }
         let renderer = ContentRenderer()

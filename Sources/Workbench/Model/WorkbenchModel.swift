@@ -9,6 +9,9 @@ import Foundation
 final class ReadingPreferences: ObservableObject {
     @Published var diffMode: DiffViewMode { didSet { defaults.set(diffMode.rawValue, forKey: "diff.mode") } }
     @Published var wordWrap: Bool { didSet { defaults.set(wordWrap, forKey: "editor.wrap") } }
+    @Published var diffReading: DiffReadingOptions {
+        didSet { defaults.set(try? JSONEncoder().encode(diffReading), forKey: "diff.reading") }
+    }
     /// 界面外观（跟随系统 / 浅色 / 深色）。改了立刻写进 `NSApp.appearance`：
     /// `Theme` 的颜色是动态色，appearance 一换整个界面自己跟着变。
     @Published var theme: AppTheme {
@@ -25,6 +28,8 @@ final class ReadingPreferences: ObservableObject {
         self.defaults = defaults
         diffMode = DiffViewMode(rawValue: defaults.string(forKey: "diff.mode") ?? "") ?? .sideBySide
         wordWrap = defaults.object(forKey: "editor.wrap") as? Bool ?? true
+        diffReading = defaults.data(forKey: "diff.reading").flatMap { try? JSONDecoder().decode(DiffReadingOptions.self, from: $0) }
+            ?? DiffReadingOptions(collapseUnchanged: true)
         let saved = defaults.double(forKey: "editor.zoom")
         zoom = saved > 0 ? saved : 1
         theme = AppTheme(rawValue: defaults.string(forKey: "appearance") ?? "") ?? .dark
@@ -132,13 +137,15 @@ final class WorkbenchModel: ObservableObject {
         preferenceObservation = Task { [weak self] in
             guard let self else { return }
             var lastDiffMode = preferences.diffMode
+            var lastDiffReading = preferences.diffReading
             var lastWrap = preferences.wordWrap
             var lastZoom = preferences.zoom
             for await _ in preferences.objectWillChange.values {
                 await Task.yield()
                 guard !Task.isCancelled else { return }
-                if preferences.diffMode != lastDiffMode {
+                if preferences.diffMode != lastDiffMode || preferences.diffReading != lastDiffReading {
                     lastDiffMode = preferences.diffMode
+                    lastDiffReading = preferences.diffReading
                     // 只有 diff 标签关心这个；先把编辑器里的状态要回来再重画（可编辑的 diff 也是编辑器）
                     if active?.activeTab?.isDiff == true { active?.rerenderActiveTab() }
                 }

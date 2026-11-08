@@ -53,7 +53,7 @@ public struct EditorCursor: Equatable, Sendable, Codable {
     }
 }
 
-/// 可编辑 diff 的两份文本：左边是基线（HEAD），右边是工作区里的（含未保存的草稿），编辑器改的是右边。
+/// 全文 diff 的两份原文。工作区的右侧可编辑，历史版本及删除文件只读。
 public struct DiffEdit: Equatable, Sendable {
     public var oldText: String
     public var newText: String
@@ -62,13 +62,16 @@ public struct DiffEdit: Equatable, Sendable {
     public var cursor: EditorCursor?
     /// 编辑器的撤销历史（CodeMirror `getHistory()` 的 JSON 文本），切标签时带走再带回来，⌘Z 才能撤到切走之前。
     public var history: String?
+    /// 历史版本及已删除文件也使用全文视图，但不产生 edited 消息。
+    public var readOnly: Bool
 
-    public init(oldText: String, newText: String, filePath: String, cursor: EditorCursor? = nil, history: String? = nil) {
+    public init(oldText: String, newText: String, filePath: String, cursor: EditorCursor? = nil, history: String? = nil, readOnly: Bool = false) {
         self.oldText = oldText
         self.newText = newText
         self.filePath = filePath
         self.cursor = cursor
         self.history = history
+        self.readOnly = readOnly
     }
 }
 
@@ -83,7 +86,8 @@ public struct RenderPayload: Equatable, Sendable {
         case image(path: String, url: URL, sizeText: String)
         /// 独立 WebView 中的 HTML 预览，与持有编辑桥的 shell 隔离；相对资源按原文件解析，读取范围由 documentDirectory 限定。
         case html(path: String, text: String, documentDirectory: URL)
-        /// `edit` 非空时是可编辑的 diff（工作区变更）：不送 rows，两份全文由编辑器自己比；否则是只读的静态表格。
+        /// `edit` 非空时携带两侧全文与 Core 比较结果，支持上下文展开；readOnly 决定右侧能否编辑。
+        /// 没有全文的二进制 / 大文件退回静态补丁。
         case diff(path: String, language: String?, diff: FileDiff, mode: DiffViewMode, emptyReason: String?, edit: DiffEdit? = nil)
         case message(title: String, detail: String)
     }
@@ -97,12 +101,17 @@ public struct RenderPayload: Equatable, Sendable {
     public var wrap: Bool
     /// 首次打开或跨文件导航时的落点；nil 恢复标签原来的位置。
     public var revealChange: DiffEdge?
+    public var diffReading: DiffReadingOptions
+    /// 编辑器的阅读现场（JSON）：逻辑行、屏幕偏移和已展开区间，随标签往返。
+    public var diffViewState: String?
 
-    public init(_ content: Content, scrollTop: Double = 0, wrap: Bool = false, revealChange: DiffEdge? = nil) {
+    public init(_ content: Content, scrollTop: Double = 0, wrap: Bool = false, revealChange: DiffEdge? = nil, diffReading: DiffReadingOptions = DiffReadingOptions(), diffViewState: String? = nil) {
         self.content = content
         self.scrollTop = scrollTop
         self.wrap = wrap
         self.revealChange = revealChange
+        self.diffReading = diffReading
+        self.diffViewState = diffViewState
     }
 
     public static func message(_ title: String, _ detail: String) -> RenderPayload {
@@ -124,9 +133,26 @@ public extension RenderPayload.Content {
 }
 
 extension RenderPayload: Encodable {
+    /// 编辑后的增量消息也复用 payload 的键名，保持 Swift 渲染契约只有一处声明。
+    struct DiffReviewUpdate: Encodable {
+        let path: String
+        let newText: String
+        let analysis: DiffReviewAnalysis
+        let baseIdentity: String
+
+        func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: Key.self)
+            try container.encode(path, forKey: .path)
+            try container.encode(newText, forKey: .newText)
+            try container.encode(analysis, forKey: .analysis)
+            try container.encode(baseIdentity, forKey: .baseIdentity)
+        }
+    }
+
     private enum Key: String, CodingKey {
         case kind, scrollTop, wrap, revealChange, path, text, language, editable, cursor, base, history, markdown, docDir, view, url, sizeText
         case mode, rows, binary, empty, added, removed, emptyReason, title, detail, edit, oldText, newText, filePath
+        case diffReading, analysis, readOnly, diffViewState, baseIdentity
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -170,12 +196,18 @@ extension RenderPayload: Encodable {
             try container.encodeIfPresent(language, forKey: .language)
             try container.encode(mode.rawValue, forKey: .mode)
             if let edit {
+                try container.encodeIfPresent(diffViewState, forKey: .diffViewState)
+                try container.encode(diffReading, forKey: .diffReading)
+                try container.encode(DiffReviewAnalysis(oldText: edit.oldText, newText: edit.newText, options: diffReading), forKey: .analysis)
                 var editContainer = container.nestedContainer(keyedBy: Key.self, forKey: .edit)
                 try editContainer.encode(edit.oldText, forKey: .oldText)
+                // 现场只在当前进程内恢复；基线变化后不能沿用旧的展开区间。
+                try editContainer.encode(String(edit.oldText.hashValue), forKey: .baseIdentity)
                 try editContainer.encode(edit.newText, forKey: .newText)
                 try editContainer.encode(edit.filePath, forKey: .filePath)
                 try editContainer.encodeIfPresent(edit.cursor, forKey: .cursor)
                 try editContainer.encodeIfPresent(edit.history, forKey: .history)
+                try editContainer.encode(edit.readOnly, forKey: .readOnly)
                 return
             }
             try container.encode(diff.isBinary, forKey: .binary)

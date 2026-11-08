@@ -226,7 +226,8 @@ private struct EditorHeader: View {
             }
         }
         if tab.isDiff {
-            if case .editableDiff = session.activeContent { wordWrapControl }
+            DiffReviewControls(preferences: preferences, progress: session.diffReviewProgress, supported: session.supportsDiffReading)
+            if session.supportsDiffReading { wordWrapControl }
             IconButton(ToolWindowIcon.refresh, help: "刷新文件与 diff（⌘R）", size: 22) { session.refreshAll() }
             Picker("", selection: $preferences.diffMode) {
                 ForEach(DiffViewMode.allCases, id: \.self) { Text($0.label).tag($0) }
@@ -272,6 +273,7 @@ private struct EditorHeader: View {
     private var wordWrapControl: some View {
         Toggle("自动换行", isOn: $preferences.wordWrap)
             .toggleStyle(.checkbox).controlSize(.small).font(Theme.smallFont)
+            .fixedSize()
             .help("自动折行显示长行；关闭后可拖动底部横向滚动条查看完整内容")
     }
 }
@@ -291,6 +293,15 @@ private struct Breadcrumb: View {
     }
 
     var body: some View {
+        ViewThatFits(in: .horizontal) {
+            expanded.fixedSize(horizontal: true, vertical: false)
+            Text(([tab.commitDiff?.commit.shortHash].compactMap { $0 } + components).joined(separator: " / "))
+                .font(Theme.smallFont).foregroundStyle(Theme.secondaryText).lineLimit(1).truncationMode(.middle)
+        }
+        .help(components.joined(separator: "/"))
+    }
+
+    @ViewBuilder private var expanded: some View {
         let parts = components
         HStack(spacing: 4) {
             if let commitDiff = tab.commitDiff {
