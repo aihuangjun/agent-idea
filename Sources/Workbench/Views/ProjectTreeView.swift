@@ -17,8 +17,8 @@ struct ProjectTreeView: View {
     @State private var pending: DestructiveConfirmation?
     /// 正在重命名的节点（右键菜单或 ⇧F6），对话框以 sheet 弹出。
     @State private var renaming: FileNode?
-    /// 正在往哪个目录下新建文件夹（右键菜单）。
-    @State private var newFolder: NewFolderRequest?
+    /// 新建项对话框挂在整棵树上，刷新回收行时不会消失。
+    @State private var newItem: NewItemRequest?
     /// 拖拽正经过哪一行、那一行会把东西交给哪个目录：接收目录那一行画高亮。
     @State private var dropTarget = DropTargetState()
 
@@ -103,7 +103,8 @@ struct ProjectTreeView: View {
                             name: session.project.name, path: session.project.root.path,
                             isDropTarget: dropTarget.directory == session.project.root.path,
                             dropTarget: dropTarget(row: session.project.root.path, into: session.project.root),
-                            onNewFolder: { newFolder = NewFolderRequest(directory: session.project.root) },
+                            onNewFile: { newItem = NewItemRequest(directory: session.project.root, kind: .file) },
+                            onNewFolder: { newItem = NewItemRequest(directory: session.project.root, kind: .folder) },
                             onCopyPath: {
                                 Desktop.copyToClipboard(session.project.root.path)
                                 session.notify("已复制 \(session.project.root.path)")
@@ -126,7 +127,8 @@ struct ProjectTreeView: View {
                                 onDelete: { requestDelete($0) },
                                 onRename: { renaming = $0 },
                                 onAddToGit: { requestAddToGit($0) },
-                                onNewFolder: { newFolder = NewFolderRequest(directory: $0) },
+                                onNewFile: { newItem = NewItemRequest(directory: $0, kind: .file) },
+                                onNewFolder: { newItem = NewItemRequest(directory: $0, kind: .folder) },
                                 isDropTarget: row.node.isDirectory && dropTarget.directory == row.id,
                                 dropTarget: dropTarget(row: row.id, into: row.node.isDirectory ? row.node.url : row.node.url.deletingLastPathComponent())
                             )
@@ -178,11 +180,14 @@ struct ProjectTreeView: View {
             .sheet(item: $renaming) { node in
                 RenameSheet(node: node) { session.renameProblem(for: node, newName: $0) } commit: { session.rename(node, to: $0) }
             }
-            .sheet(item: $newFolder) { request in
-                NewFolderSheet(directory: request.directory, location: locationText(for: request.directory)) {
-                    session.newFolderProblem(in: request.directory, name: $0)
+            .sheet(item: $newItem) { request in
+                NewItemSheet(kind: request.kind, location: locationText(for: request.directory)) {
+                    session.newItemProblem(in: request.directory, name: $0)
                 } commit: {
-                    session.createFolder(named: $0, in: request.directory)
+                    switch request.kind {
+                    case .file: session.createFile(named: $0, in: request.directory)
+                    case .folder: session.createFolder(named: $0, in: request.directory)
+                    }
                 }
             }
         }
@@ -431,6 +436,7 @@ private struct RootRow: View {
     let path: String
     let isDropTarget: Bool
     let dropTarget: TreeDropTarget
+    let onNewFile: () -> Void
     let onNewFolder: () -> Void
     let onCopyPath: () -> Void
     let onCopyName: () -> Void
@@ -450,6 +456,7 @@ private struct RootRow: View {
         .overlay { if isDropTarget { DropTargetHighlight() } }
         .overlay(TreeRowInteraction(dropCheck: dropTarget.check, drop: dropTarget.drop, onTargetChange: dropTarget.targeted))
         .contextMenu {
+            Button("新建文件…") { onNewFile() }
             Button("新建文件夹…") { onNewFolder() }
             Divider()
             Button("复制绝对路径") { onCopyPath() }
@@ -484,7 +491,8 @@ struct TreeRow: View {
     /// 右键「添加到 git」：交给树处理多选与确认。
     var onAddToGit: (FileNode) -> Void = { _ in }
 
-    /// 往这个目录下新建文件夹（文件行给的是它所在的目录）。
+    /// 往这个目录下新建（文件行给的是它所在的目录）。
+    var onNewFile: (URL) -> Void = { _ in }
     var onNewFolder: (URL) -> Void = { _ in }
     /// 拖着东西经过时这一行（目录）会接收：画高亮。由树算好传进来（文件行代表的是它所在的目录，高亮的是那个目录的行）。
     let isDropTarget: Bool
@@ -560,7 +568,7 @@ struct TreeRow: View {
         ))
         .contextMenu {
             TreeContextMenu(session: session, node: node, requestDelete: onDelete, requestRename: onRename,
-                            requestNewFolder: onNewFolder, requestAddToGit: onAddToGit)
+                            requestNewFile: onNewFile, requestNewFolder: onNewFolder, requestAddToGit: onAddToGit)
         }
     }
 
@@ -608,11 +616,13 @@ private struct TreeContextMenu: View {
     let node: FileNode
     let requestDelete: (FileNode) -> Void
     let requestRename: (FileNode) -> Void
+    let requestNewFile: (URL) -> Void
     let requestNewFolder: (URL) -> Void
     let requestAddToGit: (FileNode) -> Void
 
     var body: some View {
         // IDEA 的 New：在目录上就建在它下面，在文件上建在它旁边
+        Button("新建文件…") { requestNewFile(node.isDirectory ? node.url : node.url.deletingLastPathComponent()) }
         Button("新建文件夹…") { requestNewFolder(node.isDirectory ? node.url : node.url.deletingLastPathComponent()) }
         Divider()
         if !node.isDirectory {

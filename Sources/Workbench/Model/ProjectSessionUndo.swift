@@ -110,6 +110,19 @@ extension ProjectSession {
             if selectedPath == url.path { select(parentOf: url) }
             refreshAll()
             return .done(entry)
+        case .createFile(let url, _):
+            guard (try? fileManager.attributesOfItem(atPath: url.path)[.type]) as? FileAttributeType == .typeRegular else {
+                return .failed("文件已经被移走或替换了")
+            }
+            // 先保存编辑器的文字再进废纸篓，重做时才能恢复用户刚写下的内容。
+            await withCheckedContinuation { continuation in saveAll { continuation.resume() } }
+            guard !draftStore.isModified(EditorTab.id(forFile: url)) else { return .failed("文件未能保存，请先保存后再撤销") }
+            guard let trashed = performDelete(FileNode(url: url, name: url.lastPathComponent, isDirectory: false)) else {
+                return .failed(banner ?? "删不掉")
+            }
+            var updated = entry
+            updated.kind = .createFile(url: url, trashed: trashed)
+            return .done(updated)
         case .batch(let operations):
             // 倒着撤：后搬的先搬回去。中途撤不成就停在那里报错，已经撤掉的那几个不再能重做（这一步整个作废）
             var reverted: [UndoableOperation] = []
@@ -197,6 +210,15 @@ extension ProjectSession {
         case .createFolder(let url):
             if let failure = performCreateFolder(at: url) { return .failed(failure) }
             return .done(entry)
+        case .createFile(let url, let trashed):
+            guard let trashed, entryExists(trashed.path) else { return .failed("废纸篓里已经没有这个文件了") }
+            guard !entryExists(url.path) else { return .failed("原位置已经有别的东西") }
+            do { try fileManager.moveItem(at: trashed, to: url) }
+            catch { return .failed(error.userFacingDescription) }
+            didCreateFile(at: url)
+            var updated = entry
+            updated.kind = .createFile(url: url, trashed: nil)
+            return .done(updated)
         case .batch(let operations):
             var applied: [UndoableOperation] = []
             for operation in operations {
@@ -295,44 +317,6 @@ extension ProjectSession {
         await withCheckedContinuation { continuation in saveAll { continuation.resume() } }
         if let failure = await move(node, to: destination, verb: "撤销", recording: false) { return .failed(failure) }
         return .done(entry)
-    }
-
-    // MARK: - 新建文件夹
-
-    /// 新建文件夹能不能用这个名字（对话框边敲边检查）。
-    func newFolderProblem(in directory: URL, name: String) -> FileRename.Problem? {
-        FileRename.validate(name, currentName: "") { entryExists(directory.appendingPathComponent($0).path) }
-    }
-
-    /// 在目录下新建一个文件夹（IDEA 的 New → Directory）：建好后展开父目录、露出并选中，记进撤销栈。
-    func createFolder(named newName: String, in directory: URL) {
-        let name = newName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let problem = newFolderProblem(in: directory, name: name) {
-            showError("新建文件夹失败：\(problem.message)")
-            return
-        }
-        let url = directory.appendingPathComponent(name, isDirectory: true)
-        if let failure = performCreateFolder(at: url) {
-            showError(failure)
-            return
-        }
-        recordUndo("新建文件夹 \(name)", .createFolder(url: url))
-    }
-
-    /// 真正建、树上露出来；不记撤销栈（重做也走这里）。返回给用户看的失败原因，成了 nil。
-    private func performCreateFolder(at url: URL) -> String? {
-        guard !entryExists(url.path) else { return "新建文件夹失败：\(FileRename.Problem.exists.message)" }
-        do {
-            try fileManager.createDirectory(at: url, withIntermediateDirectories: false)
-        } catch {
-            Log.warn("project", "新建文件夹 \(url.path) 失败：\(error)")
-            return "新建文件夹失败：\(error.userFacingDescription)"
-        }
-        Log.info("project", "已新建文件夹 \(url.path)")
-        refreshTree(directoryContaining: url)
-        revealInTree(url)
-        search.applyChanges([url.path])
-        return nil
     }
 
     // MARK: - 回滚与删除（变更列表）

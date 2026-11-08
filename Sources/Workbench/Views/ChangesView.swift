@@ -18,6 +18,8 @@ struct ChangesView: View {
     @State private var renaming: FileNode?
     /// 等确认的删除。同样挂在面板上而不是行上（理由同上）。
     @State private var pending: DestructiveConfirmation?
+    @State private var trackedDirectories: Set<String> = []
+    @State private var untrackedDirectories: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -48,18 +50,23 @@ struct ChangesView: View {
     }
 
     private func changeList(commit: CommitController) -> some View {
-        ScrollView {
+        let tracked = trackedRows
+        let untracked = untrackedRows
+        let visible = (trackedCollapsed ? [] : tracked) + (untrackedCollapsed ? [] : untracked)
+        // 每次更新只扫一次可见选中项；不能让每个文件行各扫一遍整棵树，多选大列表会变成平方开销。
+        let selected = visible.compactMap(\.change).filter { session.changeSelection.contains($0.path) }
+        return ScrollView {
             LazyVStack(spacing: 0) {
                 if !session.changeGroups.tracked.isEmpty {
                     GroupHeader(title: "变更", changes: session.changeGroups.tracked, commit: commit, isCollapsed: $trackedCollapsed)
                     if !trackedCollapsed {
-                        ForEach(session.changeGroups.tracked) { change in row(change, commit: commit) }
+                        treeRows(tracked, selected: selected, collapsed: $trackedDirectories, commit: commit)
                     }
                 }
                 if !session.changeGroups.untracked.isEmpty {
                     GroupHeader(title: "未跟踪文件", changes: session.changeGroups.untracked, commit: commit, isCollapsed: $untrackedCollapsed)
                     if !untrackedCollapsed {
-                        ForEach(session.changeGroups.untracked) { change in row(change, commit: commit) }
+                        treeRows(untracked, selected: selected, collapsed: $untrackedDirectories, commit: commit)
                     }
                 }
             }
@@ -75,10 +82,12 @@ struct ChangesView: View {
 
     /// 行的「选中」由这里算好再传进去：行视图只按传进去的值重画，自己去读会话的话 SwiftUI 看不出行有变化，
     /// 选中挪走了上一行的高亮也不会消失（0.3.0 的 bug）。
-    private func row(_ change: GitChange, commit: CommitController) -> some View {
+    private func row(_ change: GitChange, depth: Int, selected: [GitChange], commit: CommitController) -> some View {
         ChangeRow(
             session: session, commit: commit, change: change,
+            depth: depth,
             isSelected: session.changeSelection.contains(change.path),
+            actionTargets: selected.count > 1 && session.changeSelection.contains(change.path) ? selected : [change],
             press: { press(change, modifiers: $0) },
             release: { if $0, clicks.registerClick(on: change.path) { session.openDiff(change, pinned: true) } },
             onRename: { renaming = $0 },
@@ -87,9 +96,29 @@ struct ChangesView: View {
         )
     }
 
+    private var trackedRows: [GitChangeTree.Row] {
+        session.changeGroups.trackedTree.visibleRows(collapsedDirectories: trackedDirectories)
+    }
+
+    private var untrackedRows: [GitChangeTree.Row] {
+        session.changeGroups.untrackedTree.visibleRows(collapsedDirectories: untrackedDirectories)
+    }
+
+    private func treeRows(_ rows: [GitChangeTree.Row], selected: [GitChange], collapsed: Binding<Set<String>>, commit: CommitController) -> some View {
+        ForEach(rows) { item in
+            if let change = item.change {
+                row(change, depth: item.depth, selected: selected, commit: commit)
+            } else {
+                ChangeDirectoryRow(row: item, commit: commit, isCollapsed: collapsed.wrappedValue.contains(item.path)) {
+                    if !collapsed.wrappedValue.insert(item.path).inserted { collapsed.wrappedValue.remove(item.path) }
+                }
+            }
+        }
+    }
+
     /// 看得见的行，按列表顺序（⇧点击连选按它；折叠起来的分组不算）。
     private var visibleOrder: [String] {
-        ((trackedCollapsed ? [] : session.changeGroups.tracked) + (untrackedCollapsed ? [] : session.changeGroups.untracked)).map(\.path)
+        ((trackedCollapsed ? [] : trackedRows) + (untrackedCollapsed ? [] : untrackedRows)).compactMap { $0.change?.path }
     }
 
     /// 按下一行。返回这是不是一次「普通单击」（松开时才参与双击判定，双击固定标签）。
@@ -146,6 +175,38 @@ struct ChangesView: View {
     }
 }
 
+/// 目录标题与文件共用提交勾选状态；折叠只影响可见行，不影响提交范围。
+private struct ChangeDirectoryRow: View {
+    let row: GitChangeTree.Row
+    @ObservedObject var commit: CommitController
+    let isCollapsed: Bool
+    let toggle: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Spacer().frame(width: 22 + CGFloat(row.depth) * 14)
+            Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
+                .font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.secondaryText).frame(width: 12)
+                .contentShape(Rectangle()).onPress { _ in toggle() }
+            Toggle("", isOn: Binding(
+                get: { row.changes.allSatisfy { commit.isIncluded($0) } },
+                set: { on in row.changes.forEach { commit.setIncluded(on, for: $0) } }
+            ))
+            .toggleStyle(.checkbox).controlSize(.small).labelsHidden()
+            HStack(spacing: 6) {
+                Image(systemName: "folder.fill").font(.system(size: 12)).foregroundStyle(Theme.folderIcon).frame(width: 16)
+                Text(row.name).font(Theme.uiFont).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
+                Text("\(row.changes.count)").font(Theme.smallFont).foregroundStyle(Theme.mutedText)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle()).onPress { _ in toggle() }
+        }
+        .padding(.trailing, 10)
+        .frame(height: Theme.treeRowHeight)
+        .help(row.path)
+    }
+}
+
 /// 分组标题，带一个「全选/全不选」勾选框。
 private struct GroupHeader: View {
     let title: String
@@ -160,7 +221,7 @@ private struct GroupHeader: View {
             Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
                 .font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.secondaryText).frame(width: 12)
                 .contentShape(Rectangle())
-                .onTapGesture { isCollapsed.toggle() }
+                .onPress { _ in isCollapsed.toggle() }
             Toggle("", isOn: Binding(
                 get: { includedCount == changes.count },
                 set: { on in for change in changes { commit.setIncluded(on, for: change) } }
@@ -174,7 +235,7 @@ private struct GroupHeader: View {
                 Spacer()
             }
             .contentShape(Rectangle())
-            .onTapGesture { isCollapsed.toggle() }
+            .onPress { _ in isCollapsed.toggle() }
         }
         .padding(.horizontal, 10)
         .frame(height: Theme.treeRowHeight)
@@ -185,7 +246,9 @@ private struct ChangeRow: View {
     let session: ProjectSession
     @ObservedObject var commit: CommitController
     let change: GitChange
+    let depth: Int
     let isSelected: Bool
+    let actionTargets: [GitChange]
     /// 按下：返回这是不是一次普通单击（⌘ / ⇧点击只改选中，不算）。
     let press: (NSEvent.ModifierFlags) -> Bool
     /// 松开：参数是「没拖动、算一次点击」。只在按下时是普通单击才会调。
@@ -200,14 +263,14 @@ private struct ChangeRow: View {
         let icon = FileIcon.file(named: change.fileName)
         HStack(spacing: 6) {
             // 缩进到分组标题的文字下面：它们是分组的子级
-            Spacer().frame(width: 40)
+            Spacer().frame(width: 40 + CGFloat(depth) * 14)
             Toggle("", isOn: Binding(
                 get: { commit.isIncluded(change) },
                 set: { commit.setIncluded($0, for: change) }
             ))
             .toggleStyle(.checkbox).controlSize(.small).labelsHidden()
             Image(systemName: icon.systemName).font(.system(size: 12)).foregroundStyle(icon.color).frame(width: 16)
-            ChangeFileLabel(change: change)
+            ChangeFileLabel(change: change, showsDirectory: false)
         }
         .padding(.trailing, 10)
         .frame(height: Theme.treeRowHeight)
@@ -222,11 +285,12 @@ private struct ChangeRow: View {
         })
         // 没有「显示 diff」：点这一行本来就是看 diff
         .contextMenu { menu }
+        .help(change.originalPath.map { "\(change.path) ← \($0)" } ?? change.path)
     }
 
     /// 右键点在多选里：对整个多选回滚 / 删除（只对一条才有意义的打开、定位、重命名不出现）；否则只对这一条。
     @ViewBuilder private var menu: some View {
-        let targets = session.changesForAction(on: change)
+        let targets = actionTargets
         if targets.count > 1 {
             let rollbackable = targets.filter { $0.kind != .untracked }.count
             let deletable = targets.filter(commit.canDelete).count

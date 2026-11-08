@@ -6,6 +6,7 @@ import SwiftUI
 /// 变更列表与提交历史的文件列表共用。图标、勾选框、缩进由各自的行负责。
 struct ChangeFileLabel: View {
     let change: GitChange
+    var showsDirectory = true
 
     private var fileName: some View {
         Text(change.fileName)
@@ -18,7 +19,7 @@ struct ChangeFileLabel: View {
 
     @ViewBuilder
     private var secondaryTexts: some View {
-        if !change.directory.isEmpty {
+        if showsDirectory, !change.directory.isEmpty {
             Text(change.directory).font(Theme.smallFont).foregroundStyle(Theme.mutedText).lineLimit(1).fixedSize()
         }
         if let original = change.originalPath {

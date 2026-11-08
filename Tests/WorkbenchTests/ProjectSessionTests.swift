@@ -1054,10 +1054,10 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         workbench.openProject(directory)
         let session = try #require(workbench.active)
 
-        #expect(session.newFolderProblem(in: directory, name: "") == .empty)
-        #expect(session.newFolderProblem(in: directory, name: "taken.txt") == .exists)
-        #expect(session.newFolderProblem(in: directory, name: "a/b") == .containsSlash)
-        #expect(session.newFolderProblem(in: directory, name: "docs") == nil)
+        #expect(session.newItemProblem(in: directory, name: "") == .empty)
+        #expect(session.newItemProblem(in: directory, name: "taken.txt") == .exists)
+        #expect(session.newItemProblem(in: directory, name: "a/b") == .containsSlash)
+        #expect(session.newItemProblem(in: directory, name: "docs") == nil)
 
         // sub 没展开：建在它下面要把它展开、露出新目录并选中
         session.createFolder(named: " docs ", in: sub)
@@ -1089,6 +1089,109 @@ private final class SlowRunner: CommandRunning, @unchecked Sendable {
         session.redo()
         await waitUntil { FileManager.default.fileExists(atPath: empty.path) }
         #expect(session.selectedPath == empty.path)
+    }
+}
+
+@Test @MainActor func creatingFileRevealsOpensAndRestoresEditedContent() async throws {
+    try await withTemporaryDirectory { directory in
+        let sub = directory.appendingPathComponent("src")
+        try FileManager.default.createDirectory(at: sub, withIntermediateDirectories: true)
+        let workbench = makeWorkbench(in: directory, git: nil)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        // 伪造 applyEdit 的会话不能向真实 WebView 回收旧正文。
+        session.setActive(false)
+        session.createFile(named: " notes.custom-ext ", in: sub)
+        let file = sub.appendingPathComponent("notes.custom-ext")
+        #expect(try Data(contentsOf: file).isEmpty)
+        #expect(session.selectedPath == file.path && session.pendingReveal == file.path)
+        #expect(session.rows.contains { $0.node.url == file })
+        #expect(session.activeTab?.fileURL == file && session.activeTab?.isPreview == false)
+        #expect(session.undoTitle == "撤销新建文件 notes.custom-ext")
+
+        session.applyEdit(path: file.path, text: "keep my edits\n")
+        session.saveAll()
+        await waitUntil { (try? String(contentsOf: file, encoding: .utf8)) == "keep my edits\n" }
+        // 原子保存会更换 inode：新建的撤销仍应有效，重做恢复编辑后的内容。
+        session.undo()
+        await waitUntil { !session.isUndoing }
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(session.tabs.allSatisfy { $0.fileURL != file })
+        #expect(session.selectedPath == sub.path && session.canRedo)
+        session.redo()
+        await waitUntil { !session.isUndoing }
+        #expect(try String(contentsOf: file, encoding: .utf8) == "keep my edits\n")
+        #expect(session.activeTab?.fileURL == file && session.selectedPath == file.path)
+        session.undo()
+        await waitUntil { !session.isUndoing }
+        #expect(!FileManager.default.fileExists(atPath: file.path), "可以连续撤销 / 重做")
+    }
+}
+
+@Test @MainActor func creatingFileAcceptsNamesAndNeverOverwritesExistingEntries() throws {
+    try withTemporaryDirectory { directory in
+        let workbench = makeWorkbench(in: directory, git: nil)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        session.setActive(false)
+        for name in ["README", ".env", "笔记.md", "test.swift", "custom.foo.bar"] {
+            session.createFile(named: name, in: directory)
+            #expect(try Data(contentsOf: directory.appendingPathComponent(name)).isEmpty)
+        }
+        let existing = directory.appendingPathComponent("test.swift")
+        try "original".write(to: existing, atomically: true, encoding: .utf8)
+        session.createFile(named: "test.swift", in: directory)
+        #expect(try String(contentsOf: existing, encoding: .utf8) == "original")
+        #expect(session.banner?.contains("已经有这个名字") == true)
+        let folder = directory.appendingPathComponent("folder")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        let link = directory.appendingPathComponent("broken")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: directory.appendingPathComponent("missing"))
+        #expect(session.newItemProblem(in: directory, name: "folder") == .exists)
+        #expect(session.newItemProblem(in: directory, name: "broken") == .exists)
+        for name in ["", "../escape", "a/b", ".", "..", "a\0b"] {
+            #expect(session.newItemProblem(in: directory, name: name) != nil)
+        }
+        let missing = directory.appendingPathComponent("no-parent")
+        session.createFile(named: "file.txt", in: missing)
+        #expect(!FileManager.default.fileExists(atPath: missing.path))
+        #expect(session.banner?.hasPrefix("新建文件失败") == true)
+    }
+}
+
+@Test @MainActor func redoingFileCreationDoesNotReplaceOccupiedPath() async throws {
+    try await withTemporaryDirectory { directory in
+        let workbench = makeWorkbench(in: directory, git: nil)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        session.setActive(false)
+        session.createFile(named: "a.txt", in: directory)
+        let file = directory.appendingPathComponent("a.txt")
+        session.undo()
+        await waitUntil { !session.isUndoing }
+        try "someone else".write(to: file, atomically: true, encoding: .utf8)
+        session.redo()
+        await waitUntil { !session.isUndoing }
+        #expect(try String(contentsOf: file, encoding: .utf8) == "someone else")
+        #expect(session.banner?.contains("原位置已经有别的东西") == true)
+    }
+}
+
+@Test @MainActor func undoingFileCreationDoesNotTrashAReplacementDirectory() async throws {
+    try await withTemporaryDirectory { directory in
+        let workbench = makeWorkbench(in: directory, git: nil)
+        workbench.openProject(directory)
+        let session = try #require(workbench.active)
+        session.setActive(false)
+        session.createFile(named: "a.txt", in: directory)
+        let file = directory.appendingPathComponent("a.txt")
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        session.undo()
+        await waitUntil { !session.isUndoing }
+        var isDirectory: ObjCBool = false
+        #expect(FileManager.default.fileExists(atPath: file.path, isDirectory: &isDirectory) && isDirectory.boolValue)
+        #expect(session.banner?.contains("文件已经被移走或替换了") == true)
     }
 }
 

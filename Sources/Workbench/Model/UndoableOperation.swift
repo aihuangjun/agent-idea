@@ -17,6 +17,8 @@ struct UndoableOperation: Identifiable {
         case addToGit(untracked: [String], ignored: [String])
         /// 新建了一个文件夹。撤销就是删掉它——只在它还空着的时候；重做再建一个。
         case createFolder(url: URL)
+        /// 新建文件的撤销进废纸篓，重做搬回来，保留创建之后写入的内容。
+        case createFile(url: URL, trashed: URL?)
         /// 一步里做了好几件（多选之后一起拖走、一起删）：撤销按倒序逐个撤，重做按正序逐个做。
         case batch([UndoableOperation])
     }

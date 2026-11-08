@@ -267,11 +267,15 @@ public struct GitStatusIndex: Equatable, Sendable {
 public struct ChangeGroups: Equatable, Sendable {
     public let tracked: [GitChange]
     public let untracked: [GitChange]
+    public let trackedTree: GitChangeTree
+    public let untrackedTree: GitChangeTree
 
     public init(changes: [GitChange]) {
         let sortedChanges = changes.sorted { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
         tracked = sortedChanges.filter { $0.kind != .untracked }
         untracked = sortedChanges.filter { $0.kind == .untracked }
+        trackedTree = GitChangeTree(changes: tracked)
+        untrackedTree = GitChangeTree(changes: untracked)
     }
 
     public var total: Int { tracked.count + untracked.count }
