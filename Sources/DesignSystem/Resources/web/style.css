@@ -157,10 +157,11 @@ body { font-family: var(--sans); -webkit-font-smoothing: antialiased; overflow-x
 .md-split .md-pane article.md { padding: 20px 28px 60px; }
 /* 摘要的真实高度由字体、路径和窗口宽度决定；正文占剩余空间，滚动条必须留在视口内。 */
 #root.editable-diff { display: flex; flex-direction: column; height: 100vh; min-width: 0; overflow: hidden; }
-.editable-diff .diff-summary { flex: 0 0 auto; min-width: 0; }
-.editable-diff .diff-summary .path,
-.editable-diff .diff-summary .hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.editable-diff .diff-summary .add, .editable-diff .diff-summary .del { flex-shrink: 0; }
+.editable-diff .diff-summary { flex: 0 0 auto; }
+.diff-summary { min-width: 0; }
+.diff-summary .path,
+.diff-summary .hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diff-summary .add, .diff-summary .del { flex-shrink: 0; }
 .diff-host, .merge-host { flex: 1 1 0; min-height: 0; height: auto; }
 .diff-summary .hint { margin-left: auto; color: var(--text-3); }
 .CodeMirror-merge, .CodeMirror-merge .CodeMirror { height: 100%; }
@@ -199,7 +200,10 @@ table.diff.side td.ln::after {
 table.diff.side td.ln { position: relative; }
 /* 单列可编辑 diff：新增行底色、被删行的只读小块 */
 .CodeMirror-linebackground.cm-diff-added { background: var(--add-bg); }
-.cm-diff-removed { background: var(--del-bg); font-family: var(--mono); font-size: var(--code-size); line-height: 1.6; color: var(--text-2); white-space: pre; padding: 0 12px 0 14px; border-left: 3px solid var(--del-line); }
+.cm-diff-removed { background: var(--del-bg); font-family: var(--mono); font-size: var(--code-size); line-height: 1.6; color: var(--text-2); white-space: pre; width: max-content; min-width: 100%; padding: 0 12px 0 14px; border-left: 3px solid var(--del-line); }
+.CodeMirror-wrap .cm-diff-removed { width: auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* 不换行时把删除块计入文档的实际宽度，不能只让文字溢出短的工作区正文。 */
+.diff-host .CodeMirror:not(.CodeMirror-wrap) .CodeMirror-sizer:has(.cm-diff-removed) { width: max-content; }
 .cm-diff-removed div { text-decoration: line-through; text-decoration-color: var(--del-line); }
 
 /* ---------- 空态 / 提示 ---------- */

@@ -4,6 +4,19 @@ import Foundation
 import Testing
 @testable import Workbench
 
+@Test @MainActor func wordWrapDefaultsToEnabledAndRemembersTheUsersChoice() {
+    let suite = "agentidea-tests-\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    let preferences = ReadingPreferences(defaults: defaults)
+    #expect(preferences.wordWrap)
+    preferences.wordWrap = false
+    #expect(!ReadingPreferences(defaults: defaults).wordWrap)
+    preferences.wordWrap = true
+    #expect(ReadingPreferences(defaults: defaults).wordWrap)
+}
+
 /// 外观：默认深色（0.8.0 之前应用固定深色，升级上来的人不该突然变浅），选过的存 UserDefaults。
 @Test @MainActor func appearancePreferenceRoundTrips() {
     let suite = "agentidea-tests-\(UUID().uuidString)"

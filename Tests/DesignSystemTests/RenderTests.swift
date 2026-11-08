@@ -11,7 +11,7 @@ import TestSupport
 @MainActor
 /// `prepare` 先跑（比如往编辑器里敲字），等 `settle` 秒让去抖的东西落地，再跑 `inspect` 取值。
 /// 新增的异步断言用 `waitFor` 等 JS 条件成立，避免固定时长等待。
-private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(width: 900, height: 600), snapshotName: String? = nil, prepare: String? = nil, settle: TimeInterval = 0, waitFor: String? = nil, configure: (ContentRenderer) -> Void = { _ in }, inspect: String) async throws -> Any? {
+private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(width: 900, height: 600), snapshotName: String? = nil, prepare: String? = nil, settle: TimeInterval = 0, resizeTo: CGSize? = nil, waitFor: String? = nil, configure: (ContentRenderer) -> Void = { _ in }, inspect: String) async throws -> Any? {
     let renderer = ContentRenderer()
     configure(renderer)
     let webView = renderer.webView
@@ -34,6 +34,7 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
         _ = try? await webView.evaluateJavaScript("(function(){ try { \(prepare); return true } catch (e) { return String(e) } })()")
         if settle > 0 { try? await Task.sleep(nanoseconds: UInt64(settle * 1_000_000_000)) }
     }
+    if let resizeTo { window.setContentSize(resizeTo) }
     if let waitFor {
         let deadline = Date().addingTimeInterval(10)
         var ready = false
@@ -112,7 +113,7 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     for mode in DiffViewMode.allCases {
         let result = try await renderAndInspect(
             RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
-                                edit: DiffEdit(oldText: oldLines.joined(separator: "\n"), newText: newLines.joined(separator: "\n"), filePath: "/x/a.txt")), revealFirstChange: true),
+                                edit: DiffEdit(oldText: oldLines.joined(separator: "\n"), newText: newLines.joined(separator: "\n"), filePath: "/x/a.txt")), wrap: true, revealFirstChange: true),
             inspect: """
             (() => {
               const cm = document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
@@ -443,6 +444,148 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
         """
     )
     #expect(result as? String == "true|true|true")
+}
+
+@Test @MainActor func unifiedDeletedLongLinesRemainReadableWithAndWithoutWrapping() async throws {
+    let deleted = String(repeating: "删除🙂_very_long_url/", count: 100) + "DELETED_END"
+    for wrap in [false, true] {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .unified, emptyReason: nil,
+                                edit: DiffEdit(oldText: deleted + "\nkeep\n", newText: "keep\n", filePath: "/x/a.txt")), wrap: wrap),
+            size: CGSize(width: 700, height: 400), snapshotName: "unified-deleted-long-\(wrap)",
+            prepare: "window.ide.setZoom(2.5)", resizeTo: CGSize(width: 480, height: 280),
+            waitFor: "innerWidth == 480 && Math.abs(document.querySelector('.CodeMirror').CodeMirror.defaultTextHeight() - parseFloat(getComputedStyle(document.querySelector('.CodeMirror')).lineHeight)) < 2 && (!document.querySelector('.CodeMirror-wrap') || document.querySelector('.cm-diff-removed').getBoundingClientRect().right <= 480)",
+            inspect: """
+            (() => {
+              const node = document.querySelector('.CodeMirror'), cm = node.CodeMirror, removed = node.querySelector('.cm-diff-removed');
+              const bar = node.querySelector('.CodeMirror-hscrollbar');
+              if (!cm.getOption('lineWrapping')) { bar.scrollLeft = 1e8; bar.dispatchEvent(new Event('scroll')); }
+              const text = removed.firstChild.firstChild, range = document.createRange();
+              range.setStart(text, text.length - 11); range.setEnd(text, text.length);
+              const end = range.getBoundingClientRect(), pane = node.getBoundingClientRect();
+              return [removed.textContent.endsWith('DELETED_END'), end.left >= pane.left && end.right <= pane.right,
+                      !cm.getOption('lineWrapping') || (removed.offsetHeight > cm.defaultTextHeight() * 2 && cm.charCoords({line: 0, ch: 0}, 'page').top >= removed.getBoundingClientRect().bottom - 1)].join('|');
+            })()
+            """
+        )
+        #expect(result as? String == "true|true|true", "wrap=\(wrap)")
+    }
+}
+
+@Test @MainActor func unifiedWrappingResetsHorizontalExtentAfterScrollingToDeletedLineEnd() async throws {
+    let deleted = String(repeating: "删除🙂_very_long_url/", count: 100) + "DELETED_END"
+    let result = try await renderAndInspect(
+        RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .unified, emptyReason: nil,
+                            edit: DiffEdit(oldText: deleted + "\nkeep\n", newText: "keep\n", filePath: "/x/a.txt")), wrap: false),
+        prepare: """
+        const bar = document.querySelector('.CodeMirror-hscrollbar');
+        bar.scrollLeft = 1e8; bar.dispatchEvent(new Event('scroll'));
+        window.ide.setWrap(true); window.ide.setZoom(2.5);
+        """,
+        resizeTo: CGSize(width: 480, height: 280),
+        waitFor: "innerWidth == 480 && document.querySelector('.cm-diff-removed').getBoundingClientRect().right <= 480 && Math.abs(document.querySelector('.CodeMirror').CodeMirror.defaultTextHeight() - parseFloat(getComputedStyle(document.querySelector('.CodeMirror')).lineHeight)) < 2",
+        inspect: """
+        (() => {
+          const node = document.querySelector('.CodeMirror'), cm = node.CodeMirror, removed = node.querySelector('.cm-diff-removed');
+          const info = cm.getScrollInfo(), pane = node.getBoundingClientRect(), rect = removed.getBoundingClientRect();
+          const wrapped = info.left == 0 && info.width <= info.clientWidth + 1 && rect.left >= pane.left && rect.right <= pane.right;
+          window.ide.setWrap(false);
+          const bar = node.querySelector('.CodeMirror-hscrollbar');
+          bar.scrollLeft = 1e8; bar.dispatchEvent(new Event('scroll'));
+          const updated = node.querySelector('.cm-diff-removed').firstChild.firstChild, range = document.createRange();
+          range.setStart(updated, updated.length - 11); range.setEnd(updated, updated.length);
+          const end = range.getBoundingClientRect();
+          return [wrapped, end.left >= pane.left && end.right <= pane.right, cm.getValue() == 'keep\\n'].join('|');
+        })()
+        """
+    )
+    #expect(result as? String == "true|true|true")
+}
+
+@Test @MainActor func diffResizeAndZoomKeepLastLineAndScrollbarsReachable() async throws {
+    let line = String(repeating: "中文🙂_https://host/path?key=value\t", count: 60) + "END_OF_FILE"
+    let text = "first\n" + (1...100).map { "context \($0)" }.joined(separator: "\n") + "\n" + line
+    for mode in DiffViewMode.allCases {
+        for wrap in [false, true] {
+            let result = try await renderAndInspect(
+                RenderPayload(.diff(path: String(repeating: "long/path/", count: 50), language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                    edit: DiffEdit(oldText: text, newText: "changed\n" + text, filePath: "/x/a.txt")), wrap: wrap),
+                size: CGSize(width: 1000, height: 650), snapshotName: "diff-resize-\(mode.rawValue)-\(wrap)",
+                prepare: "window.__expectedText = window.ide.getState().text; window.ide.setZoom(2.5)",
+                resizeTo: CGSize(width: 480, height: 280),
+                waitFor: "innerWidth == 480 && innerHeight == 280 && Array.from(document.querySelectorAll('.CodeMirror')).every(node => parseFloat(getComputedStyle(node).fontSize) > 30 && Math.abs(node.CodeMirror.defaultTextHeight() - parseFloat(getComputedStyle(node).lineHeight)) < 2)",
+                inspect: """
+                (() => {
+                  const checks = Array.from(document.querySelectorAll('.CodeMirror')).map(node => {
+                    const cm = node.CodeMirror, line = cm.lastLine(), ch = cm.getLine(line).length;
+                    cm.scrollIntoView({line, ch}, 0);
+                    const end = cm.charCoords({line, ch}, 'page'), pane = node.getBoundingClientRect();
+                    const hbar = node.querySelector('.CodeMirror-hscrollbar').getBoundingClientRect();
+                    return { fits: end.left >= pane.left && end.right <= pane.right + 1 && end.bottom <= pane.bottom + 1
+                             && (cm.getOption('lineWrapping') || (hbar.height >= 8 && hbar.bottom <= innerHeight + 1)),
+                             end: [end.left, end.right, end.bottom], pane: [pane.left, pane.right, pane.bottom], bar: [hbar.height, hbar.bottom] };
+                  });
+                  return [checks.every(check => check.fits) ? true : JSON.stringify(checks), window.ide.getState().text == window.__expectedText,
+                          document.documentElement.scrollWidth <= innerWidth + 1].join('|');
+                })()
+                """
+            )
+            #expect(result as? String == "true|true|true", "mode=\(mode), wrap=\(wrap)")
+        }
+    }
+}
+
+@Test @MainActor func readOnlyDiffLongLinesStayInsideTheirColumnsAtLargeZoom() async throws {
+    let line = String(repeating: "中文🙂_long_unbroken_value", count: 80) + "LINE_END"
+    let diff = UnifiedDiffParser.parse("--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-OLD_\(line)\n+NEW_\(line)\n")
+    for mode in DiffViewMode.allCases {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: String(repeating: "long/path/", count: 50), language: nil, diff: diff, mode: mode, emptyReason: nil)),
+            size: CGSize(width: 1000, height: 650), prepare: "window.ide.setZoom(2.5)", resizeTo: CGSize(width: 480, height: 280),
+            waitFor: "innerWidth == 480 && parseFloat(getComputedStyle(document.querySelector('table.diff')).fontSize) > 30",
+            inspect: """
+            (() => {
+              const cells = Array.from(document.querySelectorAll('td.src:not(.empty)'));
+              const fits = cells.every(cell => cell.scrollWidth <= cell.clientWidth + 1 && cell.textContent.endsWith('LINE_END'));
+              return [fits, document.querySelector('table.diff').getBoundingClientRect().right <= innerWidth + 1,
+                      document.documentElement.scrollWidth <= innerWidth + 1].join('|');
+            })()
+            """
+        )
+        #expect(result as? String == "true|true|true", "mode=\(mode)")
+    }
+}
+
+@Test @MainActor func diffThemeChangeKeepsUnsavedTextCursorAndUndoHistory() async throws {
+    for mode in DiffViewMode.allCases {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                edit: DiffEdit(oldText: "before\n", newText: "after\n", filePath: "/x/a.txt"))),
+            prepare: """
+            const cm = document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
+            cm.replaceRange('draft_', {line: 0, ch: 0}); cm.setCursor(0, 6);
+            window.ide.setTheme('light');
+            """,
+            inspect: """
+            (() => {
+              const state = window.ide.getState();
+              window.ide.undo();
+              return [state.text == 'draft_after\\n', state.cursor.ch == 6, window.ide.getState().text == 'after\\n'].join('|');
+            })()
+            """
+        )
+        #expect(result as? String == "true|true|true", "mode=\(mode)")
+    }
+}
+
+@Test @MainActor func diffLateBaselineRefreshesGuttersAndCounts() async throws {
+    let result = try await renderAndInspect(
+        RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil,
+                            edit: DiffEdit(oldText: "before\n", newText: "after\n", filePath: "/x/a.txt"))),
+        prepare: "window.ide.setBase({path: '/x/a.txt', base: 'after\\n'})",
+        inspect: "[document.querySelectorAll('.CodeMirror-gutter-background[class*=diff-gutter-]').length, document.querySelector('.diff-summary .add').textContent, document.querySelector('.diff-summary .del').textContent, window.ide.getState().text].join('|')"
+    )
+    #expect(result as? String == "0|+0|−0|after\n")
 }
 
 @Test @MainActor func sideDiffGuttersDistinguishChangesAndFollowWrappingAndTheme() async throws {

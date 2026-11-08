@@ -24,7 +24,7 @@ final class ReadingPreferences: ObservableObject {
     init(defaults: UserDefaults) {
         self.defaults = defaults
         diffMode = DiffViewMode(rawValue: defaults.string(forKey: "diff.mode") ?? "") ?? .sideBySide
-        wordWrap = defaults.bool(forKey: "editor.wrap")
+        wordWrap = defaults.object(forKey: "editor.wrap") as? Bool ?? true
         let saved = defaults.double(forKey: "editor.zoom")
         zoom = saved > 0 ? saved : 1
         theme = AppTheme(rawValue: defaults.string(forKey: "appearance") ?? "") ?? .dark

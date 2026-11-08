@@ -113,6 +113,7 @@
   let mergeView = null;    // 并排可编辑 diff 时的 MergeView（editor 是它右边那个）
   const diffGutterMarks = new Map(); // 各窗格的行句柄；重算时只清理自己的装饰，不动 MergeView 的差异底色
   let editTimer = null;    // 停手之后再发 edited，别每敲一个键就把整份文本送过去
+  let editorLayoutTimer = null;
   const EDIT_DEBOUNCE = 300;
 
   /* 正在编辑的是哪个文件：普通编辑器是 payload.path，可编辑 diff 是 edit.filePath。 */
@@ -304,12 +305,30 @@
   function flushEditor() {
     if (editTimer) { clearTimeout(editTimer); editTimer = null; postEdited(); }
     if (diffTimer) { clearTimeout(diffTimer); diffTimer = null; }
+    if (editorLayoutTimer !== null) { clearTimeout(editorLayoutTimer); editorLayoutTimer = null; }
     editor = null;
     mergeView = null;
     diffGutterMarks.clear();
     unifiedWidgets = [];
     changeLinesCache = null;
   }
+
+  /* 窗口 / 字号变化要同时重量两栏与单列删除块。setSize 会更新 noHScroll 行组件的实际宽度，
+   * 只 refresh 会留下旧的组件宽度；合并到下一轮处理，后台窗口也需要更新尺寸。 */
+  function refreshEditorLayout() {
+    if (!editor) return;
+    for (const cm of mergeView ? [mergeView.leftOriginal(), editor] : [editor]) {
+      cm.operation(() => { cm.setSize(null, null); cm.refresh(); });
+    }
+    for (const widget of unifiedWidgets) widget.changed();
+  }
+
+  function scheduleEditorLayout() {
+    if (!editor || editorLayoutTimer !== null) return;
+    editorLayoutTimer = setTimeout(() => { editorLayoutTimer = null; refreshEditorLayout(); }, 0);
+  }
+
+  window.addEventListener("resize", scheduleEditorLayout);
 
   /* ---------- 可编辑的 diff（工作区变更） ---------- */
 
@@ -430,7 +449,7 @@
         }
         // 删除发生在 newStart 那一行之前；删在文件末尾就挂在最后一行下面
         const at = Math.min(group.newStart, lastLine);
-        unifiedWidgets.push(editor.addLineWidget(at, node, { above: group.newStart <= lastLine, coverGutter: false }));
+        unifiedWidgets.push(editor.addLineWidget(at, node, { above: group.newStart <= lastLine, coverGutter: false, noHScroll: !!current.wrap }));
       }
     });
   }
@@ -1043,7 +1062,7 @@
         current.edit.oldText = typeof message.base === "string" ? message.base : "";
         changeLinesCache = null;
         if (mergeView) mergeView.leftOriginal().setValue(current.edit.oldText);
-        if (current.mode === "unified") decorateUnified(); else updateDiffSummary();
+        if (current.mode === "unified") decorateUnified(); else decorateSideBySideGutters(updateDiffSummary());
         reportChangePosition();
         return;
       }
@@ -1067,6 +1086,16 @@
         try { window.mermaid.initialize(mermaidOptions()); } catch (e) { /* 主题切换不该把正文弄没 */ }
       }
       if (current) {
+        // 主题切换会重建编辑器：先收取页面里的最新草稿、光标和历史，不能重画旧 payload。
+        if (editor) {
+          const state = window.ide.getState();
+          const target = current.edit || current;
+          if (current.edit) target.newText = state.text;
+          else if (current.kind === "markdown") target.markdown = state.text;
+          else target.text = state.text;
+          target.cursor = state.cursor;
+          target.history = state.history;
+        }
         current.scrollTop = window.ide.getScrollTop();
         window.ide.render(current);
       }
@@ -1074,7 +1103,7 @@
     setZoom(zoom) {
       document.documentElement.style.setProperty("--zoom", String(zoom));
       // 字号变了编辑器要重新量行高
-      if (editor) setTimeout(() => { if (editor) editor.refresh(); if (mergeView) mergeView.leftOriginal().refresh(); }, 0);
+      scheduleEditorLayout();
     },
     setWrap(wrap) {
       if (!current) return;
@@ -1082,6 +1111,8 @@
       if (editor) {
         editor.setOption("lineWrapping", current.wrap);
         if (mergeView) mergeView.leftOriginal().setOption("lineWrapping", current.wrap);
+        if (current.kind === "diff" && current.mode === "unified") decorateUnified();
+        refreshEditorLayout();
         return;
       }
       // 只读代码视图换行与否是两种 DOM 结构，切换要重画；保持滚动位置
