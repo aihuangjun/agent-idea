@@ -155,12 +155,22 @@ body { font-family: var(--sans); -webkit-font-smoothing: antialiased; overflow-x
 .md-split .editor-host { flex: 1 1 50%; min-width: 0; border-right: 1px solid var(--border); }
 .md-split .md-pane { flex: 1 1 50%; min-width: 0; overflow: auto; }
 .md-split .md-pane article.md { padding: 20px 28px 60px; }
-/* 可编辑 diff：summary 一行在上面，剩下的高度给编辑器 */
-.diff-host, .merge-host { height: calc(100vh - 29px); }
+/* 摘要的真实高度由字体、路径和窗口宽度决定；正文占剩余空间，滚动条必须留在视口内。 */
+#root.editable-diff { display: flex; flex-direction: column; height: 100vh; min-width: 0; overflow: hidden; }
+.editable-diff .diff-summary { flex: 0 0 auto; min-width: 0; }
+.editable-diff .diff-summary .path,
+.editable-diff .diff-summary .hint { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.editable-diff .diff-summary .add, .editable-diff .diff-summary .del { flex-shrink: 0; }
+.diff-host, .merge-host { flex: 1 1 0; min-height: 0; height: auto; }
 .diff-summary .hint { margin-left: auto; color: var(--text-3); }
 .CodeMirror-merge, .CodeMirror-merge .CodeMirror { height: 100%; }
 .CodeMirror-merge { border: none; }
 .CodeMirror-merge-pane { height: 100%; }
+/* WKWebView 的系统悬浮滚动条可能完全隐藏。显式设置宽高，让 CodeMirror 能正确测量并保留可拖动的轨道。 */
+.CodeMirror ::-webkit-scrollbar { width: 10px; height: 10px; }
+.CodeMirror ::-webkit-scrollbar-track, .CodeMirror ::-webkit-scrollbar-corner { background: var(--panel); }
+.CodeMirror ::-webkit-scrollbar-thumb { background: var(--text-3); border: 2px solid var(--panel); border-radius: 5px; }
+.CodeMirror ::-webkit-scrollbar-thumb:hover { background: var(--text-2); }
 .CodeMirror-merge-gap { background: var(--panel); border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
 /* merge 插件给「左边那份 diff」的两个窗格用同一组 l-* 类名，所以按窗格上色：基线窗格红、编辑窗格绿 */
 .CodeMirror-merge-left .CodeMirror-merge-l-chunk { background: var(--del-bg); }

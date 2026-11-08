@@ -984,6 +984,7 @@
       flushEditor();
       findState = null;
       current = payload;
+      root.classList.toggle("editable-diff", payload.kind === "diff" && !!payload.edit);
       changeIndex = -1;
       try {
         switch (payload.kind) {

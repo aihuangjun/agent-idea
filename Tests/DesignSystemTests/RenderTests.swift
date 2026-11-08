@@ -393,6 +393,58 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     #expect(summary as? String == "6,2,3,1,1")
 }
 
+/// 长行的可达性必须验证真实滚动条和行末坐标，不能只检查 lineWrapping 选项。
+@Test @MainActor func diffLongLinesHaveVisibleScrollbarsAndReachableLineEnds() async throws {
+    let line = String(repeating: "long_unbroken_value", count: 80) + "_END"
+    for mode in DiffViewMode.allCases {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: String(repeating: "long-directory/", count: 30) + "a.txt", language: nil,
+                                diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
+                                edit: DiffEdit(oldText: "old_" + line, newText: "new_" + line, filePath: "/x/a.txt")), wrap: false),
+            size: CGSize(width: 640, height: 320), snapshotName: "diff-long-lines-scrollbars-\(mode.rawValue)",
+            inspect: """
+            (() => Array.from(document.querySelectorAll('.CodeMirror-merge-pane .CodeMirror, .diff-host .CodeMirror')).map(node => {
+              const cm = node.CodeMirror, bar = node.querySelector('.CodeMirror-hscrollbar');
+              const visibleBeforeScrolling = getComputedStyle(bar).visibility == 'visible';
+              bar.scrollLeft = 1e7; bar.dispatchEvent(new Event('scroll'));
+              const rect = node.getBoundingClientRect(), end = cm.charCoords({line: 0, ch: cm.getLine(0).length}, 'page');
+              const b = bar.getBoundingClientRect(), css = getComputedStyle(bar);
+              return [css.display != 'none', visibleBeforeScrolling && css.visibility == 'visible', b.height >= 8, b.bottom <= innerHeight + 1,
+                      cm.getScrollInfo().left > 100, end.left <= rect.right && end.left >= rect.left].join(',');
+            }).join('|'))()
+            """
+        )
+        let expected = mode == .sideBySide ? "true,true,true,true,true,true|true,true,true,true,true,true" : "true,true,true,true,true,true"
+        #expect(result as? String == expected)
+    }
+}
+
+@Test @MainActor func diffLongUnbrokenLinesWrapInBothPanesAndCanToggleBack() async throws {
+    let line = String(repeating: "0123456789abcdef", count: 80)
+    let result = try await renderAndInspect(
+        RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil,
+                            edit: DiffEdit(oldText: "old_" + line, newText: "new_" + line, filePath: "/x/a.txt")), wrap: true),
+        size: CGSize(width: 640, height: 320), snapshotName: "diff-long-lines-wrapped",
+        prepare: "window.ide.setWrap(false); window.ide.setWrap(true)",
+        waitFor: "Array.from(document.querySelectorAll('.CodeMirror-hscrollbar')).every(bar => getComputedStyle(bar).display == 'none')",
+        inspect: """
+        (() => {
+          const panes = Array.from(document.querySelectorAll('.CodeMirror-merge-pane .CodeMirror'));
+          const wrapped = panes.every(node => {
+            const cm = node.CodeMirror, info = cm.getScrollInfo();
+            return cm.getOption('lineWrapping') && node.querySelector('pre.CodeMirror-line').getBoundingClientRect().height > cm.defaultTextHeight() * 2
+                   && info.width <= info.clientWidth + 1;
+          });
+          window.ide.setWrap(false);
+          const unwrapped = panes.every(node => !node.CodeMirror.getOption('lineWrapping') && node.CodeMirror.getScrollInfo().width > node.CodeMirror.getScrollInfo().clientWidth + 100);
+          window.ide.setWrap(true);
+          return [wrapped, unwrapped, panes.every(node => node.CodeMirror.getOption('lineWrapping'))].join('|');
+        })()
+        """
+    )
+    #expect(result as? String == "true|true|true")
+}
+
 @Test @MainActor func sideDiffGuttersDistinguishChangesAndFollowWrappingAndTheme() async throws {
     let long = String(repeating: "value ", count: 45)
     let edit = DiffEdit(oldText: "start\nold \(long)\nkeep A\nkeep B\nremoved\nkeep C\nkeep D\nend\n",

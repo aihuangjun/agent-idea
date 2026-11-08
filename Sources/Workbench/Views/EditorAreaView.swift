@@ -226,6 +226,7 @@ private struct EditorHeader: View {
             }
         }
         if tab.isDiff {
+            if case .editableDiff = session.activeContent { wordWrapControl }
             IconButton(ToolWindowIcon.refresh, help: "刷新文件与 diff（⌘R）", size: 22) { session.refreshAll() }
             Picker("", selection: $preferences.diffMode) {
                 ForEach(DiffViewMode.allCases, id: \.self) { Text($0.label).tag($0) }
@@ -255,8 +256,7 @@ private struct EditorHeader: View {
             if !session.isEditable(tab) {
                 Text("只读（文件太大）").font(Theme.smallFont).foregroundStyle(Theme.mutedText)
             }
-            Toggle("自动换行", isOn: $preferences.wordWrap)
-                .toggleStyle(.checkbox).controlSize(.small).font(Theme.smallFont)
+            wordWrapControl
             if let url = tab.fileURL, let change = session.change(for: url) {
                 Button {
                     session.openDiff(change, pinned: true)
@@ -267,6 +267,12 @@ private struct EditorHeader: View {
                 .foregroundStyle(Theme.vcsModified)
             }
         }
+    }
+
+    private var wordWrapControl: some View {
+        Toggle("自动换行", isOn: $preferences.wordWrap)
+            .toggleStyle(.checkbox).controlSize(.small).font(Theme.smallFont)
+            .help("自动折行显示长行；关闭后可拖动底部横向滚动条查看完整内容")
     }
 }
 
