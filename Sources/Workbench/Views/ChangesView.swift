@@ -55,29 +55,44 @@ struct ChangesView: View {
         let visible = (trackedCollapsed ? [] : tracked) + (untrackedCollapsed ? [] : untracked)
         // 每次更新只扫一次可见选中项；不能让每个文件行各扫一遍整棵树，多选大列表会变成平方开销。
         let selected = visible.compactMap(\.change).filter { session.changeSelection.contains($0.path) }
-        return ScrollView {
-            LazyVStack(spacing: 0) {
-                if !session.changeGroups.tracked.isEmpty {
-                    GroupHeader(title: "变更", changes: session.changeGroups.tracked, commit: commit, isCollapsed: $trackedCollapsed)
-                    if !trackedCollapsed {
-                        treeRows(tracked, selected: selected, collapsed: $trackedDirectories, commit: commit)
+        return ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    if !session.changeGroups.tracked.isEmpty {
+                        GroupHeader(title: "变更", changes: session.changeGroups.tracked, commit: commit, isCollapsed: $trackedCollapsed)
+                        if !trackedCollapsed {
+                            treeRows(tracked, selected: selected, collapsed: $trackedDirectories, commit: commit)
+                        }
+                    }
+                    if !session.changeGroups.untracked.isEmpty {
+                        GroupHeader(title: "未跟踪文件", changes: session.changeGroups.untracked, commit: commit, isCollapsed: $untrackedCollapsed)
+                        if !untrackedCollapsed {
+                            treeRows(untracked, selected: selected, collapsed: $untrackedDirectories, commit: commit)
+                        }
                     }
                 }
-                if !session.changeGroups.untracked.isEmpty {
-                    GroupHeader(title: "未跟踪文件", changes: session.changeGroups.untracked, commit: commit, isCollapsed: $untrackedCollapsed)
-                    if !untrackedCollapsed {
-                        treeRows(untracked, selected: selected, collapsed: $untrackedDirectories, commit: commit)
-                    }
+                .padding(.vertical, 4)
+            }
+            .focusable()
+            .focusEffectDisabled()
+            .focused($isFocused)
+            // ⌫ / fn⌫ 删除选中的（IDEA 的 Delete），先确认
+            .onKeyPress(.delete) { requestDeleteOfSelection(commit: commit) }
+            .onKeyPress(.deleteForward) { requestDeleteOfSelection(commit: commit) }
+            .onKeyPress(.upArrow) { session.navigateChange(.previous); return .handled }
+            .onKeyPress(.downArrow) { session.navigateChange(.next); return .handled }
+            .onChange(of: session.activeTab?.change?.path) { _, path in
+                guard let path else { return }
+                trackedCollapsed = false
+                untrackedCollapsed = false
+                trackedDirectories = trackedDirectories.filter { !path.hasPrefix($0 + "/") }
+                untrackedDirectories = untrackedDirectories.filter { !path.hasPrefix($0 + "/") }
+                Task { @MainActor in
+                    await Task.yield()
+                    proxy.scrollTo("file:" + path, anchor: .center)
                 }
             }
-            .padding(.vertical, 4)
         }
-        .focusable()
-        .focusEffectDisabled()
-        .focused($isFocused)
-        // ⌫ / fn⌫ 删除选中的（IDEA 的 Delete），先确认
-        .onKeyPress(.delete) { requestDeleteOfSelection(commit: commit) }
-        .onKeyPress(.deleteForward) { requestDeleteOfSelection(commit: commit) }
     }
 
     /// 行的「选中」由这里算好再传进去：行视图只按传进去的值重画，自己去读会话的话 SwiftUI 看不出行有变化，
@@ -86,6 +101,7 @@ struct ChangesView: View {
         ChangeRow(
             session: session, commit: commit, change: change,
             depth: depth,
+            statistics: session.diffStatistics[change.path],
             isSelected: session.changeSelection.contains(change.path),
             actionTargets: selected.count > 1 && session.changeSelection.contains(change.path) ? selected : [change],
             press: { press(change, modifiers: $0) },
@@ -247,6 +263,7 @@ private struct ChangeRow: View {
     @ObservedObject var commit: CommitController
     let change: GitChange
     let depth: Int
+    let statistics: DiffLineCounts?
     let isSelected: Bool
     let actionTargets: [GitChange]
     /// 按下：返回这是不是一次普通单击（⌘ / ⇧点击只改选中，不算）。
@@ -270,7 +287,7 @@ private struct ChangeRow: View {
             ))
             .toggleStyle(.checkbox).controlSize(.small).labelsHidden()
             Image(systemName: icon.systemName).font(.system(size: 12)).foregroundStyle(icon.color).frame(width: 16)
-            ChangeFileLabel(change: change, showsDirectory: false)
+            ChangeFileLabel(change: change, showsDirectory: false, statistics: statistics)
         }
         .padding(.trailing, 10)
         .frame(height: Theme.treeRowHeight)

@@ -95,6 +95,9 @@ final class ProjectSession: ObservableObject, Identifiable {
     }
     /// 当前正文里前面 / 后面还有没有变更可跳（页面报上来的，见 `setChangePosition`）。
     @Published private(set) var changePosition = ContentRenderer.ChangePosition()
+    @Published private(set) var diffStatistics: [String: DiffLineCounts] = [:]
+    private var pendingDiffReveal: (tabID: String, edge: DiffEdge)?
+    private var isSteppingDiff = false
     @Published var isFindShown = false
     @Published var findQuery = ""
     @Published var findCaseSensitive = false
@@ -711,13 +714,54 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     /// F7 / ⇧F7、标题条的上下箭头：让 WebView 跳到下一处 / 上一处变更。
     func navigateChange(_ step: ContentRenderer.ChangeStep) {
-        guard isActive, canNavigateChanges else { return }
-        renderer.navigateChange(step)
+        guard isActive, canNavigateChanges, !isSteppingDiff, activeContent != .loading, let tab = activeTab else { return }
+        isSteppingDiff = true
+        renderer.navigateChange(step) { [weak self] result in
+            guard let self else { return }
+            guard self.isActive, self.activeTabID == tab.id, result == .boundary else { self.isSteppingDiff = false; return }
+            self.openAdjacentDiff(step, from: tab)
+        }
+    }
+
+    private func openAdjacentDiff(_ step: ContentRenderer.ChangeStep, from tab: EditorTab) {
+        // 必须先收取最新草稿：预览标签一旦被替换，它的文档和尚未去抖上报的编辑都会被释放。
+        renderer.currentState { [weak self] state in
+            guard let self else { return }
+            defer { self.isSteppingDiff = false }
+            // 取状态期间用户可能切走，git 刷新也可能改变相邻文件；只使用完成时仍有效的目标。
+            guard self.isActive, self.activeTabID == tab.id, let change = self.adjacentDiff(step) else { return }
+            _ = self.remember(state, of: tab.id)
+            let targetID = tab.commitDiff.map { EditorTab.id(forCommit: $0.commit, change: change) } ?? EditorTab.id(forDiff: change)
+            self.pendingDiffReveal = (targetID, step.entryEdge)
+            if let commit = tab.commitDiff?.commit { self.openCommitDiff(change, in: commit) }
+            else { self.openDiff(change) }
+        }
+    }
+
+    /// 同一份文件顺序供键盘、正文和工具栏使用；折叠目录仍可跨入，列表负责露出选中的文件。
+    private func adjacentDiff(_ step: ContentRenderer.ChangeStep) -> GitChange? {
+        guard let tab = activeTab, let current = tab.diffChange else { return nil }
+        let changes: [GitChange]
+        if let commit = tab.commitDiff?.commit { changes = history?.filesByCommit[commit.id] ?? [] }
+        else { changes = (changeGroups.trackedTree.rows + changeGroups.untrackedTree.rows).compactMap(\.change) }
+        guard let path = DiffFileNavigation.adjacentPath(in: changes.map(\.path), current: current.path, direction: step) else { return nil }
+        return changes.first { $0.path == path }
+    }
+
+    func canNavigateChange(_ step: ContentRenderer.ChangeStep) -> Bool {
+        canNavigateChanges && ((step == .next ? changePosition.hasNext : changePosition.hasPrevious) || adjacentDiff(step) != nil)
     }
 
     /// 页面报上来的：前面 / 后面还有没有变更可跳。到头的方向箭头与菜单项灰掉（IDEA 一样）。
     func setChangePosition(_ position: ContentRenderer.ChangePosition) {
         if position != changePosition { changePosition = position }
+    }
+
+    /// 活动 diff 的编辑统计与正文共用差异分组；尚未保存的修改也要反映到文件列表。
+    func updateDiffStatistics(path: String, counts: DiffLineCounts) {
+        guard let tab = activeTab, let change = tab.change, documentURL(for: tab)?.path == path,
+              diffStatistics[change.path] != counts else { return }
+        diffStatistics[change.path] = counts
     }
 
     func pin(_ tabID: String) {
@@ -1119,7 +1163,10 @@ final class ProjectSession: ObservableObject, Identifiable {
             let directory = HTMLPreviewDocument.resourceDirectory(for: URL(fileURLWithPath: path), in: project.root)
             rendered = .html(path: path, text: text, documentDirectory: directory)
         }
-        renderer.render(RenderPayload(rendered, scrollTop: tab.scrollTop, wrap: preferences.wordWrap, revealFirstChange: tab.isDiff && !tab.hasDiffPosition))
+        let edge = pendingDiffReveal.flatMap { $0.tabID == tab.id ? $0.edge : nil }
+        renderer.render(RenderPayload(rendered, scrollTop: tab.scrollTop, wrap: preferences.wordWrap,
+                                      revealChange: edge ?? (tab.isDiff && !tab.hasDiffPosition ? .first : nil)))
+        if edge != nil { pendingDiffReveal = nil }
     }
 
     /// 状态栏右侧那几格。可编辑的 diff 显示的是它编辑的那个文档的（行数、编码、语言）。
@@ -1154,6 +1201,7 @@ final class ProjectSession: ObservableObject, Identifiable {
                 let snapshot = try await git.snapshot(repositoryRoot: repositoryRoot)
                 guard !Task.isCancelled, let self else { return }
                 self.apply(snapshot)
+                await self.refreshDiffStatistics(for: snapshot, using: git, repositoryRoot: repositoryRoot)
             } catch {
                 // 被更新的一次刷新顶掉了：不是出错，什么都不用做
                 guard !Task.isCancelled, let self else { return }
@@ -1164,6 +1212,24 @@ final class ProjectSession: ObservableObject, Identifiable {
             if let self, self.gitTask?.isCancelled == false, self.isRefreshingGit { self.isRefreshingGit = false }
         }
         gitTask = task
+    }
+
+    /// 行数失败不影响 status；磁盘结果只替换磁盘统计，尚未保存的草稿继续使用正文回传的值。
+    private func refreshDiffStatistics(for snapshot: GitSnapshot, using git: GitClient, repositoryRoot: URL) async {
+        do {
+            var statistics = try await git.diffStatistics(changes: snapshot.changes, repositoryRoot: repositoryRoot)
+            guard !Task.isCancelled else { return }
+            for tab in tabs {
+                guard let change = tab.change, let documentID = documentID(for: tab),
+                      draftStore[documentID] != nil, let counts = diffStatistics[change.path] else { continue }
+                statistics[change.path] = counts
+            }
+            diffStatistics = statistics
+        } catch {
+            guard !Task.isCancelled else { return }
+            diffStatistics = [:]
+            Log.warn("git", "行数统计失败：\(error)")
+        }
     }
 
     private func apply(_ snapshot: GitSnapshot) {

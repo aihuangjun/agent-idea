@@ -124,6 +124,29 @@ public struct GitClient: Sendable {
         return nil
     }
 
+    // MARK: - Diff 行数统计
+
+    /// 工作区对比 HEAD（包含暂存与未暂存），未跟踪文件按整份新增计数。
+    public func diffStatistics(changes: [GitChange], repositoryRoot: URL) async throws -> [String: DiffLineCounts] {
+        guard !changes.isEmpty else { return [:] }
+        var result: [String: DiffLineCounts] = [:]
+        if changes.contains(where: { $0.kind != .untracked }) {
+            let base = await hasHead(repositoryRoot: repositoryRoot) ? "HEAD" : Self.emptyTree
+            let output = try await run(["diff", "--numstat", "-z", "--no-ext-diff", "--find-renames", base, "--"], in: repositoryRoot)
+            result = GitNumstatParser.parse(output.standardOutput)
+        }
+        for change in changes where change.kind == .untracked {
+            try Task.checkCancellation()
+            result[change.path] = try? DiffLineCounts.addedFile(at: repositoryRoot.appendingPathComponent(change.path))
+        }
+        return result
+    }
+
+    public func diffStatistics(in commit: GitCommit, repositoryRoot: URL) async throws -> [String: DiffLineCounts] {
+        let output = try await run(["diff", "--numstat", "-z", "--no-ext-diff", "--find-renames", commit.diffBase, commit.hash, "--"], in: repositoryRoot)
+        return GitNumstatParser.parse(output.standardOutput)
+    }
+
     // MARK: - 提交历史
 
     /// 当前分支的提交，新的在前（按提交时间 `%ct`，与界面上显示的时间一致）。`skip` 用来翻页。仓库还没有提交时返回空数组。

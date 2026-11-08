@@ -75,7 +75,7 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
         history.select(first)
         await waitUntil { history.filesByCommit[first.id] != nil }
         #expect(history.filesByCommit[first.id]?.map(\.path) == ["b.md", "src/a.swift"])
-        #expect(runner.calls(startingWith: "diff").last == ["diff", "--name-status", "-z", "--find-renames", first.parents[0], first.hash])
+        #expect(runner.calls(startingWith: "diff").contains(["diff", "--name-status", "-z", "--find-renames", first.parents[0], first.hash]))
         history.moveSelection(by: 1)
         #expect(history.selectedCommit?.subject == "提交 1")
 

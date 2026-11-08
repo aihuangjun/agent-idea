@@ -113,7 +113,7 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     for mode in DiffViewMode.allCases {
         let result = try await renderAndInspect(
             RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
-                                edit: DiffEdit(oldText: oldLines.joined(separator: "\n"), newText: newLines.joined(separator: "\n"), filePath: "/x/a.txt")), wrap: true, revealFirstChange: true),
+                                edit: DiffEdit(oldText: oldLines.joined(separator: "\n"), newText: newLines.joined(separator: "\n"), filePath: "/x/a.txt")), wrap: true, revealChange: .first),
             inspect: """
             (() => {
               const cm = document.querySelector('.CodeMirror-merge-editor .CodeMirror, .diff-host .CodeMirror').CodeMirror;
@@ -127,7 +127,7 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
         #expect(result as? String == "400|true|true|1|600", "\(mode)")
         let restored = try await renderAndInspect(
             RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
-                                edit: DiffEdit(oldText: oldLines.joined(separator: "\n"), newText: newLines.joined(separator: "\n"), filePath: "/x/a.txt", cursor: EditorCursor(line: 10, ch: 2))), scrollTop: 0, revealFirstChange: false),
+                                edit: DiffEdit(oldText: oldLines.joined(separator: "\n"), newText: newLines.joined(separator: "\n"), filePath: "/x/a.txt", cursor: EditorCursor(line: 10, ch: 2))), scrollTop: 0),
             inspect: "[window.ide.getState().cursor.line, window.ide.getState().cursor.ch, window.ide.getState().scrollTop].join('|')"
         )
         #expect(restored as? String == "10|2|0", "回到页首的已访问标签也不能再次自动跳走：\(mode)")
@@ -139,7 +139,7 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     for (old, new, expected) in examples {
         let result = try await renderAndInspect(
             RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .unified, emptyReason: nil,
-                                edit: DiffEdit(oldText: old, newText: new, filePath: "/x/a.txt")), revealFirstChange: true),
+                                edit: DiffEdit(oldText: old, newText: new, filePath: "/x/a.txt")), revealChange: .first),
             inspect: "window.ide.getState().cursor.line"
         )
         #expect((result as? NSNumber)?.intValue == expected)
@@ -150,7 +150,7 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     let diff = UnifiedDiffParser.parse("--- a/a.txt\n+++ b/a.txt\n@@ -1,4 +1,4 @@\n-first\n+FIRST\n same\n-second\n+SECOND\n end\n")
     for mode in DiffViewMode.allCases {
         let result = try await renderAndInspect(
-            RenderPayload(.diff(path: "a.txt", language: nil, diff: diff, mode: mode, emptyReason: nil), revealFirstChange: true),
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: diff, mode: mode, emptyReason: nil), revealChange: .first),
             inspect: "[document.querySelector('tr.current-change td.src').textContent.includes('first') || document.querySelector('tr.current-change td.src').textContent.includes('FIRST'), window.ide.navigateChange('next').index].join('|')"
         )
         #expect(result as? String == "true|1")
@@ -162,7 +162,7 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
         let positions = Locked<[ContentRenderer.ChangePosition]>([])
         let result = try await renderAndInspect(
             RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: mode, emptyReason: nil,
-                                edit: DiffEdit(oldText: "kept\nremoved", newText: "kept", filePath: "/x/a.txt")), revealFirstChange: true),
+                                edit: DiffEdit(oldText: "kept\nremoved", newText: "kept", filePath: "/x/a.txt")), revealChange: .first),
             configure: { $0.onChangePosition = { positions.value.append($0) } },
             inspect: "[window.ide.getState().cursor.line, window.ide.navigateChange('next').index, window.ide.navigateChange('next').total].join('|')"
         )
@@ -739,12 +739,15 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     let positions = Locked<[ContentRenderer.ChangePosition]>([])
     let table = try await renderAndInspect(
         RenderPayload(.diff(path: "a.txt", language: nil, diff: diff, mode: .sideBySide, emptyReason: nil)),
-        prepare: "window.__seq = [JSON.stringify(window.ide.navigateChange('next')), document.querySelectorAll('tr.current-change').length, JSON.stringify(window.ide.navigateChange('next')), document.querySelectorAll('tr.current-change').length, JSON.stringify(window.ide.navigateChange('next')), JSON.stringify(window.ide.navigateChange('previous')), (function(){ document.dispatchEvent(new KeyboardEvent('keydown', {key: 'F7', bubbles: true, cancelable: true})); return document.querySelector('tr.current-change td.ln').textContent; })()].join('|')",
-        settle: 0.3,
-        configure: { renderer in renderer.onChangePosition = { position in positions.value.append(position) } },
-        inspect: "window.__seq"
+        prepare: "window.__seq = [JSON.stringify(window.ide.navigateChange('next')), document.querySelectorAll('tr.current-change').length, JSON.stringify(window.ide.navigateChange('next')), document.querySelectorAll('tr.current-change').length, JSON.stringify(window.ide.navigateChange('next')), JSON.stringify(window.ide.navigateChange('previous'))].join('|'); document.dispatchEvent(new KeyboardEvent('keydown', {key: 'F7', bubbles: true, cancelable: true}))",
+        waitFor: "document.querySelector('tr.current-change td.ln').textContent == '5'",
+        configure: { renderer in
+            renderer.onChangePosition = { position in positions.value.append(position) }
+            renderer.onDiffNavigate = { [weak renderer] step, _ in renderer?.navigateChange(step) }
+        },
+        inspect: "window.__seq + '|' + document.querySelector('tr.current-change td.ln').textContent"
     )
-    #expect(table as? String == "{\"index\":0,\"total\":2}|1|{\"index\":1,\"total\":2}|2|{\"index\":1,\"total\":2}|{\"index\":0,\"total\":2}|5")
+    #expect(table as? String == "{\"index\":0,\"total\":2,\"moved\":true}|1|{\"index\":1,\"total\":2,\"moved\":true}|2|{\"index\":1,\"total\":2,\"moved\":false}|{\"index\":0,\"total\":2,\"moved\":true}|5")
     #expect(positions.value.first == ContentRenderer.ChangePosition(hasPrevious: false, hasNext: true))
     #expect(positions.value.last == ContentRenderer.ChangePosition(hasPrevious: true, hasNext: false))
 
@@ -752,7 +755,7 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
         RenderPayload(.diff(path: "a.txt", language: nil, diff: diff, mode: .unified, emptyReason: nil)),
         inspect: "[JSON.stringify(window.ide.navigateChange('previous')), JSON.stringify(window.ide.navigateChange('next')), document.querySelectorAll('tr.current-change').length].join('|')"
     )
-    #expect(unified as? String == "{\"index\":-1,\"total\":2}|{\"index\":0,\"total\":2}|2")
+    #expect(unified as? String == "{\"index\":-1,\"total\":2,\"moved\":false}|{\"index\":0,\"total\":2,\"moved\":true}|2")
 
     // 可编辑 diff（并排是 MergeView 的 chunk，单列是行级 diff 的分组）与带基线的编辑器：光标在改动的第一行
     let edit = DiffEdit(oldText: "a\nb\nc\nd\ne\nf\n", newText: "a\nB\nc\nd\nE\nf\n", filePath: "/x/a.txt")
@@ -781,6 +784,53 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
         inspect: "String(window.ide.navigateChange('next'))"
     )
     #expect(noBase as? String == "null")
+}
+
+@Test @MainActor func tallReadOnlyDiffChangesReachBothFileBoundaries() async throws {
+    let long = String(repeating: "very_long_unbroken_url_segment_", count: 150)
+    let diff = UnifiedDiffParser.parse("--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-OLD_\(long)\n+NEW_\(long)\n")
+    for mode in DiffViewMode.allCases {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: diff, mode: mode, emptyReason: nil), revealChange: .first),
+            size: CGSize(width: 480, height: 280),
+            inspect: """
+            (() => {
+              const row = document.querySelector('tr.current-change'), rect = row.getBoundingClientRect();
+              return [rect.top < 0 && rect.bottom > innerHeight,
+                      window.ide.navigateChange('previous').moved === false,
+                      window.ide.navigateChange('next').moved === false].join('|');
+            })()
+            """
+        )
+        #expect(result as? String == "true|true|true", "高于视口的当前变更仍应到达文件边界：\(mode)")
+    }
+}
+
+@Test @MainActor func diffArrowKeysRequestNavigationButLeaveModifierKeysAndCodeEditorsAlone() async throws {
+    let steps = Locked<[String]>([])
+    let keys = """
+    (() => {
+      const dispatch = options => document.dispatchEvent(new KeyboardEvent('keydown', {bubbles: true, cancelable: true, ...options}));
+      return [dispatch({key: 'ArrowDown'}), dispatch({key: 'ArrowUp', shiftKey: true}), dispatch({key: 'ArrowDown', metaKey: true}), dispatch({key: 'ArrowUp'})].join('|');
+    })()
+    """
+    let diff = try await renderAndInspect(
+        RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .unified, emptyReason: nil,
+                            edit: DiffEdit(oldText: "old", newText: "new", filePath: "/x/a.txt"))),
+        prepare: "window.__keys = \(keys)",
+        waitFor: "window.__received == 2",
+        configure: { renderer in
+            renderer.onDiffNavigate = { [weak renderer] step, path in
+                steps.value.append(step.rawValue + ":" + path)
+                renderer?.webView.evaluateJavaScript("window.__received = (window.__received || 0) + 1")
+            }
+        },
+        inspect: "window.__keys"
+    )
+    #expect(diff as? String == "false|true|true|false")
+    #expect(steps.value == ["next:a.txt", "previous:a.txt"])
+    let code = try await renderAndInspect(RenderPayload(.code(path: "/x/a.txt", text: "one\ntwo", language: nil, editable: true)), inspect: keys)
+    #expect(code as? String == "true|true|true|true")
 }
 
 /// 浅色主题：`setTheme` 之后根元素带上 light、CSS 变量与语法色换成浅色那一套，正文重画出来还在。

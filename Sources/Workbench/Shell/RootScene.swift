@@ -132,10 +132,10 @@ public struct AgentIDEARootScene: Scene {
                 // IDEA 的 F7 / ⇧F7。焦点在 WebView 里时页面自己处理（render.js），这里管焦点在别处的情况
                 Button("下一处变更") { workbench.active?.navigateChange(.next) }
                     .keyboardShortcut(.f7, modifiers: [])
-                    .disabled(!(workbench.active.map { $0.canNavigateChanges && $0.changePosition.hasNext } ?? false))
+                    .disabled(!(workbench.active?.canNavigateChange(.next) ?? false))
                 Button("上一处变更") { workbench.active?.navigateChange(.previous) }
                     .keyboardShortcut(.f7, modifiers: .shift)
-                    .disabled(!(workbench.active.map { $0.canNavigateChanges && $0.changePosition.hasPrevious } ?? false))
+                    .disabled(!(workbench.active?.canNavigateChange(.previous) ?? false))
                 Divider()
                 Button("刷新") { workbench.active?.refreshAll() }
                     .keyboardShortcut("r", modifiers: .command)

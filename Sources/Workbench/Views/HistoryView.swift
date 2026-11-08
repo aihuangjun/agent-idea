@@ -174,32 +174,47 @@ private struct CommitDetails: View {
     @ObservedObject var history: HistoryController
     let commit: GitCommit
     @State private var clicks = DoubleClickDetector(interval: NSEvent.doubleClickInterval)
+    @FocusState private var filesFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(commit.subject).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text).textSelection(.enabled)
-                    if !commit.body.isEmpty {
-                        Text(commit.body).font(Theme.smallFont).foregroundStyle(Theme.secondaryText).textSelection(.enabled).lineLimit(8)
-                    }
-                    HStack(spacing: 6) {
-                        Text(commit.authorName).help(commit.authorEmail)
-                        Text("·")
-                        Text(DateText.full(commit.commitDate))
-                        if commit.authorDateDiffers {
-                            // rebase / cherry-pick 过的提交，作者时间和落库时间对不上：两个都给出来，省得看着像排错了序
-                            Text("（编写于 \(DateText.full(commit.authorDate))）")
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(commit.subject).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text).textSelection(.enabled)
+                        if !commit.body.isEmpty {
+                            Text(commit.body).font(Theme.smallFont).foregroundStyle(Theme.secondaryText).textSelection(.enabled).lineLimit(8)
                         }
-                        Text("·")
-                        Text(commit.shortHash).font(.system(size: 11, design: .monospaced)).help(commit.hash).textSelection(.enabled)
+                        HStack(spacing: 6) {
+                            Text(commit.authorName).help(commit.authorEmail)
+                            Text("·")
+                            Text(DateText.full(commit.commitDate))
+                            if commit.authorDateDiffers {
+                                // rebase / cherry-pick 过的提交，作者时间和落库时间对不上：两个都给出来，省得看着像排错了序
+                                Text("（编写于 \(DateText.full(commit.authorDate))）")
+                            }
+                            Text("·")
+                            Text(commit.shortHash).font(.system(size: 11, design: .monospaced)).help(commit.hash).textSelection(.enabled)
+                        }
+                        .font(Theme.smallFont).foregroundStyle(Theme.mutedText)
+                        Divider().overlay(Theme.border).padding(.top, 2)
+                        files
+                            .focusable()
+                            .focusEffectDisabled()
+                            .focused($filesFocused)
+                            .onKeyPress(.upArrow) { session.navigateChange(.previous); return .handled }
+                            .onKeyPress(.downArrow) { session.navigateChange(.next); return .handled }
                     }
-                    .font(Theme.smallFont).foregroundStyle(Theme.mutedText)
-                    Divider().overlay(Theme.border).padding(.top, 2)
-                    files
+                    .padding(.horizontal, 10).padding(.vertical, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.horizontal, 10).padding(.vertical, 8)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .onChange(of: session.activeTab?.id) { _, _ in
+                    guard let active = session.activeTab?.commitDiff, active.commit.id == commit.id else { return }
+                    Task { @MainActor in
+                        await Task.yield()
+                        proxy.scrollTo("history-file:" + active.change.path, anchor: .center)
+                    }
+                }
             }
             if let status = history.status {
                 StatusLine(status: status) { history.dismissStatus() }
@@ -221,7 +236,10 @@ private struct CommitDetails: View {
                 LazyVStack(spacing: 0) {
                     ForEach(files) { change in
                         CommitFileRow(session: session, history: history, clicks: clicks, commit: commit, change: change,
-                                      isActive: session.activeTab?.commitDiff.map { $0.commit.id == commit.id && $0.change.path == change.path } ?? false)
+                                      isActive: session.activeTab?.commitDiff.map { $0.commit.id == commit.id && $0.change.path == change.path } ?? false,
+                                      statistics: history.statisticsByCommit[commit.id]?[change.path],
+                                      focus: { filesFocused = true })
+                            .id("history-file:" + change.path)
                     }
                 }
                 .padding(.horizontal, -10)
@@ -245,13 +263,15 @@ private struct CommitFileRow: View {
     let commit: GitCommit
     let change: GitChange
     let isActive: Bool
+    let statistics: DiffLineCounts?
+    let focus: () -> Void
     @State private var isHovering = false
 
     var body: some View {
         let icon = FileIcon.file(named: change.fileName)
         HStack(spacing: 6) {
             Image(systemName: icon.systemName).font(.system(size: 12)).foregroundStyle(icon.color).frame(width: 16)
-            ChangeFileLabel(change: change)
+            ChangeFileLabel(change: change, statistics: statistics)
         }
         .padding(.horizontal, 10)
         .frame(height: Theme.treeRowHeight)
@@ -259,6 +279,7 @@ private struct CommitFileRow: View {
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .onPress { _ in
+            focus()
             session.openCommitDiff(change, in: commit, pinned: false)
         } release: { isClick in
             if isClick, clicks.registerClick(on: commit.hash + change.path) { session.openCommitDiff(change, in: commit, pinned: true) }

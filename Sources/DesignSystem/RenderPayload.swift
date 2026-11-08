@@ -95,14 +95,14 @@ public struct RenderPayload: Equatable, Sendable {
     public var scrollTop: Double
     /// 代码是否自动换行。
     public var wrap: Bool
-    /// 首次打开 diff 时定位第一处差异；恢复标签位置时为 false。
-    public var revealFirstChange: Bool
+    /// 首次打开或跨文件导航时的落点；nil 恢复标签原来的位置。
+    public var revealChange: DiffEdge?
 
-    public init(_ content: Content, scrollTop: Double = 0, wrap: Bool = false, revealFirstChange: Bool = false) {
+    public init(_ content: Content, scrollTop: Double = 0, wrap: Bool = false, revealChange: DiffEdge? = nil) {
         self.content = content
         self.scrollTop = scrollTop
         self.wrap = wrap
-        self.revealFirstChange = revealFirstChange
+        self.revealChange = revealChange
     }
 
     public static func message(_ title: String, _ detail: String) -> RenderPayload {
@@ -125,7 +125,7 @@ public extension RenderPayload.Content {
 
 extension RenderPayload: Encodable {
     private enum Key: String, CodingKey {
-        case kind, scrollTop, wrap, revealFirstChange, path, text, language, editable, cursor, base, history, markdown, docDir, view, url, sizeText
+        case kind, scrollTop, wrap, revealChange, path, text, language, editable, cursor, base, history, markdown, docDir, view, url, sizeText
         case mode, rows, binary, empty, added, removed, emptyReason, title, detail, edit, oldText, newText, filePath
     }
 
@@ -133,7 +133,7 @@ extension RenderPayload: Encodable {
         var container = encoder.container(keyedBy: Key.self)
         try container.encode(scrollTop, forKey: .scrollTop)
         try container.encode(wrap, forKey: .wrap)
-        try container.encode(revealFirstChange, forKey: .revealFirstChange)
+        try container.encodeIfPresent(revealChange, forKey: .revealChange)
         switch content {
         case .code(let path, let text, let language, let editable, let cursor, let base, let history):
             try container.encode("code", forKey: .kind)

@@ -2,7 +2,7 @@
  *
  * Swift 侧主要做一件事：window.ide.render(payload)。Swift 那边的事实源是 DesignSystem/RenderPayload.swift，
  * 改一边必须改另一边。每个 payload 都带 scrollTop（渲染完滚到哪）和 wrap（代码是否自动换行），kind 决定画什么：
- * revealFirstChange 为 true 时首次定位 diff 的第一处差异；恢复标签位置时为 false。
+ * revealChange 为 "first" / "last" 时定位 diff 的第一处 / 最后一处差异；恢复标签位置时省略。
  *   code     { path, text, language, editable, cursor?: {line, ch}, base?: HEAD 里的内容, history?: 编辑器撤销历史的 JSON 文本 }
  *   markdown { path, markdown, docDir, view: "preview" | "source" | "split", editable, cursor?, base?, history? }
  *   image    { path, url, sizeText }
@@ -352,6 +352,7 @@
     const add = root.querySelector(".diff-summary .add"), del = root.querySelector(".diff-summary .del");
     if (add) add.textContent = `+${counts.added}`;
     if (del) del.textContent = `−${counts.removed}`;
+    post({type: "diffStatistics", path: current.edit.filePath, added: counts.added, removed: counts.removed});
     return groups;
   }
 
@@ -807,9 +808,9 @@
     if (!lines.length) return null;
     const cursor = editor.getCursor().line;
     const index = direction === "next" ? lines.findIndex((line) => line > cursor) : lastIndex(lines, (line) => line < cursor);
-    if (index < 0) return { index: lines.indexOf(cursor), total: lines.length };
+    if (index < 0) return { index: lines.indexOf(cursor), total: lines.length, moved: false };
     revealEditorLine(lines[index]);
-    return { index, total: lines.length };
+    return { index, total: lines.length, moved: true };
   }
 
   function revealEditorLine(target) {
@@ -835,9 +836,12 @@
   /* 往 direction 方向该跳到第几处；到头了回 -1。 */
   function staticTarget(runs, direction) {
     const top = window.scrollY || document.documentElement.scrollTop || 0, height = window.innerHeight;
-    const lastTop = changeIndex >= 0 && changeIndex < runs.length ? staticTopOf(runs[changeIndex]) : null;
+    const selected = runs[changeIndex];
+    // 长行折成的变更块可以高于整个窗口；块顶滚出去了，仍可能正在阅读块的中间。
+    const selectedVisible = selected && selected[0].getBoundingClientRect().top < height
+      && selected[selected.length - 1].getBoundingClientRect().bottom > 0;
     let index;
-    if (lastTop !== null && lastTop >= top && lastTop < top + height) {
+    if (selectedVisible) {
       index = changeIndex + (direction === "next" ? 1 : -1);
     } else if (direction === "next") {
       index = runs.findIndex((run) => staticTopOf(run) > top + 1);
@@ -851,10 +855,10 @@
     const runs = staticChangeRuns();
     if (!runs.length) return null;
     const index = staticTarget(runs, direction);
-    if (index < 0) return { index: changeIndex, total: runs.length };
+    if (index < 0) return { index: changeIndex, total: runs.length, moved: false };
     revealStaticRun(runs, index);
     reportChangePosition();
-    return { index, total: runs.length };
+    return { index, total: runs.length, moved: true };
   }
 
   function revealStaticRun(runs, index) {
@@ -865,20 +869,20 @@
     changeIndex = index;
   }
 
-  function revealFirstDiffChange() {
+  function revealDiffChange(edge) {
     if (!current || current.kind !== "diff") return;
     if (editor) {
       const lines = editorChangeLines();
       if (lines.length) {
-        revealEditorLine(lines[0]);
+        const target = edge === "last" ? lines[lines.length - 1] : lines[0];
+        revealEditorLine(target);
         // 单列中的删除块在目标行上方；整块很高时仍应让删除内容进入视口。
-        if (unifiedWidgets.length && Math.min(Number(unifiedWidgets[0].node.dataset.changeLine), editor.lastLine()) === lines[0]) {
-          unifiedWidgets[0].node.scrollIntoView({block: "center"});
-        }
+        const widget = unifiedWidgets.find(item => Math.min(Number(item.node.dataset.changeLine), editor.lastLine()) === target);
+        if (widget) widget.node.scrollIntoView({block: "center"});
       }
     } else {
       const runs = staticChangeRuns();
-      if (runs.length) revealStaticRun(runs, 0);
+      if (runs.length) revealStaticRun(runs, edge === "last" ? runs.length - 1 : 0);
     }
   }
 
@@ -914,11 +918,22 @@
     return null;
   }
 
-  // F7 / ⇧F7 在页面里就处理掉（编辑器不认这两个键，事件会冒上来）；页面没处理的键 WebKit 才交给应用菜单
+  // 普通上下键在 diff 中按变更导航；捕获阶段先于 CodeMirror，组合键仍用于文本选择 / 光标移动。
+  document.addEventListener("keydown", event => {
+    if (!current || current.kind !== "diff" || event.defaultPrevented || event.isComposing || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    event.stopPropagation();
+    post({type: "diffNavigate", direction: event.key === "ArrowDown" ? "next" : "previous", path: current.path});
+  }, true);
+
+  // F7 / ⇧F7 在 diff 里同样交给宿主，才能在文件边界继续跳；普通编辑器仍在页内跳。
   document.addEventListener("keydown", (event) => {
     if (event.key !== "F7" || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
     event.preventDefault();
-    navigateChange(event.shiftKey ? "previous" : "next");
+    const direction = event.shiftKey ? "previous" : "next";
+    if (current && current.kind === "diff") post({type: "diffNavigate", direction, path: current.path});
+    else navigateChange(direction);
   });
 
   document.addEventListener("keydown", (event) => {
@@ -1017,12 +1032,14 @@
         // 渲染出错宁可把错误摆出来，也不能留一页空白让人以为文件是空的
         renderMessage({ title: "渲染失败", detail: String(error && error.stack || error) });
       }
+      // MergeView 建立两栏后再量一次 gutter；跨文件立即定位时，首批上下文行可能仍沿用建栏前的缩进。
+      if (mergeView) refreshEditorLayout();
       // 渲染是同步的，但图片与 mermaid 会撑高页面；先按给的位置滚一次，图出来后位置大体也还对
       window.scrollTo(0, payload.scrollTop || 0);
-      if (payload.revealFirstChange) {
-        revealFirstDiffChange();
+      if (payload.revealChange) {
+        revealDiffChange(payload.revealChange);
         // 页面内部切主题 / 换行重画时，也保留已经定位后的状态。
-        payload.revealFirstChange = false;
+        payload.revealChange = null;
       }
       // 告诉宿主画完了、花了多久（宿主据此记日志、探针据此计时）
       post({ type: "rendered", kind: payload.kind, ms: Math.round(performance.now() - started) });

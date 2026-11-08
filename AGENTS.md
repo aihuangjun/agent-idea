@@ -98,7 +98,9 @@ CLT 升到 macOS 27 SDK 之后，SwiftUI 的 `@State` 成了只有 Xcode 带插�
 
 文件 / 文件夹新建共用 `Views/NewItemSheet`，流程集中在 `ProjectSessionCreation.swift`；完整文件名包含扩展名，校验复用 `FileRename`，写空文件用 `.withoutOverwriting` 防止校验后出现的同名条目被覆盖。新建文件的撤销先保存编辑内容再进废纸篓，重做恢复原文件，原位置被占时拒绝覆盖。
 
-diff 首次定位：`RenderPayload.revealFirstChange` 让 render.js 将第一处差异居中（包括第 0 行与纯删除）；已有位置时为 false。`EditorTab.hasDiffPosition` 只在 `currentState` 返回 `kind == "diff"` 后置为 true，未就绪的空状态不算访问过；切标签、切项目或切 diff 模式时照旧收取状态，避免重跳第一处。Swift 契约和 render.js 顶部注释同步维护。
+diff 定位：`RenderPayload.revealChange` 为 `.first` / `.last` 时将第一处 / 最后一处差异居中（包括第 0 行与纯删除）；nil 恢复标签的位置。普通 ↑ / ↓、F7 / ⇧F7 和工具栏共用 `ProjectSession.navigateChange`，页内到头才按文件列表顺序跨文件，向下进入第一处、向上进入最后一处。跨文件前必须先收取 WebView 状态，避免预览标签被替换时丢掉尚未去抖上报的草稿。`EditorTab.hasDiffPosition` 只在 `currentState` 返回 `kind == "diff"` 后置为 true，未就绪的空状态不算访问过；普通切标签仍保留位置。Swift 契约和 render.js 顶部注释同步维护。
+
+变更文件的行数由 `GitClient.diffStatistics` 批量取 `--numstat -z`，重命名、二进制与特殊路径由 `Core/GitNumstatParser` 解析；未跟踪文件流式计数。工作区统计随 git 刷新，历史按提交缓存，可编辑 diff 的未保存统计从同一份页面差异分组回传。行视图必须接收统计值，不能只持有 session / history 再读取，否则 SwiftUI 可能不重画。
 
 Git 元数据事件必须经过 `Core/GitMetadataEventFilter`：初始化时对根目录用 POSIX `realpath` 保留实际前缀，兼容 `/tmp` 与 `/private/tmp`、`/var` 与 `/private/var` 及符号链接。不能逐个对事件路径用 Foundation URL 解析：锁文件或原子替换的旧路径可能已经不存在，Foundation 此时可能保留另一种前缀，仍会漏事件。
 

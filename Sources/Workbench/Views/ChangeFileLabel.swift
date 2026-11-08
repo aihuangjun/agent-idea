@@ -7,6 +7,7 @@ import SwiftUI
 struct ChangeFileLabel: View {
     let change: GitChange
     var showsDirectory = true
+    var statistics: DiffLineCounts?
 
     private var fileName: some View {
         Text(change.fileName)
@@ -37,11 +38,35 @@ struct ChangeFileLabel: View {
             fileName
         }
         Spacer(minLength: 4)
+        if let statistics {
+            DiffLineCountLabel(statistics: statistics)
+        }
         // 状态字永远完整显示；空间不够时先截目录、再截文件名
         Text(change.kind.label)
             .font(.system(size: 10))
             .foregroundStyle(VCSColors.color(for: change.kind).opacity(0.85))
             .fixedSize()
             .layoutPriority(2)
+    }
+}
+
+/// 固定宽度优先级，文件名被截短时增删行数仍完整可见。
+private struct DiffLineCountLabel: View {
+    let statistics: DiffLineCounts
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if statistics.isBinary {
+                Text("二进制").foregroundStyle(Theme.mutedText)
+            } else {
+                Text("+\(statistics.added)").foregroundStyle(Theme.success)
+                Text("−\(statistics.removed)").foregroundStyle(Theme.danger)
+            }
+        }
+        .font(.system(size: 10, design: .monospaced))
+        .fixedSize()
+        .layoutPriority(2)
+        .accessibilityElement(children: .combine)
+        .toolTip(statistics.isBinary ? "二进制文件，不统计代码行" : "新增 \(statistics.added) 行，删除 \(statistics.removed) 行")
     }
 }

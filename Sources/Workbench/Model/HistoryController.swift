@@ -17,6 +17,7 @@ final class HistoryController: ObservableObject {
     @Published private(set) var filesByCommit: [String: [GitChange]] = [:]
     /// 拉文件列表失败的原因，按提交。
     @Published private(set) var filesError: [String: String] = [:]
+    @Published private(set) var statisticsByCommit: [String: [String: DiffLineCounts]] = [:]
     /// 当前 HEAD，由会话在每次 git 状态刷新后写入；与 `loadedHead` 不同才需要重拉。
     var currentHead = ""
     /// 最近一次回滚的结果，显示在文件列表下面。
@@ -108,6 +109,7 @@ final class HistoryController: ObservableObject {
             guard let self else { return }
             do {
                 filesByCommit[commit.id] = try await git.changedFiles(in: commit, repositoryRoot: repositoryRoot)
+                statisticsByCommit[commit.id] = try? await git.diffStatistics(in: commit, repositoryRoot: repositoryRoot)
             } catch {
                 filesError[commit.id] = error.userFacingDescription
                 Log.warn("git", "取提交 \(commit.shortHash) 的文件列表失败：\(error)")

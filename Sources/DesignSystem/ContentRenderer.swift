@@ -106,10 +106,10 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     }
 
     /// 上一处 / 下一处变更（IDEA 的 ⇧F7 / F7）。
-    public enum ChangeStep: String, Sendable {
-        case next
-        case previous
-    }
+    public typealias ChangeStep = DiffNavigationDirection
+    public enum ChangeNavigationResult { case moved, boundary, unavailable }
+    public var onDiffNavigate: ((ChangeStep, String) -> Void)?
+    public var onDiffStatistics: ((String, DiffLineCounts) -> Void)?
 
     /// 页面报上来的：光标 / 视口前面、后面还有没有变更可跳。到头的那个方向的箭头灰掉。
     public struct ChangePosition: Equatable, Sendable {
@@ -282,10 +282,12 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     }
 
     /// 跳到当前内容里的下一处 / 上一处变更：编辑器按光标找，只读 diff 按变更段落找（都在 render.js 里）。
-    public func navigateChange(_ step: ChangeStep) {
-        guard isReady else { return }
-        webView.evaluateJavaScript("window.ide.navigateChange(\"\(step.rawValue)\")") { _, error in
+    public func navigateChange(_ step: ChangeStep, completion: @escaping (ChangeNavigationResult) -> Void = { _ in }) {
+        guard isReady else { completion(.unavailable); return }
+        webView.evaluateJavaScript("window.ide.navigateChange(\"\(step.rawValue)\")") { value, error in
             if let error { Log.warn("web", "navigateChange 失败：\(error)") }
+            if error != nil { completion(.unavailable) }
+            else { completion((value as? [String: Any])?["moved"] as? Bool == true ? .moved : .boundary) }
         }
     }
 
@@ -462,6 +464,12 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
             if let direction = (body["direction"] as? String).flatMap(NavigationDirection.init) { onNavigate?(direction) }
         case "changes":
             onChangePosition?(ChangePosition(hasPrevious: body["hasPrevious"] as? Bool ?? false, hasNext: body["hasNext"] as? Bool ?? false))
+        case "diffNavigate":
+            if let step = (body["direction"] as? String).flatMap(ChangeStep.init), let path = body["path"] as? String { onDiffNavigate?(step, path) }
+        case "diffStatistics":
+            if let path = body["path"] as? String, let added = body["added"] as? Int, let removed = body["removed"] as? Int, added >= 0, removed >= 0 {
+                onDiffStatistics?(path, DiffLineCounts(added: added, removed: removed))
+            }
         case "find":
             onFind?()
         default:

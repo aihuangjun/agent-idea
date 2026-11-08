@@ -113,6 +113,11 @@ final class WorkbenchModel: ObservableObject {
         }
         self.renderer.onRendered = { [weak self] _, _ in self?.active?.findInFile() }
         self.renderer.onChangePosition = { [weak self] position in self?.active?.setChangePosition(position) }
+        self.renderer.onDiffNavigate = { [weak self] step, path in
+            guard let session = self?.active, session.activeTab?.diffChange?.path == path else { return }
+            session.navigateChange(step)
+        }
+        self.renderer.onDiffStatistics = { [weak self] path, counts in self?.active?.updateDiffStatistics(path: path, counts: counts) }
         self.renderer.onNavigate = { [weak self] direction in
             switch direction {
             case .back: self?.active?.goBack()

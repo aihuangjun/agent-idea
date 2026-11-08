@@ -219,10 +219,10 @@ private struct EditorHeader: View {
         if session.canNavigateChanges {
             // IDEA diff 视图工具条上的上下箭头：跳到上一处 / 下一处变更（⇧F7 / F7）
             HStack(spacing: 0) {
-                IconButton("chevron.up", help: "上一处变更（⇧F7）", size: 22) { session.navigateChange(.previous) }
-                    .disabled(!session.changePosition.hasPrevious)
-                IconButton("chevron.down", help: "下一处变更（F7）", size: 22) { session.navigateChange(.next) }
-                    .disabled(!session.changePosition.hasNext)
+                IconButton("chevron.up", help: "上一处变更（↑ / ⇧F7），到头继续到上一个文件", size: 22) { session.navigateChange(.previous) }
+                    .disabled(!session.canNavigateChange(.previous))
+                IconButton("chevron.down", help: "下一处变更（↓ / F7），到头继续到下一个文件", size: 22) { session.navigateChange(.next) }
+                    .disabled(!session.canNavigateChange(.next))
             }
         }
         if tab.isDiff {
