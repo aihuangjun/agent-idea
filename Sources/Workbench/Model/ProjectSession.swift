@@ -138,6 +138,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     private let defaults: UserDefaults
     private var savedExpanded: Set<String> = []
     private let preferences: ReadingPreferences
+    /// 编辑器撤销历史的落盘存档（关标签、重启之后还能撤）。nil 就只随开着的标签走——测试默认如此，免得往真的 `~/.agentidea/undo/` 里写。
+    let editorHistories: EditorHistoryStore?
     /// 由 `WorkbenchModel.activate` 写入。只有当前项目才往共用的 WebView 里画。
     private(set) var isActive = false
     private var watcher: ChangeWatcher?
@@ -156,8 +158,9 @@ final class ProjectSession: ObservableObject, Identifiable {
     }
 
     init(root: URL, git: GitClient?, renderer: ContentRenderer, preferences: ReadingPreferences, defaults: UserDefaults = .standard,
-         run: RunController? = nil) {
+         run: RunController? = nil, editorHistories: EditorHistoryStore? = nil) {
         self.git = git
+        self.editorHistories = editorHistories
         self.run = run ?? RunController()
         self.renderer = renderer
         self.preferences = preferences
@@ -410,9 +413,13 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 真正删（进废纸篓）、关标签、挪选中、刷新；不记撤销栈（重做时也走这里）。返回它在废纸篓里的位置，删不成 nil。
     func performDelete(_ node: FileNode) -> URL? {
         guard node.url.path != project.root.path else { return nil }
+        // 关标签会丢弃草稿、不再记历史：先把开着的、与磁盘一致的历史存下来，随文件一起进废纸篓（撤销删除时带回来）
+        storeEditorHistories(under: node.url)
+        let original = Self.historyKey(node.url)
         let trashed: URL
         do {
             trashed = try Trash.move(node.url)
+            editorHistories?.move(from: original, to: Self.historyKey(trashed))
             Log.info("project", "已删除 \(node.url.path)")
         } catch {
             banner = "删除失败：\(error.userFacingDescription)"
@@ -562,6 +569,8 @@ final class ProjectSession: ObservableObject, Identifiable {
         let oldParent = oldURL.deletingLastPathComponent(), newParent = newURL.deletingLastPathComponent()
         let resolvedOld = oldParent.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent(oldURL.lastPathComponent).path
         let resolvedNew = newParent.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent(newURL.lastPathComponent).path
+        // 已经关掉的文件的撤销历史也跟着换路径（开着的随标签带过去，关的时候存到新路径）
+        editorHistories?.move(from: resolvedOld, to: resolvedNew)
         // 文件标签换成新路径的标签：基线、草稿、滚动位置、光标都带过去；内容重读（扩展名变了语言也会变）。
         // 草稿刚才已经写盘了，还留着的是写盘失败的，跟着换 id 别丢
         var renamedTabIDs: [String: String] = [:]
@@ -572,6 +581,7 @@ final class ProjectSession: ObservableObject, Identifiable {
             replaced.hasDiffPosition = tab.hasDiffPosition
             replaced.cursor = tab.cursor
             replaced.history = tab.history
+            replaced.lookedUpStoredHistory = tab.lookedUpStoredHistory
             replaced.markdownView = tab.markdownView
             replaced.htmlView = tab.htmlView
             tabs[index] = replaced
@@ -842,7 +852,13 @@ final class ProjectSession: ObservableObject, Identifiable {
         if let documentID {
             // 文件已经不在磁盘上（外部删了）：关标签的自动保存不能凭空把它创建回来；显式 ⌘S 不受此限
             let fileExists = EditorTab.fileURL(fromID: documentID).map { fileManager.fileExists(atPath: $0.path) } ?? false
-            if discardingDraft || !fileExists { draftStore.discard(documentID) } else { writeDraft(documentID) }
+            if discardingDraft || !fileExists {
+                draftStore.discard(documentID)
+            } else {
+                writeDraft(documentID)
+                // 写完盘再存撤销历史：存的是与磁盘内容对得上的那一份
+                storeEditorHistory(of: tabs[index], documentID: documentID)
+            }
         }
         let document = documentID.flatMap { contents[$0] }
         if pendingLineReveal?.tabID == tabID { pendingLineReveal = nil }
@@ -1154,6 +1170,14 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
     }
 
+    /// 编辑器停手时连同文字送来的撤销历史（`edited` 消息带的）：记到当前标签上。
+    /// 这样 ⌘Q 时同步保存的那一段手里就有与最新草稿对得上的历史——不必等切标签时再问 WebView（退出时来不及问）。
+    func applyEditorHistory(path: String, text: String, history: String) {
+        guard let index = tabs.firstIndex(where: { $0.id == activeTabID }), documentURL(for: tabs[index])?.path == path,
+              isEditable(tabs[index]) else { return }
+        tabs[index].history = EditorHistory(json: history, text: text)
+    }
+
     /// 保存当前标签（⌘S）。先把编辑器里最新的文字要过来再写。
     func saveActiveTab() {
         guard let id = activeTabID, let tab = activeTab, let documentID = documentID(for: tab) else { return }
@@ -1183,6 +1207,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// （比如「在终端中运行」要等文件真的落盘再跑）。退出时只有同步那一段来得及跑，停手不到 300ms 的最后几笔可能不在。
     func saveAll(then completion: @escaping @MainActor () -> Void = {}) {
         writeAllDrafts()
+        // 退出时只有这一段同步的来得及：草稿落盘之后立刻把与之对应的撤销历史也存下来
+        storeEditorHistories()
         guard isActive, let id = activeTabID, let tab = activeTab, isEditable(tab) else {
             completion()
             return
@@ -1201,6 +1227,7 @@ final class ProjectSession: ObservableObject, Identifiable {
             }
             if let text = state.text, let url = self.documentURL(for: tab) { self.applyEdit(path: url.path, text: text) }
             self.writeAllDrafts()
+            self.storeEditorHistories()
             completion()
         }
     }
@@ -1224,6 +1251,63 @@ final class ProjectSession: ObservableObject, Identifiable {
         Log.info("editor", "已保存 \(url.path)")
         refreshGit()
         return true
+    }
+
+    // MARK: - 撤销历史存档
+
+    /// 存档里的键：父目录解析符号链接再拼回名字（与 `didRename` 同法）。文件可能已经不在了（删除、改名之后），
+    /// 解析整条路径会原样返回或在不分大小写的文件系统上解析成新名字；开着的标签的文档路径本来就是解析过的，两边对得上。
+    static func historyKey(_ url: URL) -> String {
+        url.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent(url.lastPathComponent).path
+    }
+
+    /// 一个标签的撤销历史能不能存：文档没有草稿（已经落盘）、历史的指纹与内存里的内容（= 刚写进 / 读自磁盘的那份）一致、
+    /// 真的改过（只看过的不占存档）、文件还在。草稿没写成、历史是旧的（编辑器那边还没报上来）都不存——宁可不存，不能存错。
+    private func storableHistory(of tab: EditorTab, documentID: String) -> (path: String, history: EditorHistory)? {
+        guard editorHistories != nil, let history = tab.history, !draftStore.isModified(documentID),
+              EditorHistoryStore.recordsEdits(history.json), let url = EditorTab.fileURL(fromID: documentID),
+              let text = contents[documentID]?.text, history.textHash == EditorHistory.hash(text),
+              fileManager.fileExists(atPath: url.path) else { return nil }
+        return (url.path, history)
+    }
+
+    private func storeEditorHistory(of tab: EditorTab, documentID: String) {
+        guard let (path, history) = storableHistory(of: tab, documentID: documentID) else { return }
+        editorHistories?.save(path: path, textHash: history.textHash, history: history.json)
+    }
+
+    /// 开着的标签的撤销历史都存一遍；`under` 给了就只存这个文件 / 目录下的。同一文档几个标签都能存时当前标签优先（只存一份）。
+    func storeEditorHistories(under url: URL? = nil) {
+        let prefix = url.map(Self.historyKey)
+        storeEditorHistories { _, path in
+            guard let prefix else { return true }
+            return path == prefix || path.hasPrefix(prefix + "/")
+        }
+    }
+
+    private func storeEditorHistories(where include: (_ documentID: String, _ path: String) -> Bool) {
+        guard editorHistories != nil else { return }
+        var chosen: [String: EditorTab] = [:]
+        for tab in tabs {
+            guard let documentID = documentID(for: tab), let path = EditorTab.fileURL(fromID: documentID)?.path, include(documentID, path),
+                  chosen[documentID] == nil || tab.id == activeTabID, storableHistory(of: tab, documentID: documentID) != nil else { continue }
+            chosen[documentID] = tab
+        }
+        for (documentID, tab) in chosen { storeEditorHistory(of: tab, documentID: documentID) }
+    }
+
+    /// 标签打开后第一次画（或内容重读后）：标签里还没有历史就去存档里找。指纹按此刻文档的内容（磁盘上的样子）算，
+    /// 对不上存档自己删掉那条。装上的历史照常经 `history(matching:)` 再核一次：有草稿时画的是草稿，对不上就不给。
+    private func restoringStoredHistory(_ tab: EditorTab, documentID: String?, document: TabContent?) -> EditorTab {
+        guard let editorHistories, tab.history == nil, !tab.lookedUpStoredHistory, let documentID,
+              DraftStore.isEditable(document), let text = document?.text, let url = EditorTab.fileURL(fromID: documentID),
+              let index = tabs.firstIndex(where: { $0.id == tab.id }) else { return tab }
+        tabs[index].lookedUpStoredHistory = true
+        let hash = EditorHistory.hash(text)
+        if let json = editorHistories.load(path: url.path, textHash: hash) {
+            tabs[index].history = EditorHistory(json: json, textHash: hash)
+        }
+        return tabs[index]
     }
 
     // MARK: - 内容加载
@@ -1345,11 +1429,13 @@ final class ProjectSession: ObservableObject, Identifiable {
         var rendered: RenderPayload.Content
         if case .editableDiff(let documentID) = content, let change = tab.change, let url = EditorTab.fileURL(fromID: documentID),
            let document = ensureDocument(documentID) {
+            tab = restoringStoredHistory(tab, documentID: documentID, document: document)
             rendered = FileContentLoader.editableDiff(
                 change: change, document: document, draft: draftStore[documentID], base: baseTexts[documentID],
                 filePath: url.path, cursor: tab.cursor, history: tab.history, mode: preferences.diffMode
             )
         } else {
+            tab = restoringStoredHistory(tab, documentID: documentID, document: documentID.flatMap { contents[$0] })
             rendered = content.renderContent(
                 for: tab, diffMode: preferences.diffMode,
                 draft: documentID.flatMap { draftStore[$0] }, editable: isEditable(tab), base: documentID.flatMap { baseTexts[$0] }
@@ -1673,8 +1759,14 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
     }
 
+    /// 内容要从磁盘重读了：标签里的撤销历史作废。作废前先按旧内容的指纹存一份——重读之后（`renderActiveTab` 再去存档里找一次）
+    /// 内容没变（⌘R 的强制重读）就原样装回来，变了（Agent 改过）指纹对不上、那条存档随之删掉。
     private func forgetEditorHistory(of documentID: String) {
-        for index in tabs.indices where self.documentID(for: tabs[index]) == documentID { tabs[index].history = nil }
+        storeEditorHistories { id, _ in id == documentID }
+        for index in tabs.indices where self.documentID(for: tabs[index]) == documentID {
+            tabs[index].history = nil
+            tabs[index].lookedUpStoredHistory = false
+        }
     }
 
     // MARK: - 杂项

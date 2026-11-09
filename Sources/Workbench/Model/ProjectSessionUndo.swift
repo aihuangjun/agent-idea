@@ -80,6 +80,8 @@ extension ProjectSession {
                 Log.warn("project", "从废纸篓恢复 \(original.path) 失败：\(error)")
                 return .failed(error.userFacingDescription)
             }
+            // 删的时候撤销历史跟着进了废纸篓（`performDelete`），搬回来接着能撤
+            editorHistories?.move(from: Self.historyKey(trashed), to: Self.historyKey(original))
             Log.info("project", "已从废纸篓恢复 \(original.path)")
             refreshAll()
             revealInTree(original)
@@ -332,7 +334,10 @@ extension ProjectSession {
 
     /// 删除变更列表里的一条（进废纸篓），记进撤销栈。
     func delete(_ change: GitChange) {
-        guard let commit, let url = url(for: change), let trashed = commit.delete(change) else { return }
+        guard let commit, let url = url(for: change) else { return }
+        storeEditorHistories(under: url)
+        guard let trashed = commit.delete(change) else { return }
+        editorHistories?.move(from: Self.historyKey(url), to: Self.historyKey(trashed))
         recordUndo("删除 \(change.fileName)", .delete(original: url, trashed: trashed, isDirectory: false))
     }
 
@@ -385,9 +390,11 @@ extension ProjectSession {
             delete(targets[0])
             return
         }
+        for change in targets { if let url = url(for: change) { storeEditorHistories(under: url) } }
         let operations = commit.delete(targets).compactMap { deleted in
             url(for: deleted.change).map {
-                UndoableOperation(title: "删除 \(deleted.change.fileName)", kind: .delete(original: $0, trashed: deleted.trashed, isDirectory: false))
+                editorHistories?.move(from: Self.historyKey($0), to: Self.historyKey(deleted.trashed))
+                return UndoableOperation(title: "删除 \(deleted.change.fileName)", kind: .delete(original: $0, trashed: deleted.trashed, isDirectory: false))
             }
         }
         guard !operations.isEmpty else { return }

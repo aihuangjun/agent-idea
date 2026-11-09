@@ -73,6 +73,8 @@ final class WorkbenchModel: ObservableObject {
     private let fileManager = FileManager.default
     private let defaults: UserDefaults
     private let recentStore: JSONFileStore<[RecentProject]>
+    /// 编辑器撤销历史的存档，所有项目共用一个（应用里是 `~/.agentidea/undo/`；测试默认 nil，不落盘）。
+    private let editorHistories: EditorHistoryStore?
     private var preferenceObservation: Task<Void, Never>?
     /// 当前会话一变（草稿、标签、导航）就把 workbench 的变化也发出去：菜单项的启用状态只观察 workbench。
     private var activeSessionObservation: AnyCancellable?
@@ -83,8 +85,10 @@ final class WorkbenchModel: ObservableObject {
         return sessions.first { $0.id == activeSessionID }
     }
 
-    init(git: GitClient? = GitClient.locate(), defaults: UserDefaults = .standard, recentFile: URL = AppPaths.recentProjectsFile) {
+    init(git: GitClient? = GitClient.locate(), defaults: UserDefaults = .standard, recentFile: URL = AppPaths.recentProjectsFile,
+         editorHistories: EditorHistoryStore? = nil) {
         self.git = git
+        self.editorHistories = editorHistories
         self.defaults = defaults
         self.recentStore = JSONFileStore(url: recentFile)
         self.preferences = ReadingPreferences(defaults: defaults)
@@ -108,6 +112,9 @@ final class WorkbenchModel: ObservableObject {
         // 编辑器只画当前项目的标签，改动也只可能是它的
         self.renderer.onEdited = { [weak self] path, text in
             self?.active?.applyEdit(path: path, text: text)
+        }
+        self.renderer.onEditorHistory = { [weak self] path, text, history in
+            self?.active?.applyEditorHistory(path: path, text: text, history: history)
         }
         self.renderer.onShellReloaded = { [weak self] in self?.active?.renderActiveTab() }
         self.renderer.onFind = { [weak self] in self?.active?.showFind() }
@@ -183,7 +190,8 @@ final class WorkbenchModel: ObservableObject {
         if let existing = sessions.first(where: { $0.project.root == root }) {
             activate(existing.id)
         } else {
-            let session = ProjectSession(root: chosen, git: git, renderer: renderer, preferences: preferences, defaults: defaults)
+            let session = ProjectSession(root: chosen, git: git, renderer: renderer, preferences: preferences, defaults: defaults,
+                                         editorHistories: editorHistories)
             session.onRequestToolWindow = { [weak self] window in self?.toolWindow = window }
             session.onRequestRunWindow = { [weak self] in self?.isRunWindowShown = true }
             sessions.append(session)

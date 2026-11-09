@@ -1,7 +1,7 @@
 import Foundation
 
 /// 本地状态往哪儿放：全部收在 `~/.agentidea/` 下，用户一眼能找到、也能备份。
-/// 这里只放配置（最近项目、窗口偏好、日志），不放任何项目内容。删掉就回到首次运行的样子。
+/// 这里放配置（最近项目、日志）；唯一带项目内容的是 `undo/`（撤销历史里有改动的文字，有上限、30 天没用就清）。删掉就回到首次运行的样子。
 public enum AppPaths {
     public static let directoryName = ".agentidea"
 
@@ -23,6 +23,11 @@ public enum AppPaths {
     /// `~/.agentidea/run/`：「在终端中运行」生成的包装脚本。
     public static var runDirectory: URL {
         configurationDirectory.appendingPathComponent("run", isDirectory: true)
+    }
+
+    /// `~/.agentidea/undo/`：编辑器的撤销历史（按文件存，关了标签、重启之后还能撤，见 `EditorHistoryStore`）。
+    public static var editorHistoryDirectory: URL {
+        configurationDirectory.appendingPathComponent("undo", isDirectory: true)
     }
 
     /// `~/.agentidea/github_token`：检查更新时访问私有仓库用的 token（可选）。

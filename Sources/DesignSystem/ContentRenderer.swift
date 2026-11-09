@@ -105,6 +105,9 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     public var onRendered: ((String, Int) -> Void)?
     /// 编辑器里的文字变了（停手 300ms 后发一次）：文件路径与整份文本。
     public var onEdited: ((String, String) -> Void)?
+    /// 同一条 edited 消息里带的撤销历史（CodeMirror `getHistory()` 的 JSON 文本）：路径、整份文本、历史。在 `onEdited` 之后调。
+    /// 宿主据此随时手握与最新草稿对得上的历史，退出时同步存盘不必再问页面（来不及问）。太大的历史页面不带。
+    public var onEditorHistory: ((String, String, String) -> Void)?
     /// 编辑器里按了后退 / 前进（⌥← / ⌥→）。
     public var onNavigate: ((NavigationDirection) -> Void)?
     /// Web 内容进程被系统回收、页面重新加载好了：宿主要按当前状态重画（上次的 payload 里没有之后的编辑）。
@@ -594,6 +597,7 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         case "edited":
             if let path = body["path"] as? String, let text = body["text"] as? String {
                 onEdited?(path, text)
+                if let history = body["history"] as? String { onEditorHistory?(path, text, history) }
                 Task { [weak self] in await self?.updateDiffReview(path: path, text: text) }
             }
         case "diffReview":

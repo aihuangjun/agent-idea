@@ -30,6 +30,8 @@ struct EditorTab: Identifiable, Equatable {
     /// 只有重画时的文本与记历史时的一模一样才装回去（`history(matching:)`）——同一文档的另一个标签改过、重命名重读、
     /// 磁盘上被别人改过之后，历史里的位置都对不上新内容，CodeMirror 的 `setHistory` 不校验，装回去 ⌘Z 会撕坏正文。
     var history: EditorHistory?
+    /// 已经去 `EditorHistoryStore` 里找过这个标签的历史了（打开后第一次画的时候找一次；磁盘内容重读后再找一次）。
+    var lookedUpStoredHistory = false
 
     /// 要画的文本就是记历史时的那份才给历史，否则从头记。
     func history(matching text: String) -> String? {
@@ -215,15 +217,22 @@ extension ChangeKind {
     }
 }
 
-/// 编辑器的撤销历史与它对应的文本（哈希）。
+/// 编辑器的撤销历史与它对应的文本（指纹）。
+/// 指纹的口径在 `TextFingerprint`（行尾归一后的 SHA-256）：要落盘、重启后再比（`EditorHistoryStore`），
+/// 而且记历史时拿的是编辑器里的 LF 文本、重开时手里的是磁盘上的样子（可能是 CRLF）。
 struct EditorHistory: Equatable {
     let json: String
-    let textHash: Int
+    let textHash: String
 
     init(json: String, text: String) {
         self.json = json
         textHash = Self.hash(text)
     }
 
-    static func hash(_ text: String) -> Int { text.hashValue }
+    init(json: String, textHash: String) {
+        self.json = json
+        self.textHash = textHash
+    }
+
+    static func hash(_ text: String) -> String { TextFingerprint.of(text) }
 }

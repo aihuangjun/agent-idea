@@ -32,7 +32,8 @@
  * 只读 diff 表格按连续的变更行段落跳。回 { index, total }，没有可跳的回 null；页面里按 F7 / ⇧F7 也走它。
  * 渲染完、跳转后、光标移动、改动、滚动时都会 post changes { hasPrevious, hasNext }，宿主据此把到头的箭头灰掉。
  * path：diff 用来显示（summary 那一行）；编辑器发 edited 消息时带上它，宿主据此找到是哪个文件。
- * 往 Swift 发消息一律 post({type, ...})：ready / rendered / openExternal / openPath / edited { path, text } /
+ * edited 的 history 是同一时刻的 getHistory() JSON（超过 HISTORY_POST_LIMIT 不带）：宿主落盘撤销历史时要与刚保存的文字对得上，退出时来不及再问 getState。
+ * 往 Swift 发消息一律 post({type, ...})：ready / rendered / openExternal / openPath / edited { path, text, history? } /
  * navigate { direction: "back" | "forward" }（编辑器里按 ⌥← / ⌥→：这两个键在应用里是后退/前进，不给 CodeMirror 按词移动）/
  * changes { hasPrevious, hasNext }。
  * 自有代码不写内联事件处理器（CSP 不给 unsafe-inline）。
@@ -129,6 +130,7 @@
   let referencePane = "new"; // 并排 diff 里最后点的是哪一边（复制引用用）
   let editorLayoutTimer = null;
   const EDIT_DEBOUNCE = 300;
+  const HISTORY_POST_LIMIT = 2 * 1024 * 1024; // 与 EditorHistoryStore 的单份上限一致：再大宿主也不存，不必送
 
   /* 正在编辑的是哪个文件：普通编辑器是 payload.path，可编辑 diff 是 edit.filePath。 */
   function editedPath() {
@@ -161,7 +163,12 @@
   function postEdited() {
     if (!editor || !current) return;
     if (current.edit && current.edit.readOnly) return;
-    post({ type: "edited", path: editedPath(), text: editor.getValue() });
+    const message = { type: "edited", path: editedPath(), text: editor.getValue() };
+    try {
+      const history = JSON.stringify(editor.getHistory());
+      if (history.length <= HISTORY_POST_LIMIT) message.history = history;
+    } catch (e) { /* 历史拿不到就只送文字 */ }
+    post(message);
   }
 
   /* ---------- 相对 HEAD 的行变更标记 ---------- */

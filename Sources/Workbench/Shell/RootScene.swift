@@ -5,7 +5,7 @@ import SwiftUI
 
 /// 应用的整个界面。这是 `Workbench` 对外唯一的 public 场景：可执行 target 只负责 `@main` 那一层壳。
 public struct AgentIDEARootScene: Scene {
-    @StateObject private var workbench = WorkbenchModel()
+    @StateObject private var workbench = WorkbenchModel(editorHistories: EditorHistoryStore(directory: AppPaths.editorHistoryDirectory))
     @StateObject private var updater = Updater()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
