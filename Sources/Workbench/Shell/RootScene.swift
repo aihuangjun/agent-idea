@@ -109,6 +109,8 @@ public struct AgentIDEARootScene: Scene {
                     .keyboardShortcut("0", modifiers: .command)
                 Button("提交历史") { workbench.toolWindow = workbench.toolWindow == .history ? nil : .history }
                     .keyboardShortcut("9", modifiers: .command)
+                Button("查找") { workbench.toolWindow = workbench.toolWindow == .find ? nil : .find }
+                    .keyboardShortcut("3", modifiers: .command)
                 Button(workbench.isRunWindowShown ? "收起运行窗口" : "运行窗口") { workbench.isRunWindowShown.toggle() }
                     .keyboardShortcut("4", modifiers: .command)
                     .disabled(workbench.active == nil)
@@ -119,6 +121,11 @@ public struct AgentIDEARootScene: Scene {
                 }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
                 .disabled(workbench.active == nil)
+                // IDEA Windows 键位的 Find in Path（用户定的）。焦点在正文里时 CodeMirror 会吞掉这个键，
+                // 由 CursorRestoringWebView 先截下来（ContentRenderer.onFindInPath）
+                Button("在项目中查找…") { workbench.active?.showFindInPath() }
+                    .keyboardShortcut("f", modifiers: [.control, .shift])
+                    .disabled(workbench.active == nil)
                 Button("文件内查找…") { workbench.active?.showFind() }
                     .keyboardShortcut("f", modifiers: .command)
                     .disabled(workbench.active?.activeTab == nil)

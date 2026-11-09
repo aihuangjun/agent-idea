@@ -18,7 +18,7 @@ import Testing
 @Test func renderScriptExposesTheContract() throws {
     let shell = try #require(WebResources.shellURL)
     let script = try String(contentsOf: shell.deletingLastPathComponent().appendingPathComponent("render.js"), encoding: .utf8)
-    for entry in ["render(payload)", "getScrollTop()", "setZoom(zoom)", "setWrap(wrap)", "navigateChange(direction)", "revealLine(target)", "reference()", "type: \"ready\"", "type: \"openExternal\"", "type: \"openPath\"", "type: \"rendered\""] {
+    for entry in ["render(payload)", "getScrollTop()", "setZoom(zoom)", "setWrap(wrap)", "navigateChange(direction)", "revealLine(target)", "reference()", "selectedText()", "type: \"ready\"", "type: \"openExternal\"", "type: \"openPath\"", "type: \"rendered\""] {
         #expect(script.contains(entry), "render.js 缺少 \(entry)")
     }
 }
@@ -57,4 +57,8 @@ import Testing
     let revealJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(reveal)) as? [String: Any]
     #expect((revealJSON?["revealLine"] as? [String: Any])?["line"] as? Int == 41)
     #expect((revealJSON?["revealLine"] as? [String: Any])?["ch"] as? Int == 4)
+    #expect((revealJSON?["revealLine"] as? [String: Any])?["length"] == nil, "不选中时不带 length")
+    let selecting = RenderPayload(.code(path: "/p/a.py", text: "x", language: "python"), revealLine: EditorCursor(line: 2, ch: 1), revealLength: 6)
+    let selectingJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(selecting)) as? [String: Any]
+    #expect((selectingJSON?["revealLine"] as? [String: Any])?["length"] as? Int == 6, "全项目搜索的命中长度随 revealLine 走")
 }

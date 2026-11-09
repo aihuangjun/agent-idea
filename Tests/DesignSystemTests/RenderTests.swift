@@ -1350,3 +1350,33 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     )
     #expect(side as? String == #"20:1|{"from":{"line":7,"ch":0},"to":{"line":9,"ch":3}}|{"from":{"line":2,"ch":1},"to":{"line":2,"ch":1}}"#)
 }
+
+/// 全项目搜索打开结果：revealLine 带 length 时把命中的文字选上（编辑器 setSelection、只读视图的 DOM 选区），
+/// 列与长度按 UTF-16 算（前面有 emoji、中文也对得上）；长度夹到行尾。selectedText 拿编辑器 / DOM 的选区预填搜索框。
+@Test @MainActor func revealWithLengthSelectsTheMatchAndSelectedTextReportsIt() async throws {
+    let text = (1...60).map { $0 == 40 ? "😀中 let needle = 1" : "line \($0)" }.joined(separator: "\n")
+    let editor = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.swift", text: text, language: "swift", editable: true), revealLine: EditorCursor(line: 39, ch: 8), revealLength: 6),
+        inspect: """
+        (() => {
+          const cm = document.querySelector('.CodeMirror').CodeMirror;
+          const selected = cm.getSelection();
+          const head = cm.getCursor('head').line + ':' + cm.getCursor('head').ch;
+          const reported = window.ide.selectedText();
+          const clamped = window.ide.revealLine({line: 0, ch: 2, length: 99}) && cm.getSelection();
+          window.ide.revealLine({line: 5, ch: 1});
+          const plain = cm.somethingSelected() + ':' + window.ide.selectedText().length;
+          return [selected, head, reported, clamped, plain].join('|');
+        })()
+        """
+    )
+    #expect(editor as? String == "needle|39:14|needle|ne 1|false:0")
+
+    for wrap in [false, true] {
+        let readOnly = try await renderAndInspect(
+            RenderPayload(.code(path: "/x/a.txt", text: text, language: nil), wrap: wrap, revealLine: EditorCursor(line: 39, ch: 8), revealLength: 6),
+            inspect: "[getSelection().toString(), window.ide.selectedText(), JSON.stringify(window.ide.reference())].join('|')"
+        )
+        #expect(readOnly as? String == #"needle|needle|{"from":{"line":39,"ch":8},"to":{"line":39,"ch":14}}"#, "wrap=\(wrap)")
+    }
+}

@@ -111,6 +111,7 @@ final class WorkbenchModel: ObservableObject {
         }
         self.renderer.onShellReloaded = { [weak self] in self?.active?.renderActiveTab() }
         self.renderer.onFind = { [weak self] in self?.active?.showFind() }
+        self.renderer.onFindInPath = { [weak self] in self?.active?.showFindInPath() }
         self.renderer.contextActions = { [weak self] in
             guard let session = self?.active, let change = session.activeTab?.change,
                   let action = session.rollbackMenuAction(for: change) else { return [] }

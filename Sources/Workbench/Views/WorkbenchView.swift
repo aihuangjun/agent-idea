@@ -79,6 +79,7 @@ private struct ProjectContent: View {
                             case .project: ProjectTreeView(session: session)
                             case .commit: ChangesView(session: session)
                             case .history: HistoryView(session: session)
+                            case .find: FindInPathView(session: session)
                             }
                         }
                         .frame(width: workbench.toolWindowWidth)
@@ -283,6 +284,7 @@ private struct ToolStrip: View {
             stripButton(.project, systemName: "folder", help: "项目（⌘1）", badge: 0)
             stripButton(.commit, systemName: "arrow.triangle.branch", help: "提交（⌘0）", badge: session.changeGroups.total)
             stripButton(.history, systemName: "clock.arrow.circlepath", help: "提交历史（⌘9）", badge: 0)
+            stripButton(.find, systemName: ToolWindowIcon.findInPath, help: "查找：在项目中查找文字（⌃⇧F，开关 ⌘3）", badge: 0)
             Spacer()
             // 底部窗口的开关放在最下面，照 IDEA 左下角那一组
             RunStripButton(run: session.run)

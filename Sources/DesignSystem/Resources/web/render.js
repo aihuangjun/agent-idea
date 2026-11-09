@@ -3,7 +3,8 @@
  * Swift 侧主要做一件事：window.ide.render(payload)。Swift 那边的事实源是 DesignSystem/RenderPayload.swift，
  * 改一边必须改另一边。每个 payload 都带 scrollTop（渲染完滚到哪）和 wrap（代码是否自动换行），kind 决定画什么：
  * revealChange 为 "first" / "last" 时定位 diff 的第一处 / 最后一处差异；恢复标签位置时省略。
- * revealLine?: {line, ch}（从 0 数）渲染完跳到那一行，与 window.ide.revealLine 同一套做法；用过即清，主题 / 换行重画不再跳。
+ * revealLine?: {line, ch, length?}（从 0 数）渲染完跳到那一行，与 window.ide.revealLine 同一套做法；用过即清，主题 / 换行重画不再跳。
+ *   length（UTF-16 单元）> 0 时从 ch 起选中这么多（全项目搜索打开结果后把命中选上），省略或 0 只放光标。
  *   code     { path, text, language, editable, cursor?: {line, ch}, base?: HEAD 里的内容, history?: 编辑器撤销历史的 JSON 文本 }
  *   markdown { path, markdown, docDir, view: "preview" | "source" | "split", editable, cursor?, base?, history? }
  *   image    { path, url, sizeText }
@@ -23,7 +24,8 @@
  * 基线是异步取的，到了就 window.ide.setBase({ path, base })，编辑器在行号右侧画「改过（蓝）/ 新增（绿）」的标记（IDEA 的 gutter）。
  * window.ide.setTheme("light" | "dark") 切浅色 / 深色：只换根元素的 class，颜色都在 style.css 的变量里。
  * window.ide.revealLine({line, ch}) 跳到行（从 0 数，夹到首尾）：编辑器放光标、只读代码视图与只读 diff 表格选中那一行，都滚到正中；
- *   diff 一律按新版本那一侧（并排的右边）。回 true / false（这种视图没有行）。
+ *   diff 一律按新版本那一侧（并排的右边）。回 true / false（这种视图没有行）。参数同 payload 的 revealLine，可带 length 选中命中。
+ * window.ide.selectedText() → 编辑器的选区或只读视图的 DOM 选区文字，没有选区回 ""（在项目中查找拿它预填）。
  * window.ide.reference() → { from: {line, ch}, to: {line, ch} } 或 null：选区 / 光标在新版本里的位置（从 0 数，复制引用用），
  *   并排 diff 里选的是左边（旧版本）就按差异换算到右边；Markdown 预览、图片这些没有行号的视图回 null。
  * window.ide.navigateChange("next" | "previous") 跳到下一处 / 上一处变更（IDEA 的 F7 / ⇧F7）：编辑器里按光标找、把那一行滚到正中；
@@ -1112,9 +1114,23 @@
     return Number.isFinite(number) && number > 0 ? number : 0;
   }
 
-  /* 只读视图里把选区收成一个插入点放在那一行：之后复制引用拿到的就是这一行。 */
-  function placeCaret(element, ch) {
+  /* 只读视图里把选区收成一个插入点放在那一行：之后复制引用拿到的就是这一行。length > 0 时从那里起选中这么多个字符（夹到行尾）。 */
+  function placeCaret(element, ch, length) {
     const source = element.querySelector(".src") || element;
+    const start = textPoint(source, ch);
+    const selection = window.getSelection();
+    if (!selection) return;
+    if (!start) { selection.collapse(source, 0); return; }
+    if (length > 0) {
+      const end = textPoint(source, ch + length);
+      selection.setBaseAndExtent(start.node, start.offset, end.node, end.offset);
+    } else {
+      selection.collapse(start.node, start.offset);
+    }
+  }
+
+  /* 元素里第 ch 个字符（UTF-16）落在哪个文本节点的哪个位置；超出夹到最后。没有文本节点回 null。 */
+  function textPoint(source, ch) {
     const walker = document.createTreeWalker(source, NodeFilter.SHOW_TEXT);
     let remaining = ch, node, target = null, offset = 0;
     while ((node = walker.nextNode())) {
@@ -1123,19 +1139,20 @@
       remaining -= node.length;
       offset = node.length;
     }
-    const selection = window.getSelection();
-    if (!selection) return;
-    if (target) selection.collapse(target, offset); else selection.collapse(source, 0);
+    return target ? { node: target, offset } : null;
   }
 
   /* 编辑器：光标放到那一行那一列，把它滚到视口正中；折叠着的上下文先展开。并排 diff 只跳右边（新版本）。 */
   function revealEditorPosition(target) {
     const line = Math.min(toIndex(target.line), editor.lastLine());
-    const ch = Math.min(toIndex(target.ch), editor.getLine(line).length);
+    const lineLength = editor.getLine(line).length;
+    const ch = Math.min(toIndex(target.ch), lineLength);
+    const end = Math.min(ch + toIndex(target.length), lineLength);
     if (diffViewport) diffViewport.use(editor);
     if (sideDiff && sideDiff.folds) sideDiff.folds.reveal(editor, line);
     if (contextFolds) contextFolds.reveal(editor, line);
-    editor.setCursor({ line, ch });
+    // 带长度的（全项目搜索的命中）选上那一段，锚点在前、光标在后：一眼看得见，复制引用也落在这一行
+    if (end > ch) editor.setSelection({ line, ch }, { line, ch: end }); else editor.setCursor({ line, ch });
     const info = editor.getScrollInfo();
     const top = editor.heightAtLine(line, "local");
     editor.scrollTo(null, Math.max(0, top - info.clientHeight / 2 + editor.defaultTextHeight() / 2));
@@ -1149,7 +1166,7 @@
     if (lines && lines.length) {
       const element = lines[Math.min(line, lines.length - 1)];
       markStaticLine(element);
-      placeCaret(element, toIndex(target.ch));
+      placeCaret(element, toIndex(target.ch), toIndex(target.length));
       return true;
     }
     // 只读 diff 表格只有补丁里那几段：取新版本里不早于目标的第一行，都早于它就取最后一行
@@ -1326,6 +1343,12 @@
     /* 跳到行（从 0 数）；回 false 表示这种视图没有行。 */
     revealLine(target) {
       return revealLine(target);
+    },
+    /* 选中的文字（在项目中查找预填）；没有选区回 ""。 */
+    selectedText() {
+      if (editor) return editor.getSelection();
+      const selection = window.getSelection();
+      return selection ? selection.toString() : "";
     },
     /* 选区 / 光标在新版本里的位置（复制引用）；拿不到回 null。 */
     reference() {

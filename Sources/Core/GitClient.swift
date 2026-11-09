@@ -12,7 +12,7 @@ public struct GitClient: Sendable {
     public static let emptyTree = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
     public let executable: URL
-    private let runner: CommandRunning
+    let runner: CommandRunning
 
     public init(executable: URL, runner: CommandRunning = ShellCommand()) {
         self.executable = executable

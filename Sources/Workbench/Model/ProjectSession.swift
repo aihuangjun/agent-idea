@@ -58,6 +58,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     var hasGit: Bool { commit != nil }
     /// 项目视图里的文件搜索。
     let search: FileSearchController
+    /// 「查找」工具窗口：全项目文本搜索（⌃⇧F）。
+    let textSearch: TextSearchController
     /// 底部「运行」工具窗口的内容。
     let run: RunController
 
@@ -111,7 +113,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     @Published private(set) var goToLineFocusRequests = 0
     /// 等那个标签画出来时再跳的行（查找文件带了 `路径:行号`、跳到行时标签还在加载 / 要先切到源码）。
     /// `renderActiveTab` 把它放进 payload 的 `revealLine`，画完由页面跳；用过即清。
-    private var pendingLineReveal: (tabID: String, position: EditorCursor)?
+    /// `length` 是从那一列起要选中多少（全项目搜索的命中），0 只放光标。
+    private var pendingLineReveal: (tabID: String, position: EditorCursor, length: Int)?
 
     /// 树视图里的一次键盘/回车动作。
     enum TreeCommand {
@@ -163,6 +166,8 @@ final class ProjectSession: ObservableObject, Identifiable {
         self.project = project
         self.id = project.root.path
         self.search = FileSearchController(root: project.root)
+        // git 先给上：仓库根还没解析出来时就搜也走 git grep；git 说不在仓库里，控制器自己退回逐个读文件
+        self.textSearch = TextSearchController(root: project.root, git: git)
         Log.info("project", "打开 \(project.root.path)")
 
         loadChildren(of: project.root.path)
@@ -213,6 +218,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         gitTask?.cancel()
         history?.cancel()
         search.cancel()
+        textSearch.cancel()
         // 脚本要停掉：不像同步那样故意留着跑完，它没有半截状态要收拾，关了项目也没处看输出了
         run.tearDown()
         watcher?.stop()
@@ -599,17 +605,18 @@ final class ProjectSession: ObservableObject, Identifiable {
     // MARK: - 标签页
 
     /// 打开一个文件。`pinned == false` 复用预览标签（变更列表单击、Markdown 链接），`true` 固定。
-    /// 带 `location`（查找文件里粘了 `路径:行号`）就跳到那一行。
-    func openFile(_ url: URL, pinned: Bool, at location: SourceLocation? = nil) {
+    /// 带 `location`（查找文件里粘了 `路径:行号`、全项目搜索的结果）就跳到那一行；`selecting` > 0 时从那一列起选中这么多
+    /// （UTF-16 单元，全项目搜索把命中的文字选上）。
+    func openFile(_ url: URL, pinned: Bool, at location: SourceLocation? = nil, selecting length: Int = 0) {
         let url = url.resolvingSymlinksInPath().standardizedFileURL
         selectedPath = url.path
         let tab = EditorTab(kind: .file(url), isPreview: !pinned)
         // 在 show 之前挂上：小文件在 show / loadFile 里同步画出来，那一次 render 就带着它，不用等画完再补一次
-        if let location { pendingLineReveal = (tab.id, Self.editorPosition(location)) }
+        if let location { pendingLineReveal = (tab.id, Self.editorPosition(location), length) }
         show(tab)
         if contents[tab.id] == nil { loadFile(for: tab) }
         // 已经是当前标签时 show 不重画，挂着的没人取：直接跳
-        if let location, pendingLineReveal?.tabID == tab.id, activeTabID == tab.id { goToLine(location) }
+        if let location, pendingLineReveal?.tabID == tab.id, activeTabID == tab.id { goToLine(location, selecting: length) }
     }
 
     func openDiff(_ change: GitChange, pinned: Bool = false) {
@@ -947,6 +954,28 @@ final class ProjectSession: ObservableObject, Identifiable {
         renderer.clearFind()
     }
 
+    // MARK: - 在项目中查找
+
+    /// ⌃⇧F / 视图 → 在项目中查找…：切到「查找」工具窗口；编辑器里选中了单行文字就拿它预填（拿不到就算了），焦点给输入框。
+    func showFindInPath() {
+        onRequestToolWindow?(.find)
+        guard isActive, let tab = activeTab, contents[tab.id].map({ $0 != .loading }) == true else {
+            textSearch.activate()
+            return
+        }
+        renderer.selectedText { [weak self] selection in
+            self?.textSearch.activate(prefill: selection)
+        }
+    }
+
+    /// 焦点还给正文（查找窗口里按 Esc）。
+    func focusContent() { renderer.focusContent() }
+
+    /// 打开一处搜索结果并跳到那一行、选中命中的文字。单击 / 回车用预览标签，双击固定。
+    func openSearchResult(path: String, line: TextSearchLine, pinned: Bool) {
+        openFile(textSearch.url(for: path), pinned: pinned, at: SourceLocation(line: line.line, column: line.column + 1), selecting: line.selectionLength)
+    }
+
     // MARK: - 跳到行 / 复制引用
 
     /// 当前标签有没有「行」可跳：代码（含只读的大文件）、Markdown / HTML（预览会先切到源码）、各种 diff（新版本那一侧）。
@@ -994,18 +1023,18 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     /// 跳到当前标签的某一行。已经画出来的直接让页面跳（不重画，草稿、撤销历史都不动）；
     /// 还在加载、项目不是当前的、或者 Markdown / HTML 正在预览（没有行）就挂起来，等 `renderActiveTab` 带进 payload。
-    func goToLine(_ location: SourceLocation) {
+    func goToLine(_ location: SourceLocation, selecting length: Int = 0) {
         guard let tab = activeTab else { return }
         let position = Self.editorPosition(location)
         guard isActive, let content = contents[tab.id], content != .loading, !needsSourceView(tab, content) else {
-            pendingLineReveal = (tab.id, position)
+            pendingLineReveal = (tab.id, position, length)
             // 预览切源码要重画：先把编辑器里的状态要回来（分栏预览里可能正改着）
             if isActive, let content = contents[tab.id], content != .loading { rememberScroll(of: tab.id) { [weak self] _ in self?.renderActiveTab() } }
             return
         }
         // 直接跳了就不能再挂着：否则下一次重画（切主题、换行、切回来）会再跳一次，还会压掉 revealChange 与阅读现场的恢复
         pendingLineReveal = nil
-        renderer.revealLine(position)
+        renderer.revealLine(position, length: length)
     }
 
     /// 从 1 数的位置 → 编辑器的从 0 数。行号大到离谱的先截一下（JSON 里的 Int.max 到了 JS 是不精确的浮点数），反正页面会夹到末行。
@@ -1305,6 +1334,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
         guard let content = contents[tab.id], content != .loading else { return }
         let lineReveal = pendingLineReveal.flatMap { $0.tabID == tab.id ? $0.position : nil }
+        let revealLength = lineReveal == nil ? 0 : pendingLineReveal?.length ?? 0
         if lineReveal != nil, needsSourceView(tab, content), let index = tabs.firstIndex(where: { $0.id == tab.id }) {
             // 预览里没有行：Markdown 切到分栏（左边源码、右边照样预览；只读的大文件没有分栏，切源码），HTML 切到源码
             if case .markdown = content { tabs[index].markdownView = isEditable(tab) ? .split : .source } else { tabs[index].htmlView = .source }
@@ -1333,7 +1363,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         // 要跳到行的时候不再定位第一处差异：两个落点会打架
         let diffEdge = lineReveal != nil ? nil : edge ?? (tab.isDiff && !tab.hasDiffPosition ? .first : nil)
         renderer.render(RenderPayload(rendered, scrollTop: tab.scrollTop, wrap: preferences.wordWrap,
-                                      revealChange: diffEdge, revealLine: lineReveal, diffReading: preferences.diffReading,
+                                      revealChange: diffEdge, revealLine: lineReveal, revealLength: revealLength, diffReading: preferences.diffReading,
                                       diffViewState: tab.diffViewState))
         if edge != nil { pendingDiffReveal = nil }
         if lineReveal != nil { pendingLineReveal = nil }

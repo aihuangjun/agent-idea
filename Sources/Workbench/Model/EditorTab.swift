@@ -197,6 +197,8 @@ enum ToolWindow: String {
     case project
     case commit
     case history
+    /// 在项目中查找（全项目文本搜索）。
+    case find
 }
 
 extension ChangeKind {

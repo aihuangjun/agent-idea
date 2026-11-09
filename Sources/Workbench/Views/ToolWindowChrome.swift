@@ -48,6 +48,10 @@ enum ToolWindowIcon {
     static let hide = "minus"
     /// 提交历史：退出比较模式，回到普通历史列表。
     static let exitComparison = "xmark"
+    /// 「查找」工具窗口（在项目中查找）：工具条上的开关，以及全部折叠 / 全部展开。
+    static let findInPath = "text.magnifyingglass"
+    static let collapseAll = "arrow.down.right.and.arrow.up.left"
+    static let expandAll = "arrow.up.left.and.arrow.down.right"
 }
 
 /// 工具窗口里的空态，几个窗口共用。

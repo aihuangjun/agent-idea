@@ -104,17 +104,20 @@ public struct RenderPayload: Equatable, Sendable {
     /// 渲染完跳到哪一行（行列从 0 数，超出范围夹到首尾）：查找文件带了 `路径:行号`、跳到行时标签还没画出来。
     /// 编辑器把光标放过去，只读视图选中那一行，都把它滚到正中；diff 按新版本那一侧算。nil 不跳。
     public var revealLine: EditorCursor?
+    /// 跳到行时从那一列起选中多少（UTF-16 单元，全项目搜索把命中的文字选上）。0 只放光标；随 `revealLine` 编码成它的 `length`。
+    public var revealLength: Int
     public var diffReading: DiffReadingOptions
     /// 编辑器的阅读现场（JSON）：逻辑行、屏幕偏移和已展开区间，随标签往返。
     public var diffViewState: String?
 
     public init(_ content: Content, scrollTop: Double = 0, wrap: Bool = false, revealChange: DiffEdge? = nil, revealLine: EditorCursor? = nil,
-                diffReading: DiffReadingOptions = DiffReadingOptions(), diffViewState: String? = nil) {
+                revealLength: Int = 0, diffReading: DiffReadingOptions = DiffReadingOptions(), diffViewState: String? = nil) {
         self.content = content
         self.scrollTop = scrollTop
         self.wrap = wrap
         self.revealChange = revealChange
         self.revealLine = revealLine
+        self.revealLength = revealLength
         self.diffReading = diffReading
         self.diffViewState = diffViewState
     }
@@ -160,12 +163,20 @@ extension RenderPayload: Encodable {
         case diffReading, analysis, readOnly, diffViewState, baseIdentity
     }
 
+    /// `revealLine` 的值：`{line, ch, length?}`。
+    private enum RevealKey: String, CodingKey { case line, ch, length }
+
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: Key.self)
         try container.encode(scrollTop, forKey: .scrollTop)
         try container.encode(wrap, forKey: .wrap)
         try container.encodeIfPresent(revealChange, forKey: .revealChange)
-        try container.encodeIfPresent(revealLine, forKey: .revealLine)
+        if let revealLine {
+            var reveal = container.nestedContainer(keyedBy: RevealKey.self, forKey: .revealLine)
+            try reveal.encode(revealLine.line, forKey: .line)
+            try reveal.encode(revealLine.ch, forKey: .ch)
+            if revealLength > 0 { try reveal.encode(revealLength, forKey: .length) }
+        }
         switch content {
         case .code(let path, let text, let language, let editable, let cursor, let base, let history):
             try container.encode("code", forKey: .kind)

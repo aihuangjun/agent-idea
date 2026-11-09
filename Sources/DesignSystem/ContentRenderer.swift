@@ -21,6 +21,7 @@ private final class ScriptMessageProxy: NSObject, WKScriptMessageHandler {
 final class CursorRestoringWebView: WKWebView {
     private var cursorTracking: NSTrackingArea?
     var onFind: (() -> Void)?
+    var onFindInPath: (() -> Void)?
     var contextActions: (() -> [ContentRenderer.ContextAction])?
 
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
@@ -44,6 +45,12 @@ final class CursorRestoringWebView: WKWebView {
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if event.charactersIgnoringModifiers?.lowercased() == "f", modifiers == .command || modifiers == .control {
             onFind?()
+            return true
+        }
+        // ⌃⇧F（在项目中查找）：CodeMirror 的 macDefault 键位把 Shift-Ctrl-F 退回 Ctrl-F（goCharRight）当「扩展选区」吃掉，
+        // 到不了菜单，所以在页面之前截下来
+        if event.charactersIgnoringModifiers?.lowercased() == "f", modifiers == [.control, .shift], let onFindInPath {
+            onFindInPath()
             return true
         }
         return super.performKeyEquivalent(with: event)
@@ -84,6 +91,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     private var showingHTML = false
     private let htmlPreviewHandler = HTMLPreviewHandler()
     public var onFind: (() -> Void)?
+    /// 焦点在正文里时按了 ⌃⇧F（在项目中查找）。
+    public var onFindInPath: (() -> Void)?
     public var displayedWebView: WKWebView { showingHTML ? (htmlWebView ?? webView) : webView }
 
     /// 正文里点了 http(s) 链接。
@@ -222,6 +231,7 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         webView.configuration.userContentController.add(messageProxy, name: "ide")
         webView.navigationDelegate = self
         (webView as? CursorRestoringWebView)?.onFind = { [weak self] in self?.onFind?() }
+        (webView as? CursorRestoringWebView)?.onFindInPath = { [weak self] in self?.onFindInPath?() }
         (webView as? CursorRestoringWebView)?.contextActions = { [weak self] in self?.contextActions?() ?? [] }
         // 正文区不接文件拖放：拖进来的目录该由窗口那一层当「打开项目」处理，WebKit 接了会当成导航。
         webView.unregisterDraggedTypes()
@@ -267,6 +277,7 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
                 let preview = CursorRestoringWebView(frame: webView.superview?.bounds ?? webView.frame, configuration: configuration)
                 preview.navigationDelegate = self
                 preview.onFind = { [weak self] in self?.onFind?() }
+                preview.onFindInPath = { [weak self] in self?.onFindInPath?() }
                 preview.autoresizingMask = [.width, .height]
                 preview.pageZoom = zoom
                 webView.superview?.addSubview(preview)
@@ -368,15 +379,17 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
 
     /// 跳到当前内容的某一行（行列从 0 数，render.js 夹到首尾）：不重画，编辑器里的草稿、撤销历史都不动。
     /// 页面还没就绪、正等着画一份内容时，挂到那份 payload 上，画完再跳。回调告诉调用方这种视图有没有行（HTML 预览没有）。
-    public func revealLine(_ position: EditorCursor, completion: @escaping (Bool) -> Void = { _ in }) {
+    /// `length` > 0 时从那一列起选中这么多（UTF-16 单元）：全项目搜索打开结果后把命中的文字选上。
+    public func revealLine(_ position: EditorCursor, length: Int = 0, completion: @escaping (Bool) -> Void = { _ in }) {
         guard !showingHTML else { completion(false); return }
         guard isReady else {
             guard pendingPayload != nil else { completion(false); return }
             pendingPayload?.revealLine = position
+            pendingPayload?.revealLength = max(0, length)
             completion(true)
             return
         }
-        webView.evaluateJavaScript("window.ide.revealLine({line: \(position.line), ch: \(position.ch)})") { value, error in
+        webView.evaluateJavaScript("window.ide.revealLine({line: \(position.line), ch: \(position.ch), length: \(max(0, length))})") { value, error in
             if let error { Log.warn("web", "revealLine 失败：\(error)") }
             completion((value as? Bool) ?? false)
         }
@@ -393,6 +406,16 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
                 return
             }
             completion(FileReference.lineRange(fromLine: from.line, fromColumn: from.ch, toLine: to.line, toColumn: to.ch))
+        }
+    }
+
+    /// 正文里选中的文字（编辑器的选区，只读视图的 DOM 选区）：在项目中查找拿它预填。没有选区、页面没就绪、HTML 预览时为 nil。
+    public func selectedText(_ completion: @escaping (String?) -> Void) {
+        guard !showingHTML, isReady else { completion(nil); return }
+        webView.evaluateJavaScript("window.ide.selectedText()") { value, error in
+            if let error { Log.warn("web", "selectedText 失败：\(error)") }
+            let text = value as? String
+            completion(text?.isEmpty == false ? text : nil)
         }
     }
 

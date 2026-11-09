@@ -43,7 +43,7 @@ struct ProjectTreeView: View {
                     session.revealActiveTab()
                 }
                     .disabled(session.activeTab == nil)
-                IconButton("arrow.down.right.and.arrow.up.left", help: "全部折叠", size: 22) { session.collapseAll() }
+                IconButton(ToolWindowIcon.collapseAll, help: "全部折叠", size: 22) { session.collapseAll() }
             }
             if search.isActive {
                 FileSearchBar(search: search, open: openResult, close: closeSearch)
