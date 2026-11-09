@@ -586,6 +586,8 @@ final class ProjectSession: ObservableObject, Identifiable {
             replaced.cursor = tab.cursor
             replaced.history = tab.history
             replaced.lookedUpStoredHistory = tab.lookedUpStoredHistory
+            // 折叠现场带过去：内容没变（页面按全文哈希核对，对不上自己丢），改名后折起的区块不该全展开
+            replaced.foldState = tab.foldState
             replaced.markdownView = tab.markdownView
             replaced.htmlView = tab.htmlView
             tabs[index] = replaced
