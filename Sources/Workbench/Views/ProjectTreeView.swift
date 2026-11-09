@@ -35,7 +35,7 @@ struct ProjectTreeView: View {
                 }
                 IconButton(ToolWindowIcon.syncWithRemote, help: syncHelp, size: 22) { session.requestSync() }
                     .disabled(!session.canRequestSync)
-                IconButton("magnifyingglass", help: "查找文件（⌘F）", isActive: search.isActive, size: 22) {
+                IconButton("magnifyingglass", help: "查找文件（⇧⌘F），可粘贴 路径:行号", isActive: search.isActive, size: 22) {
                     if search.isActive { closeSearch() } else { search.activate() }
                 }
                 IconButton("scope", help: "定位当前打开的文件（⌥⌘L）", size: 22) {
@@ -84,7 +84,8 @@ struct ProjectTreeView: View {
     /// 打开一条搜索结果：固定标签、关掉搜索、在树上定位——照 IDEA 的 Go to File。
     private func openResult(_ match: FileSearchMatch) {
         let url = search.url(for: match)
-        session.openFile(url, pinned: true)
+        // 查找框里带着行号（`Sources/Foo.swift:12`）就跳过去；关搜索会清掉它，先取出来
+        session.openFile(url, pinned: true, at: search.location)
         closeSearch()
         session.reveal(url)
     }
@@ -294,6 +295,12 @@ private struct FileSearchBar: View {
                 }
                 return true
             } onFocusChange: { isFieldFocused = $0 }
+            if let location = search.location {
+                // 粘进来的 `路径:行号`：告诉用户行号认出来了，打开后会跳过去
+                Text(location.column.map { "行 \(location.line):\($0)" } ?? "行 \(location.line)")
+                    .font(Theme.smallFont).foregroundStyle(Theme.secondaryText).lineLimit(1).fixedSize()
+                    .toolTip("打开后跳到第 \(location.line) 行")
+            }
             if search.isIndexing {
                 ProgressView().controlSize(.mini).toolTip("正在建索引…")
             } else if !search.query.isEmpty {
@@ -641,6 +648,8 @@ private struct TreeContextMenu: View {
         Button("重命名…") { requestRename(node) }
         Button("删除…") { requestDelete(node) }
         Divider()
+        // 相对项目根的路径，粘给 Agent 用（IDEA 的 Copy Reference；目录树里没有行号）
+        Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个引用" : "复制引用") { copyReferences() }
         Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个绝对路径" : "复制绝对路径") { copyAbsolutePaths() }
         Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个文件名" : "复制文件名") { copyFileNames() }
         Button("在访达中显示") { Desktop.revealInFinder(node.url) }
@@ -658,6 +667,12 @@ private struct TreeContextMenu: View {
     /// 复制作用到哪些行：点在多选里就是整个多选，否则只有这一行（跟删除、拖拽一个规矩）。
     private var copyTargets: [FileNode] {
         TreeSelection.targets(clicked: node, selection: session.selection, selected: session.selectedNodes)
+    }
+
+    private func copyReferences() {
+        let references = copyTargets.map { session.referencePath(of: $0.url) }
+        Desktop.copyToClipboard(references.joined(separator: "\n"))
+        session.notify(references.count > 1 ? "已复制 \(references.count) 个引用" : "已复制 \(references[0])")
     }
 
     private func copyAbsolutePaths() {

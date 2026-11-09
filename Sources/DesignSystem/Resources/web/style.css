@@ -132,6 +132,8 @@ body { font-family: var(--sans); -webkit-font-smoothing: antialiased; overflow-x
 .code-view .lines { flex: 1 0 auto; min-width: 0; }
 .code-view .line { white-space: pre; padding: 0 12px 0 14px; }
 .code-view .line:hover { background: var(--row-hover); }
+/* 跳到行停在哪一行（只读视图没有光标，用底色标出来） */
+.code-view .line.current-line { background: var(--current-change); box-shadow: inset 3px 0 0 var(--link); }
 /* 自动换行：每行自带行号 */
 .code-view.wrap { display: block; width: auto; }
 .code-view.wrap .line { display: flex; align-items: flex-start; padding: 0; }
@@ -239,6 +241,8 @@ table.diff td.del .wd { background: var(--del-bg-strong); }
 /* navigateChange 跳到的那一处：左侧一道蓝条 + 淡淡的底色，滚过去一眼能找到 */
 table.diff tr.current-change td { background-image: linear-gradient(var(--current-change), var(--current-change)); }
 table.diff tr.current-change td:first-child { box-shadow: inset 3px 0 0 var(--link); }
+table.diff tr.current-line td { background-image: linear-gradient(var(--current-change), var(--current-change)); }
+table.diff tr.current-line td:first-child { box-shadow: inset 3px 0 0 var(--link); }
 table.diff td.src .marker { display: inline-block; width: 1.1em; color: var(--text-3); user-select: none; -webkit-user-select: none; }
 .diff-summary { padding: 6px 14px; font-size: 12px; color: var(--text-2); background: var(--panel); border-bottom: 1px solid var(--border); display: flex; gap: 12px; align-items: center; }
 .diff-summary .add { color: var(--add-fg); }

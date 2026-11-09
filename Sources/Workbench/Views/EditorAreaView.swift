@@ -14,6 +14,7 @@ struct EditorAreaView: View {
                 TabBar(session: session)
                 EditorHeader(session: session)
                 if session.isFindShown { FileFindBar(session: session) }
+                if session.isGoToLineShown { GoToLineBar(session: session) }
             }
             // WebView 常驻：没有标签时盖一层空态，而不是把它从视图树里拿掉——
             // WKWebView 挂上/摘下一次要几十毫秒，第一次打开文件、关掉最后一个标签都会顿一下。
@@ -58,6 +59,8 @@ private struct EmptyEditorView: View {
                 shortcut("文件内查找", "⌘F / Ctrl+F")
                 shortcut("查找文件", "⇧⌘F")
                 shortcut("定位当前文件", "⌥⌘L")
+                shortcut("跳到行", "⌘L")
+                shortcut("复制引用（路径:行号）", "⌥⇧⌘C")
                 shortcut("后退 / 前进", "⌥← / ⌥→")
                 shortcut("上一处 / 下一处变更", "⇧F7 / F7")
                 shortcut("保存", "⌘S")
@@ -164,6 +167,13 @@ private struct TabItem: View {
                 Button(action.title, action: action.perform)
                 Divider()
             }
+            Button("复制引用") {
+                session.reference(of: tab.id) { text in
+                    Desktop.copyToClipboard(text)
+                    session.notify("已复制 \(text)")
+                }
+            }
+            Divider()
             Button("关闭") { session.closeTab(tab.id) }
             Button("关闭其他") { session.closeOtherTabs(tab.id) }
             Button("关闭全部") { session.closeAllTabs() }

@@ -83,6 +83,19 @@ public struct AgentIDEARootScene: Scene {
             }
             // 撤销 / 重做按焦点分发（UndoDispatcher）。焦点在编辑器里时 ⌘Z 由 CodeMirror 处理、不会到这里；
             // 标题显示的是文件操作栈顶那一步（「撤销重命名 a.txt」）
+            // IDEA 的 Copy Reference（⌥⇧⌘C）：相对项目根的路径加行号，粘给 Agent 用
+            CommandGroup(after: .pasteboard) {
+                Divider()
+                Button("复制引用（路径:行号）") {
+                    guard let session = workbench.active, let id = session.activeTabID else { return }
+                    session.reference(of: id) { text in
+                        Desktop.copyToClipboard(text)
+                        session.notify("已复制 \(text)")
+                    }
+                }
+                .keyboardShortcut("c", modifiers: [.command, .option, .shift])
+                .disabled(workbench.active?.activeTab == nil)
+            }
             CommandGroup(replacing: .undoRedo) {
                 Button(workbench.active?.undoTitle ?? "撤销") { UndoDispatcher.undo(workbench) }
                     .keyboardShortcut("z", modifiers: .command)
@@ -121,6 +134,10 @@ public struct AgentIDEARootScene: Scene {
                 Button("在项目视图中定位当前文件") { workbench.active?.revealActiveTab() }
                     .keyboardShortcut("l", modifiers: [.command, .option])
                     .disabled(workbench.active?.activeTab == nil)
+                // IDEA 的 Go to Line（⌘L）
+                Button("跳到行…") { workbench.active?.showGoToLine() }
+                    .keyboardShortcut("l", modifiers: .command)
+                    .disabled(!(workbench.active?.canGoToLine ?? false))
                 Divider()
                 Button("后退") { workbench.active?.goBack() }
                     .keyboardShortcut(.leftArrow, modifiers: .option)

@@ -3,6 +3,7 @@
  * Swift 侧主要做一件事：window.ide.render(payload)。Swift 那边的事实源是 DesignSystem/RenderPayload.swift，
  * 改一边必须改另一边。每个 payload 都带 scrollTop（渲染完滚到哪）和 wrap（代码是否自动换行），kind 决定画什么：
  * revealChange 为 "first" / "last" 时定位 diff 的第一处 / 最后一处差异；恢复标签位置时省略。
+ * revealLine?: {line, ch}（从 0 数）渲染完跳到那一行，与 window.ide.revealLine 同一套做法；用过即清，主题 / 换行重画不再跳。
  *   code     { path, text, language, editable, cursor?: {line, ch}, base?: HEAD 里的内容, history?: 编辑器撤销历史的 JSON 文本 }
  *   markdown { path, markdown, docDir, view: "preview" | "source" | "split", editable, cursor?, base?, history? }
  *   image    { path, url, sizeText }
@@ -21,6 +22,10 @@
  * 焦点在编辑器里时 ⌘Z / ⇧⌘Z 由 CodeMirror 自己处理，不会传到应用菜单。
  * 基线是异步取的，到了就 window.ide.setBase({ path, base })，编辑器在行号右侧画「改过（蓝）/ 新增（绿）」的标记（IDEA 的 gutter）。
  * window.ide.setTheme("light" | "dark") 切浅色 / 深色：只换根元素的 class，颜色都在 style.css 的变量里。
+ * window.ide.revealLine({line, ch}) 跳到行（从 0 数，夹到首尾）：编辑器放光标、只读代码视图与只读 diff 表格选中那一行，都滚到正中；
+ *   diff 一律按新版本那一侧（并排的右边）。回 true / false（这种视图没有行）。
+ * window.ide.reference() → { from: {line, ch}, to: {line, ch} } 或 null：选区 / 光标在新版本里的位置（从 0 数，复制引用用），
+ *   并排 diff 里选的是左边（旧版本）就按差异换算到右边；Markdown 预览、图片这些没有行号的视图回 null。
  * window.ide.navigateChange("next" | "previous") 跳到下一处 / 上一处变更（IDEA 的 F7 / ⇧F7）：编辑器里按光标找、把那一行滚到正中；
  * 只读 diff 表格按连续的变更行段落跳。回 { index, total }，没有可跳的回 null；页面里按 F7 / ⇧F7 也走它。
  * 渲染完、跳转后、光标移动、改动、滚动时都会 post changes { hasPrevious, hasNext }，宿主据此把到头的箭头灰掉。
@@ -119,6 +124,7 @@
   const diffGutterMarks = new Map();
   let diffWordMarks = [];
   let editTimer = null;    // 停手之后再发 edited，别每敲一个键就把整份文本送过去
+  let referencePane = "new"; // 并排 diff 里最后点的是哪一边（复制引用用）
   let editorLayoutTimer = null;
   const EDIT_DEBOUNCE = 300;
 
@@ -318,6 +324,7 @@
     editor = null;
     sideDiff = null;
     diffViewport = null;
+    referencePane = "new";
     unifiedBase = null;
     diffGutterMarks.clear();
     diffWordMarks = [];
@@ -426,6 +433,9 @@
     }), payload.analysis, payload.diffReading);
     editor = sideDiff.editor();
     diffViewport = sideDiff.viewport;
+    // 复制引用要知道选区在哪一边：左边是旧版本，行号得换算到右边
+    sideDiff.leftOriginal().on("focus", () => { referencePane = "old"; });
+    editor.on("focus", () => { referencePane = "new"; });
     attachEditorEvents();
     if (edit.cursor) editor.setCursor(edit.cursor);
     restoreHistory(edit.history);
@@ -490,7 +500,7 @@
   }
 
   function restoreDiffViewState(payload) {
-    if (!diffViewport || !payload.diffViewState || payload.revealChange) return;
+    if (!diffViewport || !payload.diffViewState || payload.revealChange || payload.revealLine) return;
     let state;
     try { state = JSON.parse(payload.diffViewState); } catch (_) { return; }
     if (!state || !Number.isInteger(state.line) || state.line < 0 || !Number.isFinite(state.offset) || !Number.isFinite(state.left)) return;
@@ -531,6 +541,7 @@
       try {
         text = JSON.stringify(JSON.parse(text), null, 2);
         notices.push("原文是单行 JSON，已格式化显示");
+        payload.reformatted = true;   // 显示的行号与原文对不上：不能跳到行、不报行号
       } catch (_) { /* 不是合法 JSON 就算了 */ }
     }
     if (text.length > HIGHLIGHT_LIMIT) notices.push("文件较大，已关闭语法高亮");
@@ -809,7 +820,7 @@
         if (row.type === "hunk") { parts.push(hunkRow(row.text, 3)); continue; }
         const k = row.k;
         const marker = k === "add" ? "+" : k === "del" ? "−" : " ";
-        parts.push(`<tr${k === "add" || k === "del" ? ' class="changed"' : ""}><td class="ln ${k}">${row.o == null ? "" : row.o}</td><td class="ln ${k}">${row.n == null ? "" : row.n}</td>` +
+        parts.push(`<tr${k === "add" || k === "del" ? ' class="changed"' : ""}${row.n == null ? "" : ` data-line="${row.n}"`}><td class="ln ${k}">${row.o == null ? "" : row.o}</td><td class="ln ${k}">${row.n == null ? "" : row.n}</td>` +
           `<td class="src ${k}"><span class="marker">${marker}</span>${highlightOne(row.t, language) || " "}</td></tr>`);
       }
       parts.push(`</tbody></table>`);
@@ -826,7 +837,7 @@
         const modified = l.k === "del" && r.k === "add";
         const leftMark = l.k === "del" ? "diff-gutter-" + (modified ? "modified" : "removed") : "";
         const rightMark = r.k === "add" ? "diff-gutter-" + (modified ? "modified" : "added") : "";
-        parts.push(`<tr${changed ? ' class="changed"' : ""}><td class="ln ${l.k} ${leftMark}">${l.n == null ? "" : l.n}</td>${cell(l, language, ranges && ranges.left)}` +
+        parts.push(`<tr${changed ? ' class="changed"' : ""}${r.n == null ? "" : ` data-line="${r.n}"`}><td class="ln ${l.k} ${leftMark}">${l.n == null ? "" : l.n}</td>${cell(l, language, ranges && ranges.left)}` +
           `<td class="ln right-ln ${r.k} ${rightMark}">${r.n == null ? "" : r.n}</td>${cell(r, language, ranges && ranges.right)}</tr>`);
       }
       parts.push(`</tbody></table>`);
@@ -1074,6 +1085,141 @@
     return true;
   }
 
+  /* ---------- 跳到行 / 复制引用 ---------- */
+
+  /* 只读代码视图的行（换行与不换行两种 DOM 都是 .line）；格式化显示过的 JSON 行号与原文对不上，不算。 */
+  function staticCodeLines() {
+    if (!current || current.reformatted) return null;
+    const view = root.querySelector(".code-view");
+    return view ? view.querySelectorAll(".line") : null;
+  }
+
+  /* 只读 diff 表格里带新版本行号的行（data-line 从 1 数）。 */
+  function staticDiffRows() {
+    return Array.from(root.querySelectorAll("table.diff tr[data-line]"));
+  }
+
+  function markStaticLine(element) {
+    for (const old of root.querySelectorAll(".current-line")) old.classList.remove("current-line");
+    element.classList.add("current-line");
+    const rect = element.getBoundingClientRect();
+    window.scrollTo(window.scrollX, Math.max(0, rect.top + window.scrollY - window.innerHeight / 2 + rect.height / 2));
+  }
+
+  /* 宿主给的行列（从 0 数）→ 非负整数。不用 `| 0`：大到超过 32 位的数会被它折成别的值。 */
+  function toIndex(value) {
+    const number = Math.floor(Number(value));
+    return Number.isFinite(number) && number > 0 ? number : 0;
+  }
+
+  /* 只读视图里把选区收成一个插入点放在那一行：之后复制引用拿到的就是这一行。 */
+  function placeCaret(element, ch) {
+    const source = element.querySelector(".src") || element;
+    const walker = document.createTreeWalker(source, NodeFilter.SHOW_TEXT);
+    let remaining = ch, node, target = null, offset = 0;
+    while ((node = walker.nextNode())) {
+      target = node;
+      if (remaining <= node.length) { offset = remaining; break; }
+      remaining -= node.length;
+      offset = node.length;
+    }
+    const selection = window.getSelection();
+    if (!selection) return;
+    if (target) selection.collapse(target, offset); else selection.collapse(source, 0);
+  }
+
+  /* 编辑器：光标放到那一行那一列，把它滚到视口正中；折叠着的上下文先展开。并排 diff 只跳右边（新版本）。 */
+  function revealEditorPosition(target) {
+    const line = Math.min(toIndex(target.line), editor.lastLine());
+    const ch = Math.min(toIndex(target.ch), editor.getLine(line).length);
+    if (diffViewport) diffViewport.use(editor);
+    if (sideDiff && sideDiff.folds) sideDiff.folds.reveal(editor, line);
+    if (contextFolds) contextFolds.reveal(editor, line);
+    editor.setCursor({ line, ch });
+    const info = editor.getScrollInfo();
+    const top = editor.heightAtLine(line, "local");
+    editor.scrollTo(null, Math.max(0, top - info.clientHeight / 2 + editor.defaultTextHeight() / 2));
+  }
+
+  function revealLine(target) {
+    if (!current || !target) return false;
+    if (editor) { revealEditorPosition(target); return true; }
+    const line = toIndex(target.line);
+    const lines = staticCodeLines();
+    if (lines && lines.length) {
+      const element = lines[Math.min(line, lines.length - 1)];
+      markStaticLine(element);
+      placeCaret(element, toIndex(target.ch));
+      return true;
+    }
+    // 只读 diff 表格只有补丁里那几段：取新版本里不早于目标的第一行，都早于它就取最后一行
+    const rows = current.kind === "diff" ? staticDiffRows() : [];
+    if (rows.length) {
+      const row = rows.find((candidate) => Number(candidate.dataset.line) >= line + 1) || rows[rows.length - 1];
+      markStaticLine(row);
+      placeCaret(row.querySelector("td.src:last-child") || row, 0);
+      return true;
+    }
+    return false;
+  }
+
+  /* 并排 diff 左边（旧版本）的行 → 右边（新版本）的行：改动段之外按前面累积的行数差平移，段内按位置配对。 */
+  function newLineForOld(line) {
+    let delta = 0;
+    // 分析结果缺席时（还没算完 / 超限整块显示前）按行号原样对应
+    const changes = (current.analysis && current.analysis.changes) || [];
+    for (const change of changes) {
+      if (line < change.oldStart) break;
+      if (line < change.oldStart + change.oldCount) {
+        return Math.min(change.newStart + Math.min(line - change.oldStart, Math.max(0, change.newCount - 1)), editor.lastLine());
+      }
+      delta = change.newStart + change.newCount - (change.oldStart + change.oldCount);
+    }
+    return Math.max(0, Math.min(line + delta, editor.lastLine()));
+  }
+
+  /* 只读视图里 DOM 选区的一端 → {line, ch}；不在有行号的地方回 null。 */
+  function staticPosition(node, offset) {
+    const element = node && (node.nodeType === 1 ? node : node.parentElement);
+    if (!element) return null;
+    const lines = staticCodeLines();
+    const lineElement = lines && element.closest(".code-view .line");
+    if (lineElement) {
+      const index = Array.prototype.indexOf.call(lines, lineElement);
+      if (index < 0) return null;
+      let ch = 0;
+      try {
+        const range = document.createRange();
+        range.setStart(lineElement.querySelector(".src") || lineElement, 0);
+        range.setEnd(node, offset);
+        ch = range.toString().length;
+      } catch (_) { /* 落在行号上：算行首 */ }
+      return { line: index, ch };
+    }
+    const row = current && current.kind === "diff" && element.closest("table.diff tr");
+    if (!row) return null;
+    // 删除的行没有新版本行号：删除发生在下一个有行号的行之前，取它；后面没有就取前一个
+    for (let probe = row; probe; probe = probe.nextElementSibling) if (probe.dataset.line) return { line: Number(probe.dataset.line) - 1, ch: 0 };
+    for (let probe = row.previousElementSibling; probe; probe = probe.previousElementSibling) if (probe.dataset.line) return { line: Number(probe.dataset.line) - 1, ch: 0 };
+    return null;
+  }
+
+  function selectionReference() {
+    if (!current) return null;
+    if (editor) {
+      const pane = sideDiff && referencePane === "old" ? sideDiff.leftOriginal() : editor;
+      const from = pane.getCursor("from"), to = pane.getCursor("to");
+      if (pane === editor) return { from: { line: from.line, ch: from.ch }, to: { line: to.line, ch: to.ch } };
+      return { from: { line: newLineForOld(from.line), ch: from.ch }, to: { line: newLineForOld(to.line), ch: to.ch } };
+    }
+    const selection = window.getSelection();
+    if (!selection || !selection.rangeCount) return null;
+    const range = selection.getRangeAt(0);
+    const from = staticPosition(range.startContainer, range.startOffset), to = staticPosition(range.endContainer, range.endOffset);
+    if (!from && !to) return null;
+    return { from: from || to, to: to || from };
+  }
+
   /* ---------- 入口 ---------- */
 
   window.ide = {
@@ -1113,6 +1259,10 @@
         revealDiffChange(payload.revealChange);
         // 页面内部切主题 / 换行重画时，也保留已经定位后的状态。
         payload.revealChange = null;
+      }
+      if (payload.revealLine) {
+        revealLine(payload.revealLine);
+        payload.revealLine = null;
       }
       // 告诉宿主画完了、花了多久（宿主据此记日志、探针据此计时）
       post({ type: "rendered", kind: payload.kind, ms: Math.round(performance.now() - started) });
@@ -1172,6 +1322,14 @@
       else decorateUnified();
       reportChangePosition();
       return true;
+    },
+    /* 跳到行（从 0 数）；回 false 表示这种视图没有行。 */
+    revealLine(target) {
+      return revealLine(target);
+    },
+    /* 选区 / 光标在新版本里的位置（复制引用）；拿不到回 null。 */
+    reference() {
+      return selectionReference();
     },
     /* 上一处 / 下一处变更；回 { index, total }，没有可跳的回 null。 */
     navigateChange(direction) {

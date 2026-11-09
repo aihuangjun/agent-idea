@@ -101,15 +101,20 @@ public struct RenderPayload: Equatable, Sendable {
     public var wrap: Bool
     /// 首次打开或跨文件导航时的落点；nil 恢复标签原来的位置。
     public var revealChange: DiffEdge?
+    /// 渲染完跳到哪一行（行列从 0 数，超出范围夹到首尾）：查找文件带了 `路径:行号`、跳到行时标签还没画出来。
+    /// 编辑器把光标放过去，只读视图选中那一行，都把它滚到正中；diff 按新版本那一侧算。nil 不跳。
+    public var revealLine: EditorCursor?
     public var diffReading: DiffReadingOptions
     /// 编辑器的阅读现场（JSON）：逻辑行、屏幕偏移和已展开区间，随标签往返。
     public var diffViewState: String?
 
-    public init(_ content: Content, scrollTop: Double = 0, wrap: Bool = false, revealChange: DiffEdge? = nil, diffReading: DiffReadingOptions = DiffReadingOptions(), diffViewState: String? = nil) {
+    public init(_ content: Content, scrollTop: Double = 0, wrap: Bool = false, revealChange: DiffEdge? = nil, revealLine: EditorCursor? = nil,
+                diffReading: DiffReadingOptions = DiffReadingOptions(), diffViewState: String? = nil) {
         self.content = content
         self.scrollTop = scrollTop
         self.wrap = wrap
         self.revealChange = revealChange
+        self.revealLine = revealLine
         self.diffReading = diffReading
         self.diffViewState = diffViewState
     }
@@ -150,7 +155,7 @@ extension RenderPayload: Encodable {
     }
 
     private enum Key: String, CodingKey {
-        case kind, scrollTop, wrap, revealChange, path, text, language, editable, cursor, base, history, markdown, docDir, view, url, sizeText
+        case kind, scrollTop, wrap, revealChange, revealLine, path, text, language, editable, cursor, base, history, markdown, docDir, view, url, sizeText
         case mode, rows, binary, empty, added, removed, emptyReason, title, detail, edit, oldText, newText, filePath
         case diffReading, analysis, readOnly, diffViewState, baseIdentity
     }
@@ -160,6 +165,7 @@ extension RenderPayload: Encodable {
         try container.encode(scrollTop, forKey: .scrollTop)
         try container.encode(wrap, forKey: .wrap)
         try container.encodeIfPresent(revealChange, forKey: .revealChange)
+        try container.encodeIfPresent(revealLine, forKey: .revealLine)
         switch content {
         case .code(let path, let text, let language, let editable, let cursor, let base, let history):
             try container.encode("code", forKey: .kind)

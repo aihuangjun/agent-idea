@@ -1218,3 +1218,135 @@ private func renderAndInspect(_ payload: RenderPayload, size: CGSize = CGSize(wi
     #expect(parts[3] == "rgb(0, 51, 179)", "语法色也换成浅色那一套（IntelliJ Light 的关键字深蓝）")
     #expect(parts[4] == "1", "切主题之后正文得还在")
 }
+
+/// 跳到行与复制引用（编辑器）：payload 的 revealLine 在渲染完把光标放过去、滚到正中，用过即清（切主题重画不再跳）；
+/// window.ide.revealLine 夹到首尾、列夹到行长；reference 报选区 / 光标，整行选到下一行行首时那一行不算。
+@Test @MainActor func editorRevealsLinesCentredAndReportsTheSelectionForReferences() async throws {
+    let text = (1...300).map { "line \($0) text" }.joined(separator: "\n")
+    var captured: ContentRenderer?
+    let result = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.txt", text: text, language: nil, editable: true), revealLine: EditorCursor(line: 199, ch: 5)),
+        size: CGSize(width: 700, height: 400),
+        configure: { captured = $0 },
+        inspect: """
+        (() => {
+          const cm = document.querySelector('.CodeMirror').CodeMirror;
+          const info = cm.getScrollInfo();
+          const offset = cm.heightAtLine(199, 'local') - info.top;
+          const centred = Math.abs(offset - info.clientHeight / 2) < cm.defaultTextHeight() * 2;
+          const first = cm.getCursor().line + ':' + cm.getCursor().ch;
+          cm.setCursor({line: 3, ch: 0});
+          window.ide.setTheme('light');
+          const afterTheme = document.querySelector('.CodeMirror').CodeMirror.getCursor().line;
+          const clamped = [window.ide.revealLine({line: 100000, ch: 99}), document.querySelector('.CodeMirror').CodeMirror.getCursor().line,
+            document.querySelector('.CodeMirror').CodeMirror.getCursor().ch].join(':');
+          const cm2 = document.querySelector('.CodeMirror').CodeMirror;
+          cm2.setSelection({line: 11, ch: 2}, {line: 19, ch: 0});
+          const selected = JSON.stringify(window.ide.reference());
+          return [first, centred, afterTheme, clamped, selected].join('|');
+        })()
+        """
+    )
+    #expect(result as? String == #"199:5|true|3|true:299:13|{"from":{"line":11,"ch":2},"to":{"line":19,"ch":0}}"#)
+    let renderer = try #require(captured)
+    // Swift 侧换算成从 1 数的行范围：选到第 20 行（从 0 数的 19）行首，那一行不算
+    let lines = Locked<ClosedRange<Int>?>(nil)
+    let done = Locked(false)
+    renderer.referenceLines { lines.value = $0; done.value = true }
+    let deadline = Date().addingTimeInterval(10)
+    while !done.value, Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+    #expect(lines.value == 12...19)
+}
+
+/// 只读代码视图没有光标：跳到行给那一行标底色、滚到正中，并把 DOM 选区放过去（之后复制引用就是这一行）；
+/// 两种 DOM（换行 / 不换行）都认。格式化显示过的单行 JSON 行号对不上原文：不跳、不报行号。
+@Test @MainActor func readOnlyCodeRevealsLinesAndReportsDomSelections() async throws {
+    let text = (1...300).map { "line \($0)" }.joined(separator: "\n")
+    for wrap in [false, true] {
+        let result = try await renderAndInspect(
+            RenderPayload(.code(path: "/x/a.txt", text: text, language: nil), wrap: wrap, revealLine: EditorCursor(line: 150, ch: 2)),
+            size: CGSize(width: 700, height: 400),
+            inspect: """
+            (() => {
+              const lines = [...document.querySelectorAll('.code-view .line')];
+              const marked = lines.indexOf(document.querySelector('.code-view .line.current-line'));
+              const rect = lines[150].getBoundingClientRect();
+              const centred = Math.abs(rect.top + rect.height / 2 - innerHeight / 2) < rect.height * 2;
+              const caret = JSON.stringify(window.ide.reference());
+              const source = node => node.querySelector('.src') || node;
+              const range = document.createRange();
+              range.setStart(source(lines[3]).firstChild, 1);
+              range.setEnd(source(lines[5]).firstChild, 2);
+              getSelection().removeAllRanges(); getSelection().addRange(range);
+              const selected = JSON.stringify(window.ide.reference());
+              const clamped = window.ide.revealLine({line: 99999, ch: 0}) && lines.indexOf(document.querySelector('.code-view .line.current-line'));
+              return [marked, centred, caret, selected, clamped].join('|');
+            })()
+            """
+        )
+        #expect(result as? String == #"150|true|{"from":{"line":150,"ch":2},"to":{"line":150,"ch":2}}|{"from":{"line":3,"ch":1},"to":{"line":5,"ch":2}}|299"#, "wrap=\(wrap)")
+    }
+    let json = "{" + (1...20).map { "\"key\($0)\": \($0)" }.joined(separator: ", ") + "}"
+    let formatted = try await renderAndInspect(
+        RenderPayload(.code(path: "/x/a.json", text: json, language: "json")),
+        inspect: "[window.ide.revealLine({line: 3, ch: 0}), window.ide.reference()].join('|')"
+    )
+    #expect(formatted as? String == "false|")
+}
+
+/// diff 的行号按新版本：只读补丁表格跳到不早于目标的第一行，选在删除行上报下一行；
+/// 并排全文 diff 只跳右边，选区在左边（旧版本）时按差异换算到右边。
+@Test @MainActor func diffRevealsAndReferencesTheNewSide() async throws {
+    let diff = UnifiedDiffParser.parse("""
+    --- a/a.txt
+    +++ b/a.txt
+    @@ -10,3 +10,3 @@
+     ten
+    -old eleven
+    +new eleven
+     twelve
+    @@ -40,2 +40,3 @@
+     forty
+    +inserted
+     forty-one
+    """)
+    for mode in DiffViewMode.allCases {
+        let result = try await renderAndInspect(
+            RenderPayload(.diff(path: "a.txt", language: nil, diff: diff, mode: mode, emptyReason: nil), revealLine: EditorCursor(line: 19, ch: 0)),
+            inspect: """
+            (() => {
+              const marked = document.querySelector('table.diff tr.current-line').dataset.line;
+              const reference = JSON.stringify(window.ide.reference());
+              const deleted = [...document.querySelectorAll('table.diff tr')].find(row => row.textContent.includes('old eleven') && !row.dataset.line)
+                || [...document.querySelectorAll('table.diff tr')].find(row => row.textContent.includes('old eleven'));
+              const range = document.createRange(); range.selectNodeContents(deleted.querySelector('td.src'));
+              getSelection().removeAllRanges(); getSelection().addRange(range);
+              return [marked, reference, window.ide.reference().from.line].join('|');
+            })()
+            """
+        )
+        // 第 20 行不在补丁里：落到第 40 行；删除行（单列）报它后面的新行 11，并排里同一行右边就是新行 11
+        #expect(result as? String == #"40|{"from":{"line":39,"ch":0},"to":{"line":39,"ch":0}}|10"#, "\(mode)")
+    }
+
+    let old = (1...30).map { "line \($0)" }.joined(separator: "\n")
+    let new = "new a\nnew b\nnew c\n" + old
+    let side = try await renderAndInspect(
+        RenderPayload(.diff(path: "a.txt", language: nil, diff: FileDiff(oldPath: nil, newPath: nil, isBinary: false, hunks: []), mode: .sideBySide, emptyReason: nil,
+                            edit: DiffEdit(oldText: old, newText: new, filePath: "/x/a.txt")), revealLine: EditorCursor(line: 20, ch: 1)),
+        inspect: """
+        (() => {
+          const right = document.querySelector('.CodeMirror-merge-editor .CodeMirror').CodeMirror;
+          const left = [...document.querySelectorAll('.CodeMirror')].map(node => node.CodeMirror).find(cm => cm !== right);
+          const jumped = right.getCursor().line + ':' + right.getCursor().ch;
+          left.setSelection({line: 4, ch: 0}, {line: 6, ch: 3});
+          CodeMirror.signal(left, 'focus', left);
+          const fromLeft = JSON.stringify(window.ide.reference());
+          CodeMirror.signal(right, 'focus', right);
+          right.setCursor({line: 2, ch: 1});
+          return [jumped, fromLeft, JSON.stringify(window.ide.reference())].join('|');
+        })()
+        """
+    )
+    #expect(side as? String == #"20:1|{"from":{"line":7,"ch":0},"to":{"line":9,"ch":3}}|{"from":{"line":2,"ch":1},"to":{"line":2,"ch":1}}"#)
+}

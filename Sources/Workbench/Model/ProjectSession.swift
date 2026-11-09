@@ -104,6 +104,14 @@ final class ProjectSession: ObservableObject, Identifiable {
     @Published private(set) var findFound: Bool?
     @Published private(set) var findFocusRequests = 0
     private var findRequest = UUID()
+    /// 跳到行（⌘L）的输入条。
+    @Published var isGoToLineShown = false
+    @Published var goToLineText = ""
+    @Published private(set) var goToLineInvalid = false
+    @Published private(set) var goToLineFocusRequests = 0
+    /// 等那个标签画出来时再跳的行（查找文件带了 `路径:行号`、跳到行时标签还在加载 / 要先切到源码）。
+    /// `renderActiveTab` 把它放进 payload 的 `revealLine`，画完由页面跳；用过即清。
+    private var pendingLineReveal: (tabID: String, position: EditorCursor)?
 
     /// 树视图里的一次键盘/回车动作。
     enum TreeCommand {
@@ -591,12 +599,17 @@ final class ProjectSession: ObservableObject, Identifiable {
     // MARK: - 标签页
 
     /// 打开一个文件。`pinned == false` 复用预览标签（变更列表单击、Markdown 链接），`true` 固定。
-    func openFile(_ url: URL, pinned: Bool) {
+    /// 带 `location`（查找文件里粘了 `路径:行号`）就跳到那一行。
+    func openFile(_ url: URL, pinned: Bool, at location: SourceLocation? = nil) {
         let url = url.resolvingSymlinksInPath().standardizedFileURL
         selectedPath = url.path
         let tab = EditorTab(kind: .file(url), isPreview: !pinned)
+        // 在 show 之前挂上：小文件在 show / loadFile 里同步画出来，那一次 render 就带着它，不用等画完再补一次
+        if let location { pendingLineReveal = (tab.id, Self.editorPosition(location)) }
         show(tab)
         if contents[tab.id] == nil { loadFile(for: tab) }
+        // 已经是当前标签时 show 不重画，挂着的没人取：直接跳
+        if let location, pendingLineReveal?.tabID == tab.id, activeTabID == tab.id { goToLine(location) }
     }
 
     func openDiff(_ change: GitChange, pinned: Bool = false) {
@@ -825,6 +838,7 @@ final class ProjectSession: ObservableObject, Identifiable {
             if discardingDraft || !fileExists { draftStore.discard(documentID) } else { writeDraft(documentID) }
         }
         let document = documentID.flatMap { contents[$0] }
+        if pendingLineReveal?.tabID == tabID { pendingLineReveal = nil }
         tabs.remove(at: index)
         contents[tabID] = nil
         diffRequests[tabID] = nil
@@ -931,6 +945,110 @@ final class ProjectSession: ObservableObject, Identifiable {
         findRequest = UUID()
         renderer.focusContent()
         renderer.clearFind()
+    }
+
+    // MARK: - 跳到行 / 复制引用
+
+    /// 当前标签有没有「行」可跳：代码（含只读的大文件）、Markdown / HTML（预览会先切到源码）、各种 diff（新版本那一侧）。
+    /// 图片、二进制、提示页、已删除文件的 diff 没有。
+    var canGoToLine: Bool {
+        guard let tab = activeTab, let content = activeContent else { return false }
+        if tab.diffChange?.kind == .deleted { return false }
+        switch content {
+        case .code, .markdown, .editableDiff, .textDiff: return true
+        case .diff(let diff, _): return !diff.isBinary && !diff.isEmpty
+        case .loading, .image, .binary, .tooLarge, .message: return false
+        }
+    }
+
+    func showGoToLine() {
+        guard canGoToLine else { return }
+        goToLineText = ""
+        goToLineInvalid = false
+        isGoToLineShown = true
+        goToLineFocusRequests += 1
+    }
+
+    /// 回车：`行` 或 `行:列`，格式不对就留着输入框提示一句。
+    func submitGoToLine() {
+        // 输入条开着时切到了图片、二进制这类没有行的标签
+        guard canGoToLine else { closeGoToLine(); return }
+        guard let location = FileReference.parseLineColumn(goToLineText) else {
+            goToLineInvalid = true
+            return
+        }
+        goToLine(location)
+        closeGoToLine()
+    }
+
+    func closeGoToLine() {
+        isGoToLineShown = false
+        goToLineInvalid = false
+        renderer.focusContent()
+    }
+
+    func setGoToLineText(_ text: String) {
+        goToLineText = text
+        goToLineInvalid = false
+    }
+
+    /// 跳到当前标签的某一行。已经画出来的直接让页面跳（不重画，草稿、撤销历史都不动）；
+    /// 还在加载、项目不是当前的、或者 Markdown / HTML 正在预览（没有行）就挂起来，等 `renderActiveTab` 带进 payload。
+    func goToLine(_ location: SourceLocation) {
+        guard let tab = activeTab else { return }
+        let position = Self.editorPosition(location)
+        guard isActive, let content = contents[tab.id], content != .loading, !needsSourceView(tab, content) else {
+            pendingLineReveal = (tab.id, position)
+            // 预览切源码要重画：先把编辑器里的状态要回来（分栏预览里可能正改着）
+            if isActive, let content = contents[tab.id], content != .loading { rememberScroll(of: tab.id) { [weak self] _ in self?.renderActiveTab() } }
+            return
+        }
+        // 直接跳了就不能再挂着：否则下一次重画（切主题、换行、切回来）会再跳一次，还会压掉 revealChange 与阅读现场的恢复
+        pendingLineReveal = nil
+        renderer.revealLine(position)
+    }
+
+    /// 从 1 数的位置 → 编辑器的从 0 数。行号大到离谱的先截一下（JSON 里的 Int.max 到了 JS 是不精确的浮点数），反正页面会夹到末行。
+    static func editorPosition(_ location: SourceLocation) -> EditorCursor {
+        EditorCursor(line: min(max(0, location.line - 1), 100_000_000), ch: min(max(0, (location.column ?? 1) - 1), 100_000_000))
+    }
+
+    /// Markdown / HTML 的预览没有行：跳到行要先切到能看见行的视图。
+    private func needsSourceView(_ tab: EditorTab, _ content: TabContent) -> Bool {
+        if case .markdown = content { return tab.markdownView == .preview }
+        if let url = tab.fileURL, FileCategory.isHTML(named: url.lastPathComponent) { return tab.htmlView == .preview }
+        return false
+    }
+
+    /// 复制引用里的路径：相对项目根；不在项目根下（项目是仓库的子目录、变更在它外面）就用绝对路径。
+    func referencePath(of url: URL) -> String {
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        guard let relative = FileReference.relativePath(of: path, root: project.root.path), !relative.isEmpty else { return path }
+        return relative
+    }
+
+    /// 标签对应的文件：文件标签就是它，diff 标签是那条变更的（新）路径。
+    func referenceURL(for tab: EditorTab) -> URL? {
+        tab.fileURL ?? tab.diffChange.flatMap { url(for: $0) }
+    }
+
+    /// 复制引用（⌥⇧⌘C，IDEA 的 Copy Reference）：`路径:行号`，有跨行选区是 `路径:起-止`。
+    /// 当前标签的行号问 WebView（diff 按新版本那一侧）；别的标签用它切走时记下的光标。
+    /// 没有行的（Markdown / HTML 预览、图片、已删除文件的 diff、还在加载）只给路径。剪贴板由调用方写（模型不碰 AppKit）。
+    func reference(of tabID: String, _ completion: @escaping @MainActor (String) -> Void) {
+        guard let tab = tabs.first(where: { $0.id == tabID }), let url = referenceURL(for: tab) else { return }
+        let path = referencePath(of: url)
+        guard tab.diffChange?.kind != .deleted else { completion(path); return }
+        guard tabID == activeTabID, isActive else {
+            completion(FileReference.format(path: path, lines: tab.cursor.map { ($0.line + 1)...($0.line + 1) }))
+            return
+        }
+        guard let content = contents[tabID], content != .loading else { completion(path); return }
+        renderer.referenceLines { [weak self] lines in
+            // 往返那几毫秒里切了标签：页面里已经是别的内容，行号对不上这个路径，只给路径
+            guard let self, self.activeTabID == tabID else { completion(path); return }
+            completion(FileReference.format(path: path, lines: lines))
+        }
     }
 
     private func rememberScrollOfActiveTab() {
@@ -1181,11 +1299,18 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 把当前标签的内容送进 WebView。只有当前项目的会话才真的画。
     func renderActiveTab() {
         guard isActive else { return }
-        guard let tab = activeTab else {
+        guard var tab = activeTab else {
             renderer.render(.message("", ""))
             return
         }
         guard let content = contents[tab.id], content != .loading else { return }
+        let lineReveal = pendingLineReveal.flatMap { $0.tabID == tab.id ? $0.position : nil }
+        if lineReveal != nil, needsSourceView(tab, content), let index = tabs.firstIndex(where: { $0.id == tab.id }) {
+            // 预览里没有行：Markdown 切到分栏（左边源码、右边照样预览；只读的大文件没有分栏，切源码），HTML 切到源码
+            if case .markdown = content { tabs[index].markdownView = isEditable(tab) ? .split : .source } else { tabs[index].htmlView = .source }
+            tabs[index].scrollTop = 0
+            tab = tabs[index]
+        }
         let documentID = documentID(for: tab)
         var rendered: RenderPayload.Content
         if case .editableDiff(let documentID) = content, let change = tab.change, let url = EditorTab.fileURL(fromID: documentID),
@@ -1205,10 +1330,13 @@ final class ProjectSession: ObservableObject, Identifiable {
             rendered = .html(path: path, text: text, documentDirectory: directory)
         }
         let edge = pendingDiffReveal.flatMap { $0.tabID == tab.id ? $0.edge : nil }
+        // 要跳到行的时候不再定位第一处差异：两个落点会打架
+        let diffEdge = lineReveal != nil ? nil : edge ?? (tab.isDiff && !tab.hasDiffPosition ? .first : nil)
         renderer.render(RenderPayload(rendered, scrollTop: tab.scrollTop, wrap: preferences.wordWrap,
-                                      revealChange: edge ?? (tab.isDiff && !tab.hasDiffPosition ? .first : nil), diffReading: preferences.diffReading,
+                                      revealChange: diffEdge, revealLine: lineReveal, diffReading: preferences.diffReading,
                                       diffViewState: tab.diffViewState))
         if edge != nil { pendingDiffReveal = nil }
+        if lineReveal != nil { pendingLineReveal = nil }
     }
 
     /// 状态栏右侧那几格。可编辑的 diff 显示的是它编辑的那个文档的（行数、编码、语言）。

@@ -152,8 +152,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
 
     private var isReady = false
     private var pendingPayload: RenderPayload?
-    /// 最近一次渲染的内容。Web 内容进程被系统回收后用它恢复现场。
-    private var lastPayload: RenderPayload?
+    /// 最近一次渲染的内容。Web 内容进程被系统回收后用它恢复现场；测试也据此核对送出去的 payload。
+    public private(set) var lastPayload: RenderPayload?
     private var renderRequest = UUID()
     private struct DiffReviewInput: Equatable {
         let path: String
@@ -363,6 +363,36 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
                 Log.warn("web", "navigateChange 失败：\(error)")
                 completion(.unavailable)
             }
+        }
+    }
+
+    /// 跳到当前内容的某一行（行列从 0 数，render.js 夹到首尾）：不重画，编辑器里的草稿、撤销历史都不动。
+    /// 页面还没就绪、正等着画一份内容时，挂到那份 payload 上，画完再跳。回调告诉调用方这种视图有没有行（HTML 预览没有）。
+    public func revealLine(_ position: EditorCursor, completion: @escaping (Bool) -> Void = { _ in }) {
+        guard !showingHTML else { completion(false); return }
+        guard isReady else {
+            guard pendingPayload != nil else { completion(false); return }
+            pendingPayload?.revealLine = position
+            completion(true)
+            return
+        }
+        webView.evaluateJavaScript("window.ide.revealLine({line: \(position.line), ch: \(position.ch)})") { value, error in
+            if let error { Log.warn("web", "revealLine 失败：\(error)") }
+            completion((value as? Bool) ?? false)
+        }
+    }
+
+    /// 选区（没有选区就是光标）在新版本里占哪几行，从 1 数（复制引用用）。
+    /// 编辑器、只读代码视图、diff 都有；Markdown 预览、HTML 预览、图片、页面没就绪时为 nil。
+    public func referenceLines(_ completion: @escaping (ClosedRange<Int>?) -> Void) {
+        guard !showingHTML, isReady else { completion(nil); return }
+        webView.evaluateJavaScript("window.ide.reference()") { value, error in
+            if let error { Log.warn("web", "reference 失败：\(error)") }
+            guard let dictionary = value as? [String: Any], let from = Self.cursor(from: dictionary["from"]), let to = Self.cursor(from: dictionary["to"]) else {
+                completion(nil)
+                return
+            }
+            completion(FileReference.lineRange(fromLine: from.line, fromColumn: from.ch, toLine: to.line, toColumn: to.ch))
         }
     }
 

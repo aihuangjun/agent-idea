@@ -18,7 +18,7 @@ import Testing
 @Test func renderScriptExposesTheContract() throws {
     let shell = try #require(WebResources.shellURL)
     let script = try String(contentsOf: shell.deletingLastPathComponent().appendingPathComponent("render.js"), encoding: .utf8)
-    for entry in ["render(payload)", "getScrollTop()", "setZoom(zoom)", "setWrap(wrap)", "navigateChange(direction)", "type: \"ready\"", "type: \"openExternal\"", "type: \"openPath\"", "type: \"rendered\""] {
+    for entry in ["render(payload)", "getScrollTop()", "setZoom(zoom)", "setWrap(wrap)", "navigateChange(direction)", "revealLine(target)", "reference()", "type: \"ready\"", "type: \"openExternal\"", "type: \"openPath\"", "type: \"rendered\""] {
         #expect(script.contains(entry), "render.js 缺少 \(entry)")
     }
 }
@@ -52,4 +52,9 @@ import Testing
     #expect(editableJSON?["editable"] as? Bool == true)
     #expect((editableJSON?["cursor"] as? [String: Any])?["line"] as? Int == 2)
     #expect(markdownJSON?["docDir"] as? String == "file:///p/")
+    #expect(editableJSON?["revealLine"] == nil, "不跳的时候不带这个键")
+    let reveal = RenderPayload(.code(path: "/p/a.py", text: "x", language: "python"), revealLine: EditorCursor(line: 41, ch: 4))
+    let revealJSON = try JSONSerialization.jsonObject(with: JSONEncoder().encode(reveal)) as? [String: Any]
+    #expect((revealJSON?["revealLine"] as? [String: Any])?["line"] as? Int == 41)
+    #expect((revealJSON?["revealLine"] as? [String: Any])?["ch"] as? Int == 4)
 }

@@ -122,6 +122,8 @@ public enum FileSearch {
             }
         }
         let path = entry.lowercasedPath
+        // 整条路径对上（从 Agent 输出里粘来的 `Sources/Foo.swift:12`）：排第一，别被同名的长路径挤下去
+        if byPath, path == query { return FileSearchMatch(entry: entry, score: 1000, matchedNameIndices: Array(entry.lowercasedName.indices)) }
         if let start = firstRange(of: query, in: path) { return FileSearchMatch(entry: entry, score: 200 - min(path.count - start, 100) / 10, matchedNameIndices: []) }
         if let (indices, bonus) = subsequence(query, in: path) {
             return FileSearchMatch(entry: entry, score: 100 + bonus / 2 - min(indices.last! - indices.first! - query.count + 1, 90), matchedNameIndices: [])

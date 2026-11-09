@@ -13,6 +13,8 @@ final class FileSearchController: ObservableObject {
         didSet { if query != oldValue { search() } }
     }
     @Published private(set) var results: [FileSearchMatch] = []
+    /// 查找框里带着的位置（`Sources/Foo.swift:12` 的 12、`Foo.swift#L12` 的 12）：路径部分照常搜，打开结果后跳到这一行。
+    @Published private(set) var location: SourceLocation?
     @Published private(set) var isIndexing = false
     @Published private(set) var selectedIndex = 0
     /// 索引条数（给空态/提示用）。
@@ -120,7 +122,11 @@ final class FileSearchController: ObservableObject {
 
     private func search() {
         searchTask?.cancel()
-        let query = self.query
+        let rawQuery = self.query
+        // 从 Agent 输出里粘来的 `路径:行号`：行号拆出来留着，剩下的路径照常搜（项目内的绝对路径换成相对的）
+        let parsed = FileReference.parseQuery(rawQuery, projectRoot: root.path)
+        if location != parsed.location { location = parsed.location }
+        let query = parsed.path
         guard !query.trimmingCharacters(in: .whitespaces).isEmpty else {
             results = []
             selectedIndex = 0
@@ -129,7 +135,7 @@ final class FileSearchController: ObservableObject {
         let entries = self.entries
         searchTask = Task { [weak self] in
             let found = await Task.detached(priority: .userInitiated) { FileSearch.search(query, in: entries, shouldStop: { Task.isCancelled }) }.value
-            guard !Task.isCancelled, let self, self.query == query else { return }
+            guard !Task.isCancelled, let self, self.query == rawQuery else { return }
             results = found
             selectedIndex = 0
         }
