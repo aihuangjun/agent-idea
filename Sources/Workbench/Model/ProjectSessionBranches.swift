@@ -145,6 +145,25 @@ extension ProjectSession {
         onRequestToolWindow?(.history)
     }
 
+    /// 目录树 / 标签右键「显示历史」（IDEA 的 Show History）：提交历史工具窗口只列动过它的提交。
+    /// 路径相对**仓库根**（项目可能是仓库的子目录）；仓库根本身没有可筛的，不给。
+    func showHistory(of url: URL, isDirectory: Bool) {
+        guard let history, let filter = historyFilter(for: url, isDirectory: isDirectory) else { return }
+        history.currentHead = gitSnapshot.branch.headOID
+        history.showHistory(of: filter)
+        onRequestToolWindow?(.history)
+    }
+
+    /// 右键菜单要不要出「显示历史」。
+    func canShowHistory(of url: URL) -> Bool {
+        history != nil && historyFilter(for: url, isDirectory: false) != nil
+    }
+
+    private func historyFilter(for url: URL, isDirectory: Bool) -> GitPathFilter? {
+        guard let relative = project.repositoryRelativePath(of: url), !relative.isEmpty else { return nil }
+        return GitPathFilter(path: relative, isDirectory: isDirectory, displayPath: referencePath(of: url))
+    }
+
     /// 能不能切分支 / 建分支：有仓库、没在同步、没在切。
     var canSwitchBranch: Bool { hasGit && !isSyncingRemote && !isSwitchingBranch && !isRollingBack }
 

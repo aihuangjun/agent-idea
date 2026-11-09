@@ -347,17 +347,21 @@ private struct CommitPanel: View {
                 .background(RoundedRectangle(cornerRadius: 6).fill(Theme.editorBackground))
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(messageFocused ? Theme.accent : Theme.border, lineWidth: 1))
 
+            AmendToggle(commit: commit)
+
             HStack(spacing: 8) {
                 // 两个都是蓝色主按钮、悬停反馈一样：它们是同一件事的两种收尾，不该一个蓝一个灰分出主次
-                Button("提交") { commit.commit(push: false) }
+                Button(commit.isAmending ? "修改提交" : "提交") { commit.commit(push: false) }
                     .buttonStyle(AccentButtonStyle())
                     .disabled(!commit.canCommit)
                     .keyboardShortcut(.return, modifiers: .command)
-                    .toolTip("提交勾选的变更（⌘⏎）")
-                Button("提交并推送") { commit.commit(push: true) }
+                    .toolTip(commit.isAmending ? "把勾选的变更并进上一次提交、换成上面的提交信息；什么都没勾就只改信息（⌘⏎）" : "提交勾选的变更（⌘⏎）")
+                Button(commit.isAmending ? "修改并推送" : "提交并推送") { commit.commit(push: true) }
                     .buttonStyle(AccentButtonStyle())
-                    .disabled(!commit.canCommit)
-                    .toolTip("提交勾选的变更，然后推送到远端")
+                    .disabled(!commit.canCommitAndPush)
+                    .toolTip(commit.isAmending && commit.isAmendTargetPushed == true
+                             ? "上一次提交已经推送过，修改后要强制推送，这里不做；请只修改，再自行决定怎么推"
+                             : "提交勾选的变更，然后推送到远端")
                 Spacer()
                 if commit.isCommitting || commit.isPushing {
                     ProgressView().controlSize(.small)
@@ -388,5 +392,36 @@ private struct CommitPanel: View {
         }
         .buttonStyle(.plain).foregroundStyle(color)
         .disabled(!commit.canPush)
+    }
+}
+
+/// 「修改上一次提交」勾选框 + 已推送警告（IDEA 的 Amend commit）。
+private struct AmendToggle: View {
+    @ObservedObject var commit: CommitController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle("修改上一次提交", isOn: Binding(get: { commit.isAmending }, set: { commit.setAmending($0) }))
+                .toggleStyle(.checkbox)
+                .font(Theme.smallFont)
+                .disabled(!commit.isAmending && !commit.canAmend)
+                .toolTip(commit.canAmend || commit.isAmending ? "把这次的改动并进上一次提交，或只改它的提交信息（Amend）" : "还没有提交，没有可修改的")
+            if commit.isAmending, let head = commit.amendTargetChangedTo {
+                HStack(alignment: .top, spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning)
+                    Text("上一次提交已变成 \(head)（刚有新的提交），上面的信息是你改过的，没有替换；修改的会是 \(head)").foregroundStyle(Theme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(Theme.smallFont)
+            }
+            if commit.isAmending, commit.isAmendTargetPushed == true {
+                HStack(alignment: .top, spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(Theme.warning)
+                    Text("这个提交已经推送过，修改后需要强制推送").foregroundStyle(Theme.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(Theme.smallFont)
+            }
+        }
     }
 }

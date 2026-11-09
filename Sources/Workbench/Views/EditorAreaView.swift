@@ -58,6 +58,7 @@ private struct EmptyEditorView: View {
                 shortcut("提交历史", "⌘9")
                 shortcut("文件内查找", "⌘F / Ctrl+F")
                 shortcut("查找文件", "⇧⌘F")
+                shortcut("最近的文件", "⌘E")
                 shortcut("定位当前文件", "⌥⌘L")
                 shortcut("跳到行", "⌘L")
                 shortcut("复制引用（路径:行号）", "⌥⇧⌘C")
@@ -180,6 +181,9 @@ private struct TabItem: View {
             Divider()
             if tab.isPreview { Button("固定标签") { session.pin(tab.id) } }
             if let url = tab.fileURL ?? tab.diffChange.flatMap({ session.url(for: $0) }) {
+                if session.canShowHistory(of: url) {
+                    Button("显示历史") { session.showHistory(of: url, isDirectory: false) }
+                }
                 Button("在项目视图中显示") { session.reveal(url) }
                 Button("在访达中显示") { Desktop.revealInFinder(url) }
                 Button("用默认应用打开") { Desktop.openWithDefaultApp(url) }

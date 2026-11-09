@@ -121,6 +121,10 @@ public struct AgentIDEARootScene: Scene {
                 }
                 .keyboardShortcut("f", modifiers: [.command, .shift])
                 .disabled(workbench.active == nil)
+                // IDEA 的 Recent Files：打开过的文件（关掉的也在），第一项是上一个文件，回车就切回去
+                Button("最近的文件…") { workbench.active?.showRecentFiles() }
+                    .keyboardShortcut("e", modifiers: .command)
+                    .disabled(workbench.active == nil)
                 // IDEA Windows 键位的 Find in Path（用户定的）。焦点在正文里时 CodeMirror 会吞掉这个键，
                 // 由 CursorRestoringWebView 先截下来（ContentRenderer.onFindInPath）
                 Button("在项目中查找…") { workbench.active?.showFindInPath() }

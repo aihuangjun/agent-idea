@@ -16,6 +16,22 @@ final class CommitController: ObservableObject {
     @Published var isPreparingRollback = false
     /// 最近一次操作的结果或错误，显示在提交面板底部。
     @Published private(set) var status: OperationStatus?
+    /// 「修改上一次提交」（IDEA 的 Amend）勾着没有。勾上时把 HEAD 的提交信息预填进输入框，取消时还原勾之前自己写的。
+    @Published private(set) var isAmending = false
+    /// HEAD 是否已经在远程分支上（推送过）：nil 是还不知道（正在查、查不了）。勾着 amend 时才查，显示「需要强制推送」的警告。
+    @Published private(set) var isAmendTargetPushed: Bool?
+    /// 勾 amend 之前输入框里用户自己写的，取消勾选时放回去。
+    private var messageBeforeAmend = ""
+    /// 预填的 HEAD 信息还在路上：用户这期间自己动了输入框就不覆盖。
+    private var amendRequest: UUID?
+    /// `isAmendTargetPushed` 是按哪个 HEAD 查的；HEAD 变了（Agent 又提交了一次）重查。
+    private var amendCheckedHead = ""
+    /// 输入框里的预填是按哪个 HEAD 取的。勾着 amend 时 HEAD 变了（Agent 在后台又提交了一次），要换成新 HEAD 的信息或提示用户。
+    private var amendHead = ""
+    /// 用户没动过输入框时它该是什么：预填请求发出时是当时的文字，预填到了是 HEAD 的信息。`message` 与它不同就是用户改过。
+    private var untouchedAmendMessage: String?
+    /// 勾着 amend 时上一次提交换了、而输入框里是用户改过的文字（没替他换）：新 HEAD 的短 hash，勾选旁提示一句。
+    @Published private(set) var amendTargetChangedTo: String?
 
     private let git: GitClient
     private let repositoryRoot: URL
@@ -33,6 +49,15 @@ final class CommitController: ObservableObject {
     func update(snapshot: GitSnapshot) {
         self.snapshot = snapshot
         excludedPaths = excludedPaths.intersection(snapshot.changes.map(\.path))
+        if isAmending {
+            // 仓库的提交被清空了（不太可能，但 Agent 什么都干得出来）：没有可修改的了
+            if snapshot.branch.isUnborn {
+                setAmending(false)
+            } else {
+                if snapshot.branch.headOID != amendHead { amendTargetChanged(to: snapshot.branch.headOID) }
+                if snapshot.branch.headOID != amendCheckedHead { checkAmendTargetPushed() }
+            }
+        }
     }
 
     func dismissStatus() { status = nil }
@@ -49,11 +74,88 @@ final class CommitController: ObservableObject {
         snapshot.changes.filter { !excludedPaths.contains($0.path) }
     }
 
+    // MARK: - 修改上一次提交（Amend）
+
+    /// 还没有提交的仓库没有「上一次提交」可改。
+    var canAmend: Bool { !snapshot.branch.isUnborn && !isCommitting }
+
+    /// 勾上 / 取消「修改上一次提交」。
+    func setAmending(_ amending: Bool) {
+        guard amending != isAmending, !amending || canAmend else { return }
+        isAmending = amending
+        if amending {
+            messageBeforeAmend = message
+            amendTargetChangedTo = nil
+            prefillHeadMessage()
+            checkAmendTargetPushed()
+        } else {
+            resetAmendState()
+            message = messageBeforeAmend
+            messageBeforeAmend = ""
+        }
+    }
+
+    /// 取 HEAD 的提交信息填进输入框。等的这一会儿用户取消了勾选、或者自己动了输入框：不覆盖。
+    private func prefillHeadMessage() {
+        amendHead = snapshot.branch.headOID
+        let request = UUID()
+        amendRequest = request
+        let typed = message
+        untouchedAmendMessage = typed
+        Task { [weak self] in
+            guard let self else { return }
+            let headMessage = try? await git.headMessage(repositoryRoot: repositoryRoot)
+            guard amendRequest == request, isAmending, message == typed, let headMessage else { return }
+            message = headMessage
+            untouchedAmendMessage = headMessage
+        }
+    }
+
+    /// 勾着 amend 时上一次提交换了（Agent 在后台又提交了一次）：输入框里还是旧 HEAD 的信息，照样点「修改提交」
+    /// 会把新提交改成旧提交的信息。用户没动过输入框就按新 HEAD 重新预填；动过的不替他换，提示上一次提交已经变了。
+    private func amendTargetChanged(to head: String) {
+        if message == untouchedAmendMessage {
+            amendTargetChangedTo = nil
+            prefillHeadMessage()
+        } else {
+            amendHead = head
+            amendTargetChangedTo = String(head.prefix(7))
+            Log.info("git", "勾着修改上一次提交时 HEAD 变成了 \(head)，输入框里是用户改过的文字，不覆盖")
+        }
+    }
+
+    private func resetAmendState() {
+        amendRequest = nil
+        isAmendTargetPushed = nil
+        amendCheckedHead = ""
+        amendHead = ""
+        untouchedAmendMessage = nil
+        amendTargetChangedTo = nil
+    }
+
+    /// 查 HEAD 是不是已经推送过。查不了（没有远程、git 出错）按「不知道」处理，不显示警告。
+    private func checkAmendTargetPushed() {
+        let head = snapshot.branch.headOID
+        amendCheckedHead = head
+        Task { [weak self] in
+            guard let self else { return }
+            let pushed = try? await git.isHeadOnRemote(repositoryRoot: repositoryRoot)
+            guard isAmending, amendCheckedHead == head else { return }
+            isAmendTargetPushed = pushed
+        }
+    }
+
     // MARK: - 提交与推送
 
     var canCommit: Bool {
-        !isCommitting && !isPushing && !isRollingBack && !isPreparingRollback && !includedChanges.isEmpty
+        !isCommitting && !isPushing && !isRollingBack && !isPreparingRollback
+            && (isAmending || !includedChanges.isEmpty)
             && !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 「提交并推送」：amend 一个已经推送过的提交之后普通推送必然被拒，要强制推送——那件事我们不替用户做，按钮灰掉。
+    var canCommitAndPush: Bool {
+        canCommit && !(isAmending && isAmendTargetPushed == true)
     }
 
     var canPush: Bool { !isCommitting && !isPushing && !isRollingBack && !isPreparingRollback && !snapshot.branch.isUnborn }
@@ -61,8 +163,13 @@ final class CommitController: ObservableObject {
     var canRollback: Bool { !isRollingBack && !isPreparingRollback && !isCommitting && !isPushing }
 
     /// 提交勾选的变更；`push` 为 true 时接着推送。
+    ///
+    /// 勾着「修改上一次提交」时是 `commit --amend --only`：勾了文件就并进上一次提交，没勾就只改信息。
+    /// amend 之后要推送的话，**提交之前**再核一次上一次提交推送过没有（界面上的警告是异步查的，可能还没到）：
+    /// 推送过的不推——普通推送必然被拒，强制推送会盖掉远端、别人可能已经基于它干活了，这一步留给用户自己决定。
     func commit(push: Bool) {
-        guard canCommit else { return }
+        guard push ? canCommitAndPush : canCommit else { return }
+        let amend = isAmending
         let changes = includedChanges
         let paths = changes.map(\.path) + changes.compactMap(\.originalPath)
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -71,17 +178,31 @@ final class CommitController: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
-                let result = try await git.commit(paths: paths, message: trimmed, repositoryRoot: repositoryRoot)
+                var pushedBefore = false
+                if amend, push { pushedBefore = (try? await git.isHeadOnRemote(repositoryRoot: repositoryRoot)) ?? true }
+                let result = try await git.commit(paths: paths, message: trimmed, amend: amend, repositoryRoot: repositoryRoot)
+                if amend {
+                    // 改完就退出 amend（IDEA 一样）；输入框清空，勾之前写的那段也不要了——它已经不对应任何改动
+                    isAmending = false
+                    resetAmendState()
+                    messageBeforeAmend = ""
+                }
                 message = ""
                 isCommitting = false
-                status = .success("已提交 \(result.shortHash)（\(result.fileCount) 个文件）")
-                Log.info("git", "提交 \(result.shortHash)：\(result.fileCount) 个文件")
+                let verb = amend ? "已修改提交" : "已提交"
+                let files = result.fileCount == 0 ? "只改了提交信息" : "\(result.fileCount) 个文件"
+                Log.info("git", "\(amend ? "修改提交" : "提交") \(result.shortHash)：\(files)")
                 onRepositoryChanged?(changes)
-                if push { pushCurrentBranch() }
+                if push, pushedBefore {
+                    status = .failure("\(verb) \(result.shortHash)（\(files)）。修改前的提交已经推送过，需要强制推送才能更新远端，没有自动推送")
+                } else {
+                    status = .success("\(verb) \(result.shortHash)（\(files)）")
+                    if push { pushCurrentBranch() }
+                }
             } catch {
                 isCommitting = false
-                status = .failure("提交失败：\(error.userFacingDescription)")
-                Log.warn("git", "提交失败：\(error)")
+                status = .failure("\(amend ? "修改提交" : "提交")失败：\(error.userFacingDescription)")
+                Log.warn("git", "\(amend ? "修改提交" : "提交")失败：\(error)")
                 onRepositoryChanged?([])
             }
         }

@@ -94,6 +94,8 @@ private struct ProjectContent: View {
                 }
             }
         }
+        // ⌘E 最近的文件：浮在整个项目主体上，没有标签时也能用
+        .overlay(alignment: .top) { RecentFilesPopup(session: session, recent: session.recentFiles) }
         StatusBarView(session: session)
     }
 }

@@ -55,6 +55,9 @@ private struct HistoryBody: View {
         if history.comparedBranch != nil {
             ComparisonBanner(history: history)
         }
+        if let filter = history.pathFilter {
+            PathHistoryBanner(history: history, filter: filter)
+        }
         if let error = history.error {
             ToolWindowEmptyState(title: history.comparedBranch == nil ? "git 出错了" : "无法比较", detail: error)
         } else if history.commits.isEmpty {
@@ -62,6 +65,9 @@ private struct HistoryBody: View {
                 Spacer()
             } else if let comparison = history.comparison {
                 ToolWindowEmptyState(title: "没有可比较的提交", detail: comparison.note ?? "")
+            } else if let filter = history.pathFilter {
+                ToolWindowEmptyState(title: "没有动过它的提交",
+                                     detail: "\(filter.displayPath) 还没有被提交过（新建的、未跟踪的），或者当前分支上没有改过它。")
             } else {
                 ToolWindowEmptyState(title: "还没有提交", detail: "第一次提交之后这里会列出历史。")
             }
@@ -111,6 +117,36 @@ private struct ComparisonBanner: View {
     }
 }
 
+// MARK: - 文件历史
+
+/// 文件历史顶上那一条（IDEA 的 Show History）：在看谁的历史；✕ 退出回普通历史。
+private struct PathHistoryBanner: View {
+    @ObservedObject var history: HistoryController
+    let filter: GitPathFilter
+
+    var body: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 6) {
+                Image(systemName: "clock.arrow.circlepath").font(.system(size: 11)).foregroundStyle(Theme.accent)
+                Text(filter.title).font(Theme.smallFont).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
+                if !history.commits.isEmpty {
+                    Text("· \(history.commits.count)\(history.hasMore ? "+" : "") 个提交").font(Theme.smallFont).foregroundStyle(Theme.mutedText).fixedSize()
+                }
+                Spacer(minLength: 4)
+            }
+            .padding(.leading, 10)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .toolTip(filter.isDirectory ? "只列动过这个目录下文件的提交" : "只列动过这个文件的提交，改名之前的也跟着找（git log --follow）")
+            IconButton(ToolWindowIcon.exitPathHistory, help: "退出，回到全部提交", size: 20) { history.exitPathHistory() }
+                .padding(.trailing, 4)
+        }
+        .frame(height: 28)
+        .background(Rectangle().fill(Theme.hover.opacity(0.35)))
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
+    }
+}
+
 // MARK: - 提交列表
 
 private struct CommitList: View {
@@ -125,7 +161,8 @@ private struct CommitList: View {
                     ForEach(Array(history.commits.enumerated()), id: \.element.id) { index, commit in
                         CommitRow(commit: commit, isSelected: history.selection.contains(commit.id), isFocused: isFocused,
                                   press: { press(commit, modifiers: $0) },
-                                  compareToHead: index == 0 ? nil : { history.selectThroughHead(from: commit) })
+                                  // 文件历史里最上面那个不一定是 HEAD（只是最近一次动过它的），「到 HEAD」说不通，不给
+                                  compareToHead: index == 0 || history.pathFilter != nil ? nil : { history.selectThroughHead(from: commit) })
                         .id(commit.id)
                     }
                     if history.hasMore {
@@ -277,7 +314,7 @@ private struct HistoryDetails: View {
 
     @ViewBuilder
     private var files: some View {
-        if let files = history.files[detail.key] {
+        if let files = history.files(for: detail) {
             if files.isEmpty {
                 Text(detail.isRange ? "这一段没有文件变化" : "这次提交没有文件变化").font(Theme.smallFont).foregroundStyle(Theme.mutedText)
             } else {
@@ -286,6 +323,7 @@ private struct HistoryDetails: View {
                     ForEach(files) { change in
                         HistoryFileRow(session: session, history: history, clicks: clicks, detail: detail, change: change,
                                        isActive: session.activeTab.map { $0.historyFilesKey == detail.key && $0.diffChange?.path == change.path } ?? false,
+                                       isFocusedPath: history.isFocused(change, in: detail),
                                        statistics: history.statistics[detail.key]?[change.path],
                                        focus: { filesFocused = true })
                             .id("history-file:" + change.path)
@@ -363,6 +401,8 @@ private struct HistoryFileRow: View {
     let detail: HistoryDetail
     let change: GitChange
     let isActive: Bool
+    /// 文件历史模式下，这一条就是在看历史的那个文件（或那个目录下的）：左边一道强调色的竖条。
+    let isFocusedPath: Bool
     let statistics: DiffLineCounts?
     let focus: () -> Void
     @State private var isHovering = false
@@ -372,6 +412,9 @@ private struct HistoryFileRow: View {
         HStack(spacing: 6) {
             Image(systemName: icon.systemName).font(.system(size: 12)).foregroundStyle(icon.color).frame(width: 16)
             ChangeFileLabel(change: change, statistics: statistics)
+        }
+        .overlay(alignment: .leading) {
+            if isFocusedPath { Rectangle().fill(Theme.accent).frame(width: 2).padding(.leading, -8) }
         }
         .padding(.horizontal, 10)
         .frame(height: Theme.treeRowHeight)

@@ -60,6 +60,10 @@ final class HistoryController: ObservableObject {
     @Published private(set) var comparedBranch: String?
     /// 比较模式解析出来的区间（merge-base → HEAD，都是 hash）。
     @Published private(set) var comparison: GitCommitRange?
+    /// 「显示历史」：只列动过这个文件 / 目录的提交；nil 是普通的历史列表。与比较模式互斥，进一个就退另一个。
+    @Published private(set) var pathFilter: GitPathFilter?
+    /// 文件历史里这个文件在每个提交里叫什么（hash → 路径；跨过改名之后是旧名）。详情里据此把它排在最前、高亮。
+    @Published private(set) var pathsAtCommit: [String: String] = [:]
     /// 每次提交 / 每段区间改的文件，按 `HistoryDetail.key` 存；按需拉、拉过就留着（两头都是 hash，内容不会变）。拉失败的不进这里，重新选中会再试。
     @Published private(set) var files: [String: [GitChange]] = [:]
     /// 拉文件列表失败的原因，按 `HistoryDetail.key`。
@@ -112,7 +116,8 @@ final class HistoryController: ObservableObject {
         refresh()
     }
 
-    /// 重拉第一页。已选中的提交还在的话保持选中。比较模式下按分支名重新算区间（HEAD、那个分支都可能动过）。
+    /// 重拉第一页。已选中的提交还在的话保持选中。比较模式下按分支名重新算区间（HEAD、那个分支都可能动过）；
+    /// 文件历史模式下照样只列动过它的（`load` 看 `pathFilter`）。
     func refresh() {
         hasLoaded = true
         if let comparedBranch {
@@ -149,10 +154,19 @@ final class HistoryController: ObservableObject {
         isLoading = true
         loadedHead = currentHead
         let range = comparison
+        let filter = pathFilter
         loadTask = Task { [weak self] in
             guard let self else { return }
             do {
-                let page = try await git.log(repositoryRoot: repositoryRoot, limit: Self.pageSize, skip: skip, range: range)
+                let page: [GitCommit]
+                if let filter {
+                    let result = try await git.log(repositoryRoot: repositoryRoot, limit: Self.pageSize, skip: skip, path: filter)
+                    guard !Task.isCancelled, pathFilter == filter else { return }
+                    page = result.commits
+                    pathsAtCommit = skip == 0 ? result.paths : pathsAtCommit.merging(result.paths) { _, new in new }
+                } else {
+                    page = try await git.log(repositoryRoot: repositoryRoot, limit: Self.pageSize, skip: skip, range: range)
+                }
                 guard !Task.isCancelled else { return }
                 commits = skip == 0 ? page : commits + page
                 hasMore = page.count == Self.pageSize
@@ -176,6 +190,14 @@ final class HistoryController: ObservableObject {
     func compare(withBranch branch: String) {
         // 先占住：从分支弹窗进来时工具窗口可能还没建出来，它出现时的 loadIfNeeded 不能再拉一遍普通 log 把比较盖掉
         hasLoaded = true
+        // 与文件历史互斥
+        if pathFilter != nil {
+            pathFilter = nil
+            pathsAtCommit = [:]
+            commits = []
+            hasMore = false
+            selection = TreeSelection()
+        }
         let isNewComparison = comparedBranch != branch
         compareTask?.cancel()
         loadTask?.cancel()
@@ -220,6 +242,61 @@ final class HistoryController: ObservableObject {
         selection = TreeSelection()
         error = nil
         load(skip: 0)
+    }
+
+    // MARK: - 文件历史
+
+    /// 「显示历史」：只列动过这个文件 / 目录的提交。比较模式开着就先退出来（两者互斥）。
+    func showHistory(of filter: GitPathFilter) {
+        hasLoaded = true
+        compareTask?.cancel()
+        comparedBranch = nil
+        comparison = nil
+        if pathFilter != filter {
+            pathFilter = filter
+            pathsAtCommit = [:]
+            commits = []
+            hasMore = false
+            selection = TreeSelection()
+        }
+        error = nil
+        load(skip: 0)
+    }
+
+    /// 退出文件历史，回到普通的历史列表。
+    func exitPathHistory() {
+        guard pathFilter != nil else { return }
+        pathFilter = nil
+        pathsAtCommit = [:]
+        commits = []
+        hasMore = false
+        selection = TreeSelection()
+        error = nil
+        load(skip: 0)
+    }
+
+    /// 详情的文件列表：文件历史模式下把「它」排在最前面。
+    func files(for detail: HistoryDetail) -> [GitChange]? {
+        files(forKey: detail.key)
+    }
+
+    /// 同上，按 `HistoryDetail.key`（标签只记着 key）：F7 跨文件、「文件 n/m」与列表用同一个顺序。
+    func files(forKey key: String) -> [GitChange]? {
+        guard let files = files[key] else { return nil }
+        guard let pathFilter else { return files }
+        return pathFilter.prioritized(files, pathAtCommit: focusedPath(forKey: key))
+    }
+
+    /// 文件历史模式下，详情里哪一条是「它」（行上高亮）。
+    func isFocused(_ change: GitChange, in detail: HistoryDetail) -> Bool {
+        pathFilter?.matches(change, pathAtCommit: focusedPath(forKey: detail.key)) ?? false
+    }
+
+    /// 它在这个提交（区间是最新那个提交）里叫什么；不知道（目录、合并提交）就是 nil，按现在的名字认。
+    private func focusedPath(forKey key: String) -> String? {
+        if let path = pathsAtCommit[key] { return path }
+        guard let separator = key.range(of: "..") else { return nil }
+        return pathsAtCommit[String(key[separator.upperBound...])]
     }
 
     // MARK: - 选中与文件列表

@@ -62,6 +62,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     let textSearch: TextSearchController
     /// 底部「运行」工具窗口的内容。
     let run: RunController
+    /// 最近的文件（⌘E）：打开过的文件，关掉的也算。
+    let recentFiles: RecentFilesController
 
     // MARK: - 编辑区
 
@@ -169,6 +171,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         self.project = project
         self.id = project.root.path
         self.search = FileSearchController(root: project.root)
+        self.recentFiles = RecentFilesController(root: project.root, defaults: defaults)
         // git 先给上：仓库根还没解析出来时就搜也走 git grep；git 说不在仓库里，控制器自己退回逐个读文件
         self.textSearch = TextSearchController(root: project.root, git: git)
         Log.info("project", "打开 \(project.root.path)")
@@ -571,6 +574,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         let resolvedNew = newParent.resolvingSymlinksInPath().standardizedFileURL.appendingPathComponent(newURL.lastPathComponent).path
         // 已经关掉的文件的撤销历史也跟着换路径（开着的随标签带过去，关的时候存到新路径）
         editorHistories?.move(from: resolvedOld, to: resolvedNew)
+        recentFiles.rename(fromPath: resolvedOld, toPath: resolvedNew)
         // 文件标签换成新路径的标签：基线、草稿、滚动位置、光标都带过去；内容重读（扩展名变了语言也会变）。
         // 草稿刚才已经写盘了，还留着的是写盘失败的，跟着换 id 别丢
         var renamedTabIDs: [String: String] = [:]
@@ -682,6 +686,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         }
         activeTabID = incoming.id
         recordNavigation(incoming.id)
+        recordRecentFile(incoming)
         selectChange(of: incoming)
         renderActiveTab()
     }
@@ -692,6 +697,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         activeTabID = tabID
         recordNavigation(tabID)
         if let tab = activeTab {
+            recordRecentFile(tab)
             if let url = tab.fileURL { selectedPath = url.path }
             selectChange(of: tab)
             if contents[tab.id] == nil { tab.isDiff ? loadDiff(for: tab) : loadFile(for: tab) }
@@ -723,6 +729,29 @@ final class ProjectSession: ObservableObject, Identifiable {
     private func selectChange(of tab: EditorTab) {
         guard let change = tab.change, !changeSelection.contains(change.path) else { return }
         changeSelection.select(change.path)
+    }
+
+    // MARK: - 最近的文件
+
+    /// 切到 / 打开了一个文件标签：记进「最近的文件」。diff、历史 diff 不算（IDEA 一样）；后退 / 前进切过去的也算。
+    private func recordRecentFile(_ tab: EditorTab) {
+        if let url = tab.fileURL { recentFiles.record(url) }
+    }
+
+    /// ⌘E：弹出最近的文件。已经开着就把焦点拿回输入框。
+    func showRecentFiles() {
+        recentFiles.show(current: activeTab?.fileURL)
+    }
+
+    /// 弹窗里回车 / 点了一项：固定标签打开，在树上选中（openFile 自己会选中）。
+    func openRecentFile(_ match: FileSearchMatch) {
+        let url = recentFiles.url(for: match)
+        recentFiles.close()
+        guard fileExists(url) else {
+            showError("\(match.entry.path) 已经不在磁盘上了")
+            return
+        }
+        openFile(url, pinned: true)
     }
 
     // MARK: - 后退 / 前进
@@ -795,7 +824,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     }
 
     private var diffNavigationChanges: [GitChange] {
-        if let key = activeTab?.historyFilesKey { return history?.files[key] ?? [] }
+        if let key = activeTab?.historyFilesKey { return history?.files(forKey: key) ?? [] }
         return (changeGroups.trackedTree.rows + changeGroups.untrackedTree.rows).compactMap(\.change)
     }
 

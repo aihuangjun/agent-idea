@@ -143,6 +143,69 @@ import TestSupport
         let same = try await git.compareRange(withBranch: "feature", repositoryRoot: directory)
         #expect(same.commitCount == 0 && same.base == same.target)
         #expect(try await git.changedFiles(base: same.base, target: same.target, repositoryRoot: directory).isEmpty)
+
+        // 文件历史：docs/old.md 建好、改名成 docs/new.md、再改一次；中间夹一个不相干的提交（--skip 在 --follow 下就是数错在这种提交上）
+        try FileManager.default.createDirectory(at: directory.appendingPathComponent("docs"), withIntermediateDirectories: true)
+        let lines = (1...20).map { "第 \($0) 行" }.joined(separator: "\n") + "\n"
+        try lines.write(to: directory.appendingPathComponent("docs/old.md"), atomically: true, encoding: .utf8)
+        try await run(["add", "docs/old.md"])
+        try await run(["commit", "-q", "-m", "建文档"])
+        try "u".write(to: directory.appendingPathComponent("unrelated.txt"), atomically: true, encoding: .utf8)
+        try await run(["add", "unrelated.txt"])
+        try await run(["commit", "-q", "-m", "不相干"])
+        try await run(["mv", "docs/old.md", "docs/new.md"])
+        try await run(["commit", "-q", "-m", "改名"])
+        try (lines + "补一行\n").write(to: directory.appendingPathComponent("docs/new.md"), atomically: true, encoding: .utf8)
+        try await run(["commit", "-q", "-am", "补充"])
+        let followed = GitPathFilter(path: "docs/new.md", isDirectory: false)
+        let fileHistory = try await git.log(repositoryRoot: directory, limit: 100, path: followed)
+        // --follow 跨过改名找到「建文档」；不相干的那次不在里面；改名之前它叫 old.md
+        #expect(fileHistory.commits.map(\.subject) == ["补充", "改名", "建文档"])
+        let created = try #require(fileHistory.commits.last)
+        #expect(fileHistory.paths[created.hash] == "docs/old.md")
+        #expect(fileHistory.paths[fileHistory.commits[0].hash] == "docs/new.md")
+        // 翻页：每页 1 个，第二页是「改名」、第三页是「建文档」（照搬 --skip 的话会多数一个「不相干」）
+        #expect(try await git.log(repositoryRoot: directory, limit: 1, skip: 1, path: followed).commits.map(\.subject) == ["改名"])
+        #expect(try await git.log(repositoryRoot: directory, limit: 1, skip: 2, path: followed).commits.map(\.subject) == ["建文档"])
+        #expect(try await git.log(repositoryRoot: directory, limit: 1, skip: 3, path: followed).commits.isEmpty)
+        // 改名那次提交的文件列表里能按名字认出它
+        let renameCommit = fileHistory.commits[1]
+        let renameFiles = try await git.changedFiles(in: renameCommit, repositoryRoot: directory)
+        #expect(followed.prioritized(renameFiles, pathAtCommit: fileHistory.paths[renameCommit.hash]).first?.originalPath == "docs/old.md")
+        // 目录历史：不跟踪改名，--skip 照常
+        let docs = GitPathFilter(path: "docs", isDirectory: true)
+        #expect(try await git.log(repositoryRoot: directory, limit: 100, path: docs).commits.map(\.subject) == ["补充", "改名", "建文档"])
+        #expect(try await git.log(repositoryRoot: directory, limit: 1, skip: 1, path: docs).commits.map(\.subject) == ["改名"])
+
+        // 修改上一次提交（amend）：终端里 add 过的 staged.txt 不能被带进去
+        try "s".write(to: directory.appendingPathComponent("staged.txt"), atomically: true, encoding: .utf8)
+        try await run(["add", "staged.txt"])
+        try (lines + "补一行\n再补一行\n").write(to: directory.appendingPathComponent("docs/new.md"), atomically: true, encoding: .utf8)
+        let beforeAmend = try await git.log(repositoryRoot: directory, limit: 100)
+        #expect(try await git.headMessage(repositoryRoot: directory) == "补充")
+        // 没勾文件：只改信息——提交数不变、HEAD 换了、staged.txt 仍在索引里、docs/new.md 的工作区改动还在
+        let reworded = try await git.commit(paths: [], message: "补充（改过信息）\n\n正文", amend: true, repositoryRoot: directory)
+        #expect(reworded.fileCount == 0)
+        let afterReword = try await git.log(repositoryRoot: directory, limit: 100)
+        #expect(afterReword.count == beforeAmend.count)
+        #expect(afterReword[0].hash != beforeAmend[0].hash && afterReword[0].parents == beforeAmend[0].parents)
+        #expect(afterReword[0].subject == "补充（改过信息）" && afterReword[0].body == "正文")
+        #expect(try await git.headMessage(repositoryRoot: directory) == "补充（改过信息）\n\n正文")
+        #expect(try await git.changedFiles(in: afterReword[0], repositoryRoot: directory).map(\.path) == ["docs/new.md"])
+        let rewordedState = Dictionary(uniqueKeysWithValues: try await git.snapshot(repositoryRoot: directory).changes.map { ($0.path, $0.kind) })
+        #expect(rewordedState["staged.txt"] == .added && rewordedState["docs/new.md"] == .modified)
+        // 勾了文件：只把它并进去，staged.txt 还是不进
+        _ = try await git.commit(paths: ["docs/new.md"], message: "补充（含第二行）", amend: true, repositoryRoot: directory)
+        let afterAmend = try await git.log(repositoryRoot: directory, limit: 100)
+        #expect(afterAmend.count == beforeAmend.count && afterAmend[0].subject == "补充（含第二行）")
+        #expect(try await git.changedFiles(in: afterAmend[0], repositoryRoot: directory).map(\.path) == ["docs/new.md"])
+        #expect(try await git.diffStatistics(in: afterAmend[0], repositoryRoot: directory)["docs/new.md"] == DiffLineCounts(added: 2, removed: 0))
+        let amendedState = Dictionary(uniqueKeysWithValues: try await git.snapshot(repositoryRoot: directory).changes.map { ($0.path, $0.kind) })
+        #expect(amendedState["staged.txt"] == .added && amendedState["docs/new.md"] == nil)
+        // 推送过没有：没有远程分支时是 false；远程跟踪分支指到 HEAD 之后是 true
+        #expect(try await git.isHeadOnRemote(repositoryRoot: directory) == false)
+        try await run(["update-ref", "refs/remotes/origin/feature", "HEAD"])
+        #expect(try await git.isHeadOnRemote(repositoryRoot: directory) == true)
     }
 }
 

@@ -174,6 +174,15 @@ public struct GitClient: Sendable {
         return GitLogParser.parse(output.standardOutput)
     }
 
+    /// 动过某个文件 / 目录的提交（「显示历史」），新的在前。文件跟踪改名（`--follow`），还带回它在每个提交里的名字。
+    /// 翻页的讲究见 `GitPathFilter`。仓库还没有提交时返回空。
+    public func log(repositoryRoot: URL, limit: Int, skip: Int = 0, path filter: GitPathFilter) async throws -> GitPathHistoryPage {
+        if skip == 0, !(await hasHead(repositoryRoot: repositoryRoot)) { return GitPathHistoryPage(commits: []) }
+        let output = try await run(filter.logArguments(limit: limit, skip: skip), in: repositoryRoot)
+        if filter.follows { return GitPathHistoryParser.parse(output.standardOutput, skip: skip) }
+        return GitPathHistoryPage(commits: GitLogParser.parse(output.standardOutput))
+    }
+
     /// 一次提交改了哪些文件：对比它的第一个父提交（根提交对比空树；合并提交看的是相对主线的变化）。
     public func changedFiles(in commit: GitCommit, repositoryRoot: URL) async throws -> [GitChange] {
         try await changedFiles(base: commit.diffBase, target: commit.hash, repositoryRoot: repositoryRoot)
@@ -281,8 +290,11 @@ public struct GitClient: Sendable {
     ///   不能一股脑交给 `add -A`：pathspec 既不在磁盘也不在索引里时（Agent 已经 `git mv` / `git rm` 过），
     ///   `add` 会报 `pathspec '…' did not match any files` 直接失败；`rm --ignore-unmatch` 对这种情况静默跳过，
     ///   对「删了文件还没暂存」的则正好把删除记进索引。
-    public func commit(paths: [String], message: String, repositoryRoot: URL) async throws -> CommitResult {
-        precondition(!paths.isEmpty, "没有要提交的路径")
+    ///
+    /// `amend`：修改上一次提交（IDEA 的 Amend）。还是 `--only`：带路径时只把这些路径的工作区内容并进上一次提交；
+    /// **不带路径时只改提交信息**——`commit --amend --only` 不看索引，之前在终端里 `git add` 过的别的东西不会被带进去（git 2.56 实测）。
+    public func commit(paths: [String], message: String, amend: Bool = false, repositoryRoot: URL) async throws -> CommitResult {
+        precondition(amend || !paths.isEmpty, "没有要提交的路径")
         let unique = Array(Set(paths)).sorted()
         let (present, missing) = Self.partitionByPresence(unique, repositoryRoot: repositoryRoot)
         if !present.isEmpty {
@@ -291,10 +303,32 @@ public struct GitClient: Sendable {
         if !missing.isEmpty {
             _ = try await run(["rm", "--cached", "--ignore-unmatch", "--quiet", "--"] + missing, in: repositoryRoot)
         }
-        _ = try await run(["commit", "--quiet", "--only", "-m", message, "--"] + unique, in: repositoryRoot)
+        _ = try await run(Self.commitArguments(paths: unique, message: message, amend: amend), in: repositoryRoot)
         let hash = try await run(["rev-parse", "--short", "HEAD"], in: repositoryRoot).text
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return CommitResult(shortHash: hash, fileCount: unique.count)
+    }
+
+    /// `git commit` 的参数。`amend` 且没有路径时不带 `--`：只改信息。
+    public static func commitArguments(paths: [String], message: String, amend: Bool) -> [String] {
+        var arguments = ["commit", "--quiet"]
+        if amend { arguments.append("--amend") }
+        arguments += ["--only", "-m", message]
+        if !paths.isEmpty { arguments += ["--"] + paths }
+        return arguments
+    }
+
+    /// 上一次提交的完整信息（`%B`：主题 + 空行 + 正文），去掉结尾的空行。Amend 时预填进输入框。
+    public func headMessage(repositoryRoot: URL) async throws -> String {
+        let output = try await run(["log", "-1", "--format=%B", "HEAD", "--"], in: repositoryRoot)
+        return output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// HEAD 是不是已经在某个远程跟踪分支上了（推送过）：`git branch -r --contains HEAD` 非空。
+    /// 只看本地已知的远程引用，不联网；拿来提醒「修改它之后得强制推送」。
+    public func isHeadOnRemote(repositoryRoot: URL) async throws -> Bool {
+        let output = try await run(["branch", "-r", "--contains", "HEAD"], in: repositoryRoot)
+        return !output.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// 把路径分成「磁盘上有」与「磁盘上没有」两组，顺序保持。

@@ -354,7 +354,7 @@ private struct FileSearchResults: View {
     }
 }
 
-private struct FileSearchRow: View {
+struct FileSearchRow: View {
     let match: FileSearchMatch
     let isSelected: Bool
     let select: () -> Void
@@ -642,6 +642,11 @@ private struct TreeContextMenu: View {
         // git 还不认识的（未跟踪、被忽略）才有：IDEA 的 Add to VCS。被忽略的要弹确认，标题带省略号
         if session.canAddToGit(node) {
             Button(session.isIgnoredByGit(node) ? "添加到 git…" : "添加到 git") { requestAddToGit(node) }
+            Divider()
+        }
+        // IDEA 的 Show History：提交历史里只列动过它的提交（目录是动过它下面文件的）
+        if session.canShowHistory(of: node.url) {
+            Button("显示历史") { session.showHistory(of: node.url, isDirectory: node.isDirectory) }
             Divider()
         }
         // 常用的放上面；「用默认应用打开」只给文件（目录交给访达就够了）
