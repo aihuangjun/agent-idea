@@ -5,8 +5,9 @@
  * revealChange 为 "first" / "last" 时定位 diff 的第一处 / 最后一处差异；恢复标签位置时省略。
  * revealLine?: {line, ch, length?}（从 0 数）渲染完跳到那一行，与 window.ide.revealLine 同一套做法；用过即清，主题 / 换行重画不再跳。
  *   length（UTF-16 单元）> 0 时从 ch 起选中这么多（全项目搜索打开结果后把命中选上），省略或 0 只放光标。
- *   code     { path, text, language, editable, cursor?: {line, ch}, base?: HEAD 里的内容, history?: 编辑器撤销历史的 JSON 文本 }
- *   markdown { path, markdown, docDir, view: "preview" | "source" | "split", editable, cursor?, base?, history? }
+ *   code     { path, text, language, editable, cursor?: {line, ch}, base?: HEAD 里的内容, history?: 编辑器撤销历史的 JSON 文本,
+ *              foldState?: 折叠现场的 JSON（折起的区间 + 全文哈希，页面自己产生、自己校验，宿主原样存取） }
+ *   markdown { path, markdown, docDir, view: "preview" | "source" | "split", editable, cursor?, base?, history?, foldState? }
  *   image    { path, url, sizeText }
  *   html     { path, text, docDir }（宿主用独立 WebView 预览，HTML 脚本没有编辑桥）
  *   diff     { path, language, mode: "side" | "unified", rows, binary, empty, added, removed, emptyReason }
@@ -17,7 +18,8 @@
  *            updateDiffReview({path,newText,analysis,baseIdentity}) 接收编辑后的分析，原文不匹配时丢弃。
  *   message  { title, detail }
  * editable 为真的 code / markdown 源码用 CodeMirror 编辑器画，否则是只读的静态视图。
- * 宿主还会问 window.ide.getState() → { kind, scrollTop, text: 编辑器里的全文或 null, cursor, history, diffViewState }，切标签前拿走最新文字和阅读现场；
+ * 宿主还会问 window.ide.getState() → { kind, scrollTop, text: 编辑器里的全文或 null, cursor, history, diffViewState, foldState }，切标签前拿走最新文字和阅读现场；
+ * foldState 只有普通编辑器（代码、Markdown 源码 / 分栏）有，没折起任何区块时为 null；文本与哈希对不上时整份丢弃（行号已经不对了）。
  * history 是 CodeMirror getHistory() 的 JSON 文本，下次渲染同一份内容时随 payload 送回来（setHistory），切走再切回 ⌘Z 照样能撤。
  * window.ide.undo() / redo() 是编辑器里的撤销 / 重做，回有没有编辑器接下这一步（只读视图回 false，宿主去撤文件操作）；
  * 焦点在编辑器里时 ⌘Z / ⇧⌘Z 由 CodeMirror 自己处理，不会传到应用菜单。
@@ -262,9 +264,9 @@
     });
   }
 
-  /* 所有可编辑视图共用的编辑器选项。 */
+  /* 所有可编辑视图共用的编辑器选项。extra.extraKeys 与公共键位合并（不是整个替换）。 */
   function editorOptions(mode, extra) {
-    return Object.assign({
+    const options = Object.assign({
       mode,
       theme: "idea",
       lineNumbers: true,
@@ -276,14 +278,291 @@
       autoCloseBrackets: true,
       styleActiveLine: true,
       viewportMargin: 20,
+      // 多光标的鼠标键位照 IDEA（configureMouse 见 mouseBehavior）
+      configureMouse: mouseBehavior,
       extraKeys: {
         Tab: (cm) => (cm.somethingSelected() ? cm.indentSelection("add") : cm.execCommand("insertSoftTab")),
         "Shift-Tab": "indentLess",
-        // 应用级的后退 / 前进；焦点在编辑器里时由这里转发，别让 CodeMirror 当成按词移动
+        // 应用级的后退 / 前进；焦点在编辑器里时由这里转发，别让 CodeMirror 当成按词移动。多光标时也一样。
         "Alt-Left": () => post({ type: "navigate", direction: "back" }),
         "Alt-Right": () => post({ type: "navigate", direction: "forward" }),
+        // IDEA 的 Add Selection for Next Occurrence / Unselect Occurrence；Esc 回到单光标是 CodeMirror 自带的（keyMap.basic）
+        "Ctrl-G": selectNextOccurrence,
+        "Shift-Ctrl-G": unselectOccurrence,
       },
-    }, extra || {});
+    });
+    const keys = options.extraKeys;
+    Object.assign(options, extra || {});
+    if (extra && extra.extraKeys) options.extraKeys = Object.assign({}, keys, extra.extraKeys);
+    return options;
+  }
+
+  /* ---------- 多光标（CodeMirror 原生支持，这里只改键位） ---------- */
+
+  /* 鼠标：⌥⇧点击加一个光标（IDEA 的 Add / Remove Caret）、⌥拖动列选择；⌘点击就是普通点击——
+   * CodeMirror 在 mac 上默认 ⌘点击加光标，IDEA 里 ⌘点击是跳到定义（我们没有），所以显式回 addNew: false 盖掉。
+   * extend 默认取 shiftKey：⌥⇧点击不显式回 false 就成了「扩展主选区」而不是加光标。 */
+  function mouseBehavior(cm, repeat, event) {
+    const unit = repeat === "double" ? "word" : repeat === "triple" ? "line" : "char";
+    if (event.altKey && event.shiftKey) return { addNew: true, extend: false, unit };
+    if (event.altKey) return { addNew: false, unit: "rectangle" };
+    return { addNew: false };
+  }
+
+  const WORD_CHAR = /[\p{L}\p{N}_$]/u;
+
+  /* pos 所在（或紧挨着）的那个词；不在词上回 null。 */
+  function wordAt(cm, pos) {
+    const text = cm.getLine(pos.line);
+    let start = pos.ch, end = pos.ch;
+    while (start > 0 && WORD_CHAR.test(text.charAt(start - 1))) start--;
+    while (end < text.length && WORD_CHAR.test(text.charAt(end))) end++;
+    if (start === end) return null;
+    return { from: window.CodeMirror.Pos(pos.line, start), to: window.CodeMirror.Pos(pos.line, end), text: text.slice(start, end) };
+  }
+
+  /* text 里 [from, to) 两边都不是词字符（整词匹配）。 */
+  function wordBounded(text, from, to) {
+    return (from === 0 || !WORD_CHAR.test(text.charAt(from - 1))) && (to >= text.length || !WORD_CHAR.test(text.charAt(to)));
+  }
+
+  function selectionKey(cm) {
+    return JSON.stringify(cm.listSelections().map(range => [range.anchor.line, range.anchor.ch, range.head.line, range.head.ch]));
+  }
+
+  /* 主选区（最后加的那个）：CodeMirror 的 getCursor 取的就是它。 */
+  function primaryRange(cm) {
+    const anchor = cm.getCursor("anchor"), head = cm.getCursor("head");
+    return { anchor, head, from: window.CodeMirror.cmpPos(anchor, head) <= 0 ? anchor : head, to: window.CodeMirror.cmpPos(anchor, head) <= 0 ? head : anchor };
+  }
+
+  /* ⌃G（IDEA 的 Add Selection for Next Occurrence）：没有选区先选中光标处的词（之后按整词找），
+   * 有选区就从主选区往后找下一处同样的文字（到文末绕回开头），加成新的主选区。大小写敏感，与 IDEA 一致。 */
+  function selectNextOccurrence(cm) {
+    const state = cm.state.nextOccurrence || (cm.state.nextOccurrence = { key: null, word: false, stack: [] });
+    const ranges = cm.listSelections();
+    if (ranges.length === 1 && ranges[0].empty()) {
+      const word = wordAt(cm, ranges[0].head);
+      if (!word) return;
+      cm.setSelection(word.from, word.to);
+      Object.assign(state, { word: true, stack: [{ anchor: word.from, head: word.to }], key: selectionKey(cm) });
+      return;
+    }
+    // 选区不是上一次 ⌃G 留下的样子（用户自己改过）：重新开始，不再要求整词
+    if (state.key !== selectionKey(cm)) Object.assign(state, { word: false, stack: [primaryRange(cm)] });
+    const primary = primaryRange(cm);
+    const query = cm.getRange(primary.from, primary.to);
+    if (!query) return;
+    const text = cm.getValue();
+    const taken = ranges.map(range => [cm.indexFromPos(range.from()), cm.indexFromPos(range.to())]);
+    const usable = (at) => !taken.some(([from, to]) => at < to && at + query.length > from) && (!state.word || wordBounded(text, at, at + query.length));
+    const start = cm.indexFromPos(primary.to);
+    let found = -1;
+    for (let at = text.indexOf(query, start); at >= 0; at = text.indexOf(query, at + 1)) if (usable(at)) { found = at; break; }
+    if (found < 0) for (let at = text.indexOf(query); at >= 0 && at < start; at = text.indexOf(query, at + 1)) if (usable(at)) { found = at; break; }
+    if (found < 0) return;
+    const from = cm.posFromIndex(found), to = cm.posFromIndex(found + query.length);
+    cm.addSelection(from, to);
+    cm.scrollIntoView({ from, to }, 60);
+    state.stack.push({ anchor: from, head: to });
+    state.key = selectionKey(cm);
+  }
+
+  /* ⇧⌃G（IDEA 的 Unselect Occurrence）：撤掉最后加的那个，主选区回到上一个加的。 */
+  function unselectOccurrence(cm) {
+    const ranges = cm.listSelections();
+    if (ranges.length < 2) return;
+    const state = cm.state.nextOccurrence;
+    const same = (range, saved) => window.CodeMirror.cmpPos(range.anchor, saved.anchor) === 0 && window.CodeMirror.cmpPos(range.head, saved.head) === 0;
+    const primary = primaryRange(cm);
+    const remaining = ranges.filter(range => !same(range, primary));
+    let stack = state && state.key === selectionKey(cm) ? state.stack.filter(saved => !same(saved, primary)) : [];
+    stack = stack.filter(saved => remaining.some(range => same(range, saved)));
+    const previous = stack.length ? stack[stack.length - 1] : null;
+    const index = previous ? remaining.findIndex(range => same(range, previous)) : remaining.length - 1;
+    cm.setSelections(remaining, index);
+    cm.scrollIntoView(cm.getCursor("head"), 60);
+    if (state) { state.stack = stack; state.key = selectionKey(cm); }
+  }
+
+  /* ---------- 同名高亮（IDEA 的 Identifier Under Caret） ---------- */
+
+  const OCCURRENCE_LINE_LIMIT = 20000;  // 超过这么多行不标：每次换词都要重画视口，大文件不值得
+  const OCCURRENCE_DELAY = 100;         // 光标停下这么久才标，按住方向键一路走过去时不闪
+  // 光标停在这些 token 上不标（IDEA 只标标识符）。getTokenTypeAt 给的是 CodeMirror mode 的类型，overlay 的类已经被它去掉
+  const NOT_IDENTIFIER = /(^|\s)(keyword|atom|string|string-2|comment|number|meta|header|quote|link|url)(\s|$)/;
+
+  /* 要标什么：单光标停在标识符上 → 这个词（整词）；所有选区是同一段单行文字（⌃G 选出来的、自己选的）→ 这段文字。
+   * 多个空光标、多行选区不标。 */
+  function occurrenceQuery(cm) {
+    if (cm.lineCount() > OCCURRENCE_LINE_LIMIT) return null;
+    const ranges = cm.listSelections();
+    if (ranges.every(range => range.empty())) {
+      if (ranges.length > 1) return null;
+      const word = wordAt(cm, ranges[0].head);
+      if (!word || /^\p{N}/u.test(word.text)) return null;
+      const type = cm.getTokenTypeAt(window.CodeMirror.Pos(word.from.line, word.from.ch + 1)) || "";
+      if (NOT_IDENTIFIER.test(type)) return null;
+      return { text: word.text, word: true, skip: null };
+    }
+    const texts = cm.getSelections();
+    const text = texts[0];
+    if (texts.some(other => other !== text) || text.includes("\n") || text.trim().length < 2) return null;
+    // 选中的那几处本身不画：底色是不透明的，会把选区的颜色盖掉
+    const skip = new Map();
+    for (const range of ranges) {
+      const list = skip.get(range.from().line) || [];
+      list.push(range.from().ch);
+      skip.set(range.from().line, list);
+    }
+    return { text, word: false, skip };
+  }
+
+  /* overlay：只在 CodeMirror 要画的行上跑（视口附近），整份文件不用扫。行号取 stream.lineOracle.line（与 syntax.js 同一个未公开字段）。 */
+  function occurrenceOverlay(query) {
+    const text = query.text;
+    return {
+      name: "occurrences",
+      token(stream) {
+        const at = stream.pos, line = stream.string;
+        if (line.startsWith(text, at) && (!query.word || wordBounded(line, at, at + text.length))) {
+          const skipped = query.skip && stream.lineOracle && (query.skip.get(stream.lineOracle.line) || []).includes(at);
+          stream.pos = at + text.length;
+          return skipped ? null : "matchhighlight";
+        }
+        const next = line.indexOf(text, at + 1);
+        stream.pos = next < 0 ? line.length : next;
+        return null;
+      },
+    };
+  }
+
+  function attachOccurrences(cm) {
+    const state = { overlay: null, key: null, timer: null };
+    cm.state.occurrences = state;
+    const update = () => {
+      state.timer = null;
+      const query = occurrenceQuery(cm);
+      const key = query ? JSON.stringify([query.text, query.word, query.skip ? Array.from(query.skip) : null]) : null;
+      if (key === state.key) return;
+      state.key = key;
+      cm.operation(() => {
+        if (state.overlay) cm.removeOverlay(state.overlay);
+        state.overlay = query ? occurrenceOverlay(query) : null;
+        if (state.overlay) cm.addOverlay(state.overlay);
+      });
+    };
+    cm.on("cursorActivity", () => {
+      if (state.timer) clearTimeout(state.timer);
+      state.timer = setTimeout(update, OCCURRENCE_DELAY);
+    });
+    state.update = update;
+  }
+
+  /* ---------- 代码折叠（只给普通编辑器：代码与 Markdown 源码；diff 两侧有自己的上下文折叠与两侧对齐，不做） ---------- */
+
+  const FOLD_GUTTER = "CodeMirror-foldgutter";
+  const FOLD_SCAN_LIMIT = 3000;   // ⌘- 从光标往上找包住它的区块，最多看这么多行
+
+  /* 区块怎么找：mode 自己声明了的（clike / JS / Go / Swift… 是括号，Python / YAML 是缩进，Markdown 是标题）按它的；
+   * HTML / XML / Vue 按标签；什么都没声明的（TOML、Dockerfile…）按缩进；纯文本不折。块注释到处都能折（comment-fold 是全局的）。 */
+  function findFoldRange(cm, start) {
+    const CodeMirror = window.CodeMirror;
+    const name = cm.getMode().name;
+    if (name === "xml" || name === "htmlmixed" || name === "vue") return CodeMirror.fold.xml(cm, start) || CodeMirror.fold.auto(cm, start);
+    const found = CodeMirror.fold.auto(cm, start);
+    if (found || name === "null") return found;
+    if (cm.getHelpers(start, "fold").some(helper => helper !== CodeMirror.fold.comment)) return undefined;
+    return CodeMirror.fold.indent(cm, start);
+  }
+
+  function foldMarks(cm, from, to) {
+    return cm.findMarks(window.CodeMirror.Pos(from, 0), window.CodeMirror.Pos(to + 1, 0)).filter(mark => mark.__isFold && mark.find());
+  }
+
+  function foldedAt(cm, line) {
+    return foldMarks(cm, line, line).some(mark => mark.find().from.line === line);
+  }
+
+  /* ⌘-（IDEA 的 Collapse）：折起包住光标的最里层区块；光标就在已折起的区块头上时往外一层。 */
+  function collapseAtCursor(cm) {
+    const line = cm.getCursor().line;
+    for (let at = line; at >= Math.max(cm.firstLine(), line - FOLD_SCAN_LIMIT); at--) {
+      if (foldedAt(cm, at)) continue;
+      const range = findFoldRange(cm, window.CodeMirror.Pos(at, 0));
+      if (range && range.to.line > range.from.line && range.from.line <= line && range.to.line >= line) {
+        cm.foldCode(window.CodeMirror.Pos(at, 0), { rangeFinder: () => range }, "fold");
+        return;
+      }
+    }
+  }
+
+  /* ⌘=（IDEA 的 Expand）：展开光标那一行上折起的区块。 */
+  function expandAtCursor(cm) {
+    const line = cm.getCursor().line;
+    cm.operation(() => { for (const mark of foldMarks(cm, line, line)) if (mark.find().from.line === line) mark.clear(); });
+  }
+
+  /* 光标 / 选区要落进折起的区块（跳到行、查找、F7）：先展开，CodeMirror 会把落在里面的光标顶出去。 */
+  function revealFolded(cm, from, to) {
+    const CodeMirror = window.CodeMirror;
+    to = to || from;
+    cm.operation(() => {
+      for (const mark of foldMarks(cm, from.line, to.line)) {
+        const range = mark.find();
+        if (range && CodeMirror.cmpPos(range.from, to) < 0 && CodeMirror.cmpPos(range.to, from) > 0) mark.clear();
+      }
+    });
+  }
+
+  function textHash(text) {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) { hash ^= text.charCodeAt(i); hash = Math.imul(hash, 0x01000193); }
+    return (hash >>> 0).toString(16) + ":" + text.length;
+  }
+
+  /* 折叠现场（随标签往返的 foldState）：折起的区间 + 当时全文的哈希。文本一变行号就对不上，恢复时整份丢弃。 */
+  function foldSnapshot() {
+    if (!editor || !editor.state.foldGutter) return null;
+    const folds = [];
+    for (const mark of editor.getAllMarks()) {
+      const range = mark.__isFold && mark.find();
+      if (range) folds.push([range.from.line, range.from.ch, range.to.line, range.to.ch]);
+    }
+    if (!folds.length) return null;
+    folds.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    return JSON.stringify({ hash: textHash(editor.getValue()), folds });
+  }
+
+  function restoreFolds(cm, foldState) {
+    if (!foldState) return;
+    let state;
+    try { state = JSON.parse(foldState); } catch (_) { return; }
+    if (!state || !Array.isArray(state.folds) || state.hash !== textHash(cm.getValue())) return;
+    const CodeMirror = window.CodeMirror;
+    cm.operation(() => {
+      for (const fold of state.folds) {
+        if (!Array.isArray(fold) || fold.length !== 4 || !fold.every(Number.isInteger) || fold[2] > cm.lastLine()) continue;
+        const range = { from: CodeMirror.Pos(fold[0], fold[1]), to: CodeMirror.Pos(fold[2], fold[3]) };
+        try { cm.foldCode(range.from, { rangeFinder: () => range }, "fold"); } catch (_) { /* 与已有的折叠交叉：跳过这一个 */ }
+      }
+    });
+  }
+
+  /* 普通编辑器独有的选项：折叠箭头排在变更条右边（IDEA：行号 → 变更条 → 折叠箭头），折叠与同名高亮的键位。
+   * ⌘- / ⌘= 在应用菜单里是缩小 / 放大：焦点在编辑器里时折叠优先（CodeMirror 处理了就 preventDefault，WebKit 不再交给菜单）。 */
+  function plainEditorOptions() {
+    return {
+      gutters: ["CodeMirror-linenumbers", CHANGE_GUTTER, FOLD_GUTTER],
+      foldGutter: { rangeFinder: findFoldRange },
+      foldOptions: { rangeFinder: findFoldRange, widget: "...", minFoldSize: 1 },
+      extraKeys: {
+        "Cmd--": collapseAtCursor,
+        "Cmd-=": expandAtCursor,
+        "Shift-Cmd--": "foldAll",
+        "Shift-Cmd-=": "unfoldAll",
+      },
+    };
   }
 
   /* 改动停手 300ms 后：把全文发给宿主、重算标记；onChange 给分栏预览 / diff 装饰用（它们自己再去抖）。 */
@@ -300,12 +579,11 @@
 
   /* 把编辑器装进 host。 */
   function mountEditor(host, payload, text, language, onChange) {
-    editor = window.CodeMirror(host, editorOptions(editorMode(language, payload.path), {
-      value: text,
-      gutters: ["CodeMirror-linenumbers", CHANGE_GUTTER],
-    }));
+    editor = window.CodeMirror(host, editorOptions(editorMode(language, payload.path), Object.assign({ value: text }, plainEditorOptions())));
     attachEditorEvents(onChange);
     attachSyntax(editor, language, payload.path);
+    attachOccurrences(editor);
+    restoreFolds(editor, payload.foldState);
     if (payload.cursor) editor.setCursor(payload.cursor);
     restoreHistory(payload.history);
     updateChangeMarkers();
@@ -700,7 +978,7 @@
 
   function renderMarkdown(payload) {
     if (payload.view === "source") {
-      renderCode({ path: payload.path, text: payload.markdown, language: "markdown", editable: payload.editable, cursor: payload.cursor, base: payload.base, history: payload.history });
+      renderCode({ path: payload.path, text: payload.markdown, language: "markdown", editable: payload.editable, cursor: payload.cursor, base: payload.base, history: payload.history, foldState: payload.foldState });
       return;
     }
     if (payload.view === "split" && payload.editable) {
@@ -938,6 +1216,7 @@
     if (diffViewport) diffViewport.use(editor);
     if (sideDiff) sideDiff.folds.reveal(editor, line);
     if (contextFolds) contextFolds.reveal(editor, line);
+    revealFolded(editor, { line, ch: 0 });
     editor.setCursor({ line, ch: 0 });   // cursorActivity 会把新位置报给宿主
     const info = editor.getScrollInfo();
     let top = editor.heightAtLine(line, "local");
@@ -1122,6 +1401,7 @@
       if (diffViewport) diffViewport.use(cm);
       if (sideDiff) sideDiff.folds.reveal(cm, from.line);
       if (contextFolds) contextFolds.reveal(cm, from.line);
+      revealFolded(cm, from, to);
       cm.setSelection(from, to);
       cm.scrollIntoView({ from, to }, 60);
     } else {
@@ -1203,6 +1483,7 @@
     if (diffViewport) diffViewport.use(editor);
     if (sideDiff && sideDiff.folds) sideDiff.folds.reveal(editor, line);
     if (contextFolds) contextFolds.reveal(editor, line);
+    revealFolded(editor, { line, ch }, { line, ch: end });
     // 带长度的（全项目搜索的命中）选上那一段，锚点在前、光标在后：一眼看得见，复制引用也落在这一行
     if (end > ch) editor.setSelection({ line, ch }, { line, ch: end }); else editor.setCursor({ line, ch });
     const info = editor.getScrollInfo();
@@ -1351,6 +1632,7 @@
         cursor: cursor ? { line: cursor.line, ch: cursor.ch } : null,
         history: editor ? JSON.stringify(editor.getHistory()) : null,
         diffViewState: diffViewSnapshot(),
+        foldState: foldSnapshot(),
       };
     },
     /* 编辑器里的撤销 / 重做；没有编辑器（只读视图）回 false，宿主去撤文件操作。 */
@@ -1430,6 +1712,7 @@
           target.cursor = state.cursor;
           target.history = state.history;
           current.diffViewState = state.diffViewState;
+          current.foldState = state.foldState;
         }
         current.scrollTop = window.ide.getScrollTop();
         window.ide.render(current);

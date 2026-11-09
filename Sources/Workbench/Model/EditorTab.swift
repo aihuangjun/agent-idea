@@ -24,6 +24,8 @@ struct EditorTab: Identifiable, Equatable {
     var hasDiffPosition = false
     /// 布局无关的 diff 阅读现场，切模式 / 切标签时一起恢复。
     var diffViewState: String?
+    /// 普通编辑器的折叠现场（页面产生的不透明 JSON，带全文哈希，文本变了页面自己丢弃），切主题 / 切标签重建编辑器后恢复。
+    var foldState: String?
     /// 切走时记下的光标位置（只有编辑器才有）。
     var cursor: EditorCursor?
     /// 切走时记下的编辑器撤销历史（CodeMirror `getHistory()` 的 JSON 文本）连同它对应的那份文本的哈希：

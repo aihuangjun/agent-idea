@@ -129,3 +129,44 @@ import TestSupport
         #expect(await cursor(renderer) == "4:1")
     }
 }
+
+/// 折叠现场随标签走：切到别的文件再切回来（编辑器重建）折叠还在；重画当前标签也在。
+@Test @MainActor func foldsFollowTheTabAcrossSwitches() async throws {
+    try await withTemporaryDirectory { directory in
+        let swift = directory.appendingPathComponent("a.swift")
+        try "struct A {\n    func run() {\n        print(1)\n    }\n}\n".write(to: swift, atomically: true, encoding: .utf8)
+        let other = directory.appendingPathComponent("b.txt")
+        try "other\n".write(to: other, atomically: true, encoding: .utf8)
+        let suite = "agentidea-folds-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let renderer = ContentRenderer()
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 500), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = renderer.webView
+        let session = ProjectSession(root: directory, git: nil, renderer: renderer, preferences: ReadingPreferences(defaults: defaults))
+        session.setActive(true)
+        defer { session.tearDown() }
+        let folds = "(() => { const node = document.querySelector('.CodeMirror'); return node ? node.CodeMirror.getAllMarks().filter(m => m.__isFold && m.find()).map(m => m.find().from.line).join(',') : 'no editor' })()"
+        func current() async -> String { (try? await renderer.webView.evaluateJavaScript(folds)) as? String ?? "" }
+
+        session.openFile(swift, pinned: true)
+        await waitUntil { await cursor(renderer) == "0:0" }
+        _ = try await renderer.webView.evaluateJavaScript("document.querySelector('.CodeMirror').CodeMirror.foldCode({line: 1, ch: 0}, null, 'fold'); true")
+        #expect(await current() == "1")
+
+        session.openFile(other, pinned: true)
+        await waitUntil { renderer.lastPayload.map { if case .code(let path, _, _, _, _, _, _) = $0.content { return path == other.path } else { return false } } ?? false }
+        let swiftTab = EditorTab.id(forFile: swift)
+        // 切走时向页面要状态是异步的：等它回来
+        await waitUntil { session.tabs.first { $0.id == swiftTab }?.foldState != nil }
+        #expect(session.tabs.first { $0.id == swiftTab }?.foldState != nil)
+        session.activate(swiftTab)
+        await waitUntil { await current() == "1" }
+        #expect(await current() == "1", "切回来折叠还在")
+
+        session.rerenderActiveTab()
+        await waitUntil { renderer.lastPayload?.foldState != nil }
+        await waitUntil { await current() == "1" }
+        #expect(await current() == "1")
+    }
+}

@@ -1146,6 +1146,7 @@ final class ProjectSession: ObservableObject, Identifiable {
             tabs[index].hasDiffPosition = true
             tabs[index].diffViewState = state.diffViewState
         }
+        if state.text != nil, state.kind == "code" || state.kind == "markdown" { tabs[index].foldState = state.foldState }
         if let cursor = state.cursor { tabs[index].cursor = cursor }
         // 撤销历史与当时的文字一起保存；只读视图不清掉之前的编辑历史。
         if let text = state.text, let history = state.history { tabs[index].history = EditorHistory(json: history, text: text) }
@@ -1250,6 +1251,8 @@ final class ProjectSession: ObservableObject, Identifiable {
                     self.tabs[index].hasDiffPosition = true
                     self.tabs[index].diffViewState = state.diffViewState
                 }
+                // 只有编辑器才有折叠：Markdown 切到预览时页面里没有编辑器，别把源码视图的折叠抹掉
+                if state.text != nil, state.kind == "code" || state.kind == "markdown" { self.tabs[index].foldState = state.foldState }
                 if let cursor = state.cursor { self.tabs[index].cursor = cursor }
                 // 重命名 / 移动之后编辑器会重建（内容重读），历史也得是此刻的这份
                 if let text = state.text, let history = state.history { self.tabs[index].history = EditorHistory(json: history, text: text) }
@@ -1479,7 +1482,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         let diffEdge = lineReveal != nil ? nil : edge ?? (tab.isDiff && !tab.hasDiffPosition ? .first : nil)
         renderer.render(RenderPayload(rendered, scrollTop: tab.scrollTop, wrap: preferences.wordWrap,
                                       revealChange: diffEdge, revealLine: lineReveal, revealLength: revealLength, diffReading: preferences.diffReading,
-                                      diffViewState: tab.diffViewState))
+                                      diffViewState: tab.diffViewState, foldState: tab.foldState))
         if edge != nil { pendingDiffReveal = nil }
         if lineReveal != nil { pendingLineReveal = nil }
     }

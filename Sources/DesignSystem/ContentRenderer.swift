@@ -153,14 +153,18 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         /// 实际显示的内容种类，未就绪时为 nil，避免把空页面当作已保存的 diff 位置。
         public var kind: String?
         public var diffViewState: String?
+        /// 普通编辑器的折叠现场（JSON），没有编辑器或没折起任何区块时为 nil。
+        public var foldState: String?
 
-        public init(scrollTop: Double = 0, text: String? = nil, cursor: EditorCursor? = nil, history: String? = nil, kind: String? = nil, diffViewState: String? = nil) {
+        public init(scrollTop: Double = 0, text: String? = nil, cursor: EditorCursor? = nil, history: String? = nil, kind: String? = nil, diffViewState: String? = nil,
+                    foldState: String? = nil) {
             self.scrollTop = scrollTop
             self.text = text
             self.cursor = cursor
             self.history = history
             self.kind = kind
             self.diffViewState = diffViewState
+            self.foldState = foldState
         }
     }
 
@@ -328,7 +332,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
                 cursor: Self.cursor(from: dictionary["cursor"]),
                 history: dictionary["history"] as? String,
                 kind: dictionary["kind"] as? String,
-                diffViewState: dictionary["diffViewState"] as? String
+                diffViewState: dictionary["diffViewState"] as? String,
+                foldState: dictionary["foldState"] as? String
             ))
         }
     }

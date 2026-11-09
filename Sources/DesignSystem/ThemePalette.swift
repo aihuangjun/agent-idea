@@ -73,6 +73,11 @@ public struct ThemePalette: Sendable, Equatable {
     public let syntaxSelf: UInt32
     public let syntaxOperator: UInt32
     public let syntaxLabel: UInt32
+    // 编辑器装饰：折叠箭头、折起后的「...」占位块、同名高亮（IDEA 的 Identifier under caret，背景色）
+    public let syntaxFoldMarker: UInt32
+    public let syntaxFoldedText: UInt32
+    public let syntaxFoldedBackground: UInt32
+    public let syntaxIdentifierUnderCaret: UInt32
 
     /// IntelliJ 新版 UI 的 Dark。
     public static let dark = ThemePalette(
@@ -128,7 +133,11 @@ public struct ThemePalette: Sendable, Equatable {
         syntaxBuiltin: 0x8888C6,
         syntaxSelf: 0x94558D,
         syntaxOperator: 0xBCBEC4,
-        syntaxLabel: 0x32B8AF
+        syntaxLabel: 0x32B8AF,
+        syntaxFoldMarker: 0x6F737A,
+        syntaxFoldedText: 0x9DA0A8,
+        syntaxFoldedBackground: 0x393B40,
+        syntaxIdentifierUnderCaret: 0x344134
     )
 
     /// IntelliJ 新版 UI 的 Light。
@@ -185,7 +194,11 @@ public struct ThemePalette: Sendable, Equatable {
         syntaxBuiltin: 0x000080,
         syntaxSelf: 0x94558D,
         syntaxOperator: 0x080808,
-        syntaxLabel: 0x080808
+        syntaxLabel: 0x080808,
+        syntaxFoldMarker: 0x8C9099,
+        syntaxFoldedText: 0x6C707E,
+        syntaxFoldedBackground: 0xEBECF0,
+        syntaxIdentifierUnderCaret: 0xEDEBFC
     )
 }
 

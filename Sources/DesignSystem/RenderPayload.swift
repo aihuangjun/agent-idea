@@ -109,9 +109,12 @@ public struct RenderPayload: Equatable, Sendable {
     public var diffReading: DiffReadingOptions
     /// 编辑器的阅读现场（JSON）：逻辑行、屏幕偏移和已展开区间，随标签往返。
     public var diffViewState: String?
+    /// 普通编辑器（代码、Markdown 源码 / 分栏）的折叠现场（JSON：折起的区间 + 全文哈希），页面自己产生、自己校验，
+    /// 宿主只原样存取；文本变了页面会整份丢弃。只随 code / markdown 送。
+    public var foldState: String?
 
     public init(_ content: Content, scrollTop: Double = 0, wrap: Bool = false, revealChange: DiffEdge? = nil, revealLine: EditorCursor? = nil,
-                revealLength: Int = 0, diffReading: DiffReadingOptions = DiffReadingOptions(), diffViewState: String? = nil) {
+                revealLength: Int = 0, diffReading: DiffReadingOptions = DiffReadingOptions(), diffViewState: String? = nil, foldState: String? = nil) {
         self.content = content
         self.scrollTop = scrollTop
         self.wrap = wrap
@@ -120,6 +123,7 @@ public struct RenderPayload: Equatable, Sendable {
         self.revealLength = revealLength
         self.diffReading = diffReading
         self.diffViewState = diffViewState
+        self.foldState = foldState
     }
 
     public static func message(_ title: String, _ detail: String) -> RenderPayload {
@@ -160,7 +164,7 @@ extension RenderPayload: Encodable {
     private enum Key: String, CodingKey {
         case kind, scrollTop, wrap, revealChange, revealLine, path, text, language, editable, cursor, base, history, markdown, docDir, view, url, sizeText
         case mode, rows, binary, empty, added, removed, emptyReason, title, detail, edit, oldText, newText, filePath
-        case diffReading, analysis, readOnly, diffViewState, baseIdentity
+        case diffReading, analysis, readOnly, diffViewState, baseIdentity, foldState
     }
 
     /// `revealLine` 的值：`{line, ch, length?}`。
@@ -187,6 +191,7 @@ extension RenderPayload: Encodable {
             try container.encodeIfPresent(cursor, forKey: .cursor)
             try container.encodeIfPresent(base, forKey: .base)
             try container.encodeIfPresent(history, forKey: .history)
+            try container.encodeIfPresent(foldState, forKey: .foldState)
         case .markdown(let path, let markdown, let directory, let view, let editable, let cursor, let base, let history):
             try container.encode("markdown", forKey: .kind)
             try container.encode(path, forKey: .path)
@@ -197,6 +202,7 @@ extension RenderPayload: Encodable {
             try container.encodeIfPresent(cursor, forKey: .cursor)
             try container.encodeIfPresent(base, forKey: .base)
             try container.encodeIfPresent(history, forKey: .history)
+            try container.encodeIfPresent(foldState, forKey: .foldState)
         case .image(let path, let url, let sizeText):
             try container.encode("image", forKey: .kind)
             try container.encode(path, forKey: .path)

@@ -19,6 +19,22 @@
 .cm-s-idea .CodeMirror-activeline .CodeMirror-linenumber { color: var(--text-2); }
 .cm-s-idea .CodeMirror-matchingbracket { color: var(--syn-bracket-fg) !important; background: var(--syn-bracket-bg); }
 .cm-s-idea .CodeMirror-nonmatchingbracket { color: var(--del-fg) !important; }
+/* 代码折叠（普通编辑器）：箭头在变更条右边，展开着是朝下的 ⌄、折起是朝右的 ›，用两条边框转 45° 画，不靠字体 */
+.cm-s-idea .CodeMirror-foldgutter { width: 14px; }
+.cm-s-idea .CodeMirror-foldgutter-open, .cm-s-idea .CodeMirror-foldgutter-folded { position: relative; height: 1.6em; cursor: pointer; }
+.cm-s-idea .CodeMirror-foldgutter-open::after, .cm-s-idea .CodeMirror-foldgutter-folded::after {
+  content: ""; position: absolute; left: 3px; top: 50%; width: 4px; height: 4px;
+  border-right: 1.5px solid var(--syn-fold-marker); border-bottom: 1.5px solid var(--syn-fold-marker);
+}
+.cm-s-idea .CodeMirror-foldgutter-open::after { transform: translateY(-75%) rotate(45deg); }
+.cm-s-idea .CodeMirror-foldgutter-folded::after { transform: translate(-1px, -50%) rotate(-45deg); }
+.cm-s-idea .CodeMirror-foldmarker {
+  color: var(--syn-folded-text); background: var(--syn-folded-background); border-radius: 3px;
+  padding: 0 3px; margin: 0 1px; font-family: inherit; text-shadow: none; line-height: 1.3; cursor: pointer;
+}
+/* 同名高亮：只给背景，前景色仍归 tree-sitter（syntax-idea.css）/ mode 的 token 类管，两边不抢同一个属性；
+   选择器与 tree-sitter 的同为三级，即使以后加前景色也不靠加载顺序 */
+.cm-s-idea .cm-overlay.cm-matchhighlight { background: var(--syn-identifier-under-caret); }
 
 .cm-s-idea .cm-comment { color: var(--syn-comment); }
 .cm-s-idea .cm-keyword, .cm-s-idea .cm-atom, .cm-s-idea .cm-type, .cm-s-idea .cm-variable-3 { color: var(--syn-keyword); }

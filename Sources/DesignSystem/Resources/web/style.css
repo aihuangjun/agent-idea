@@ -69,6 +69,11 @@
   --syn-self: #94558D;
   --syn-operator: #BCBEC4;
   --syn-label: #32B8AF;
+  /* 编辑器装饰（cm-idea.css）：折叠箭头、折起后的「...」占位块、同名高亮的底色（不透明，选中的那几处不画） */
+  --syn-fold-marker: #6F737A;
+  --syn-folded-text: #9DA0A8;
+  --syn-folded-background: #393B40;
+  --syn-identifier-under-caret: #344134;
   --mono: "JetBrains Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif;
   --zoom: 1;
@@ -144,6 +149,10 @@
   --syn-self: #94558D;
   --syn-operator: #080808;
   --syn-label: #080808;
+  --syn-fold-marker: #8C9099;
+  --syn-folded-text: #6C707E;
+  --syn-folded-background: #EBECF0;
+  --syn-identifier-under-caret: #EDEBFC;
 }
 
 html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }

@@ -110,6 +110,28 @@ private func imports(in file: URL) throws -> Set<String> {
     #expect(plainTextEdited.isDisjoint(with: cmLanguages), "已经有 mode 的语言不该还在纯文本名单里")
 }
 
+/// CodeMirror 的 addon 也是三份手抄（fetch_vendor.sh 的下载列表、vendor/codemirror/addon 目录、index.html 的 <script>），必须一致。
+/// merge 例外：全文 diff 改用自写的 diff-review.js，页面不再加载它，但仍在下载列表与 vendor 里留作升级对照。
+@Test func codeMirrorAddonsAgreeAcrossFiles() throws {
+    let web = packageRoot.appendingPathComponent("Sources/DesignSystem/Resources/web")
+    let html = try String(contentsOf: web.appendingPathComponent("index.html"), encoding: .utf8)
+    let referenced = Set(html.matches(of: #/vendor\/codemirror\/addon\/([a-z-]+)\.js/#).map { String($0.1) })
+    let vendored = Set(try FileManager.default.contentsOfDirectory(atPath: web.appendingPathComponent("vendor/codemirror/addon").path)
+        .filter { $0.hasSuffix(".js") }.map { String($0.dropLast(3)) })
+    let script = try String(contentsOf: packageRoot.appendingPathComponent("scripts/fetch_vendor.sh"), encoding: .utf8)
+    let fetched = try #require(script.firstMatch(of: #/for addon in ([a-z\/ -]+); do/#).map {
+        Set($0.1.split(separator: " ").map { String($0.split(separator: "/").last ?? $0) })
+    })
+    #expect(fetched == vendored, "fetch_vendor.sh 的 addon 列表与 vendor 目录不一致：\(fetched.symmetricDifference(vendored))")
+    #expect(referenced == vendored.subtracting(["merge"]), "index.html 引用的 addon 与 vendor 目录不一致：\(referenced.symmetricDifference(vendored.subtracting(["merge"])))")
+    // 折叠的查找器依赖 foldcode：它得排在其它 fold addon 前面
+    let position = { (name: String) in html.range(of: "addon/\(name).js")?.lowerBound }
+    for name in ["foldgutter", "brace-fold", "indent-fold", "comment-fold", "markdown-fold", "xml-fold"] {
+        if let core = position("foldcode"), let other = position(name) { #expect(core < other, "\(name) 要排在 foldcode 之后") }
+        else { Issue.record("index.html 缺 foldcode 或 \(name)") }
+    }
+}
+
 @Test func themeAndStylesheetShareColors() throws {
     let palette = try String(contentsOf: packageRoot.appendingPathComponent("Sources/DesignSystem/ThemePalette.swift"), encoding: .utf8)
     let css = try String(contentsOf: packageRoot.appendingPathComponent("Sources/DesignSystem/Resources/web/style.css"), encoding: .utf8)

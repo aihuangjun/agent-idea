@@ -23,7 +23,10 @@ CM="https://cdn.jsdelivr.net/npm/codemirror@5.65.18"
 mkdir -p "$VENDOR/codemirror/addon" "$VENDOR/codemirror/mode"
 fetch "$CM/lib/codemirror.js" "codemirror/codemirror.js"
 fetch "$CM/lib/codemirror.css" "codemirror/codemirror.css"
-for addon in edit/matchbrackets edit/closebrackets selection/active-line merge/merge; do
+# addon 列表与 index.html 里的 <script>、vendor/codemirror/addon 目录一一对应（ArchitectureTests 核对）；
+# merge 例外：全文 diff 改用自写的 diff-review.js，页面不再加载它，留着只为升级时对照。
+# 代码折叠：foldcode 是核心，foldgutter 画箭头，*-fold 是各类区块的查找器（mode 的 fold 属性挑用哪个）。
+for addon in edit/matchbrackets edit/closebrackets selection/active-line merge/merge fold/foldcode fold/foldgutter fold/brace-fold fold/indent-fold fold/comment-fold fold/markdown-fold fold/xml-fold; do
   fetch "$CM/addon/$addon.js" "codemirror/addon/$(basename "$addon").js"
 done
 fetch "$CM/addon/merge/merge.css" "codemirror/merge.css"
