@@ -298,10 +298,17 @@
       gutters: ["CodeMirror-linenumbers", CHANGE_GUTTER],
     }));
     attachEditorEvents(onChange);
+    attachSyntax(editor, language, payload.path);
     if (payload.cursor) editor.setCursor(payload.cursor);
     restoreHistory(payload.history);
     updateChangeMarkers();
     return editor;
+  }
+
+  /* tree-sitter 着色（syntax.js）：语法包已就绪就同步装上，没就绪先用 CodeMirror 的 mode，加载完再换上。 */
+  function attachSyntax(cm, language, path) {
+    if (!window.Syntax) return;
+    try { window.Syntax.attach(cm, language, path); } catch (_) { /* 着色出错不能影响编辑 */ }
   }
 
   /* 切回来的标签把撤销历史带回来了：装回编辑器。坏掉的 JSON 就当没有，别让正文画不出来。 */
@@ -319,6 +326,8 @@
   /* 换内容前把还没发出去的最后几笔发掉，别丢。 */
   function flushEditor() {
     if (editTimer) { clearTimeout(editTimer); editTimer = null; postEdited(); }
+    // 编辑器随 DOM 丢掉：语法树收进 syntax.js 的缓存（WASM 内存要手动释放），切回来 / 切主题不用重新解析
+    if (window.Syntax) window.Syntax.releaseAll();
     if (editorLayoutTimer !== null) { clearTimeout(editorLayoutTimer); editorLayoutTimer = null; }
     if (sideDiff) sideDiff.destroy();
     else if (diffViewport) diffViewport.destroy();
@@ -439,6 +448,8 @@
     sideDiff.leftOriginal().on("focus", () => { referencePane = "old"; });
     editor.on("focus", () => { referencePane = "new"; });
     attachEditorEvents();
+    attachSyntax(sideDiff.leftOriginal(), payload.language, edit.filePath);
+    attachSyntax(editor, payload.language, edit.filePath);
     if (edit.cursor) editor.setCursor(edit.cursor);
     restoreHistory(edit.history);
     decorateSideBySideGutters(updateDiffSummary());
@@ -457,6 +468,7 @@
     diffViewport = new window.DiffViewport([editor], editor);
     diffViewport.didResize = () => { for (const widget of unifiedWidgets) widget.changed(); };
     attachEditorEvents();
+    attachSyntax(editor, payload.language, edit.filePath);
     if (edit.cursor) editor.setCursor(edit.cursor);
     restoreHistory(edit.history);
     decorateUnified();
@@ -548,11 +560,44 @@
     }
     if (text.length > HIGHLIGHT_LIMIT) notices.push("文件较大，已关闭语法高亮");
 
-    const lines = highlightLines(text, language);
+    // tree-sitter 着色（syntax.js）已就绪就用它，否则先用 highlight.js 画出来，语法包加载完再重画一遍
+    const treeLines = window.Syntax ? window.Syntax.highlightLines(payload.language, payload.path, text) : null;
+    const lines = treeLines || highlightLines(text, language);
     const parts = [];
     if (notices.length) parts.push(`<div class="notice">${notices.map(escapeHTML).join(" · ")}</div>`);
     parts.push(codeView(lines, !!(current && current.wrap)));
     root.innerHTML = parts.join("");
+    const view = root.querySelector(".code-view");
+    if (treeLines && view) view.dataset.syntax = "tree-sitter";
+    else upgradeStaticCode(payload, text);
+  }
+
+  /* 只读代码视图：语法包加载完、还停在这份内容上就用 tree-sitter 重画一遍。整块重建 DOM 会抹掉刚做的定位，
+   * 所以重画前记下滚动位置、跳到行标出的那一行（.current-line）和选区（跳到行 / 全项目搜索打开结果时选中的命中、
+   * 用户自己的选区），重画后原样放回。WebKit 查找的高亮放不回去（下一次 ⌘G 照常从选区接着找）。 */
+  function upgradeStaticCode(payload, text) {
+    const ready = window.Syntax ? window.Syntax.whenReady(payload.language, payload.path, text) : null;
+    if (!ready) return;
+    ready.then((ok) => {
+      if (!ok || current !== payload || editor) return;
+      const top = window.scrollY || document.documentElement.scrollTop || 0;
+      const before = staticCodeLines();
+      const marked = before ? Array.prototype.indexOf.call(before, root.querySelector(".code-view .line.current-line")) : -1;
+      const selection = window.getSelection();
+      const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+      const inView = range && root.querySelector(".code-view") && root.querySelector(".code-view").contains(range.startContainer);
+      const from = inView ? staticPosition(range.startContainer, range.startOffset) : null;
+      const to = inView ? staticPosition(range.endContainer, range.endOffset) : null;
+      renderCode(payload);
+      const lines = staticCodeLines();
+      if (lines && marked >= 0 && marked < lines.length) lines[marked].classList.add("current-line");
+      if (lines && from && to && from.line < lines.length && to.line < lines.length) {
+        const start = textPoint(lines[from.line].querySelector(".src") || lines[from.line], from.ch);
+        const end = textPoint(lines[to.line].querySelector(".src") || lines[to.line], to.ch);
+        if (start && end) window.getSelection().setBaseAndExtent(start.node, start.offset, end.node, end.offset);
+      }
+      window.scrollTo(0, top);
+    });
   }
 
   /* 代码视图的 DOM。

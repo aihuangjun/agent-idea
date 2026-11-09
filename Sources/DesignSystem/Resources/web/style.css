@@ -54,6 +54,21 @@
   --syn-active-line: rgba(255, 255, 255, 0.035);
   --syn-bracket-fg: #FFEF28;
   --syn-bracket-bg: rgba(255, 255, 255, 0.12);
+  /* tree-sitter 着色（syntax.js → syntax-idea.css）：IDEA 的语义色，Swift 侧事实源是 ThemePalette 的 syntax* */
+  --syn-escape: #CF8E6D;
+  --syn-doc-comment: #5F826B;
+  --syn-function-decl: #56A8F5;
+  --syn-function-call: #57AAF7;
+  --syn-parameter: #56C1D6;
+  --syn-local: #BCBEC4;
+  --syn-field: #C77DBB;
+  --syn-static: #C77DBB;
+  --syn-type: #B5B6E3;
+  --syn-type-param: #16BAAC;
+  --syn-builtin: #8888C6;
+  --syn-self: #94558D;
+  --syn-operator: #BCBEC4;
+  --syn-label: #32B8AF;
   --mono: "JetBrains Mono", "SF Mono", Menlo, Monaco, "Courier New", monospace;
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "PingFang SC", sans-serif;
   --zoom: 1;
@@ -114,6 +129,21 @@
   --syn-active-line: rgba(0, 0, 0, 0.04);
   --syn-bracket-fg: #B58900;
   --syn-bracket-bg: rgba(0, 0, 0, 0.10);
+  /* tree-sitter 着色（syntax.js → syntax-idea.css）：IDEA 的语义色，Swift 侧事实源是 ThemePalette 的 syntax* */
+  --syn-escape: #0037A6;
+  --syn-doc-comment: #8C8C8C;
+  --syn-function-decl: #00627A;
+  --syn-function-call: #36666B;
+  --syn-parameter: #2A8C7C;
+  --syn-local: #080808;
+  --syn-field: #871094;
+  --syn-static: #871094;
+  --syn-type: #336ECC;
+  --syn-type-param: #007E8A;
+  --syn-builtin: #000080;
+  --syn-self: #94558D;
+  --syn-operator: #080808;
+  --syn-label: #080808;
 }
 
 html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }

@@ -1,0 +1,36 @@
+/* tree-sitter 着色（syntax.js）的 token 类 → style.css 顶部的 --syn-* 变量（深色 / 浅色各一套，事实源是 ThemePalette.swift）。
+   编辑器里是 CodeMirror overlay 吐的 cm-ts-*，只读代码视图里是 syntax.js 直接输出的 cm-ts-*，两边同一张表。
+   编辑器里底下 CodeMirror mode 的 cm-* 类还在（括号匹配、getTokenTypeAt 要用），overlay 吐的 span 同时带 cm-overlay，
+   选择器写成 .cm-s-idea .cm-overlay.cm-ts-*（三级），特异性高过 cm-idea.css 的 .cm-s-idea .cm-variable-2 这类两级，
+   不靠加载顺序。手写文件，不是 vendor。 */
+.cm-s-idea .cm-overlay.cm-ts-plain, .code-view .cm-ts-plain { color: var(--syn-text); }
+.cm-s-idea .cm-overlay.cm-ts-operator, .code-view .cm-ts-operator { color: var(--syn-operator); }
+.cm-s-idea .cm-overlay.cm-ts-keyword, .code-view .cm-ts-keyword { color: var(--syn-keyword); }
+.cm-s-idea .cm-overlay.cm-ts-string, .code-view .cm-ts-string { color: var(--syn-string); }
+.cm-s-idea .cm-overlay.cm-ts-escape, .code-view .cm-ts-escape { color: var(--syn-escape); }
+.cm-s-idea .cm-overlay.cm-ts-regexp, .code-view .cm-ts-regexp { color: var(--syn-regexp); }
+.cm-s-idea .cm-overlay.cm-ts-number, .code-view .cm-ts-number { color: var(--syn-number); }
+.cm-s-idea .cm-overlay.cm-ts-comment, .code-view .cm-ts-comment { color: var(--syn-comment); }
+.cm-s-idea .cm-overlay.cm-ts-doc, .code-view .cm-ts-doc { color: var(--syn-doc-comment); font-style: italic; }
+/* 函数：声明与调用分开（IDEA 新 UI 深色里两者几乎同色，浅色里调用偏灰） */
+.cm-s-idea .cm-overlay.cm-ts-decl, .code-view .cm-ts-decl { color: var(--syn-function-decl); }
+.cm-s-idea .cm-overlay.cm-ts-call, .code-view .cm-ts-call { color: var(--syn-function-call); }
+.cm-s-idea .cm-overlay.cm-ts-builtin, .code-view .cm-ts-builtin { color: var(--syn-builtin); }
+.cm-s-idea .cm-overlay.cm-ts-macro, .code-view .cm-ts-macro { color: var(--syn-meta); }
+/* 变量：参数 / 局部 / 字段 / 全局与静态（斜体）/ 常量（斜体） */
+.cm-s-idea .cm-overlay.cm-ts-param, .code-view .cm-ts-param { color: var(--syn-parameter); }
+.cm-s-idea .cm-overlay.cm-ts-local, .code-view .cm-ts-local { color: var(--syn-local); }
+.cm-s-idea .cm-overlay.cm-ts-field, .code-view .cm-ts-field { color: var(--syn-field); }
+.cm-s-idea .cm-overlay.cm-ts-global, .code-view .cm-ts-global,
+.cm-s-idea .cm-overlay.cm-ts-static, .code-view .cm-ts-static,
+.cm-s-idea .cm-overlay.cm-ts-constant, .code-view .cm-ts-constant { color: var(--syn-static); font-style: italic; }
+.cm-s-idea .cm-overlay.cm-ts-self, .code-view .cm-ts-self { color: var(--syn-self); }
+/* 类型 */
+.cm-s-idea .cm-overlay.cm-ts-type, .code-view .cm-ts-type { color: var(--syn-type); }
+.cm-s-idea .cm-overlay.cm-ts-type-param, .code-view .cm-ts-type-param { color: var(--syn-type-param); }
+.cm-s-idea .cm-overlay.cm-ts-annotation, .code-view .cm-ts-annotation { color: var(--syn-meta); }
+.cm-s-idea .cm-overlay.cm-ts-tag, .code-view .cm-ts-tag { color: var(--syn-tag); }
+.cm-s-idea .cm-overlay.cm-ts-label, .code-view .cm-ts-label { color: var(--syn-label); }
+/* IntelliJ Light：注释斜体，标签加下划线（标签与正文同色） */
+:root.light .cm-s-idea .cm-overlay.cm-ts-comment, :root.light .code-view .cm-ts-comment { font-style: italic; }
+:root.light .cm-s-idea .cm-overlay.cm-ts-label, :root.light .code-view .cm-ts-label { text-decoration: underline; }

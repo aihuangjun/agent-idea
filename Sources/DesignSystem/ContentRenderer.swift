@@ -90,6 +90,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     fileprivate var htmlWebView: CursorRestoringWebView?
     private var showingHTML = false
     private let htmlPreviewHandler = HTMLPreviewHandler()
+    /// 渲染页按需取 tree-sitter 的 WASM 与查询（file:// 页面 fetch 不到本地文件）。
+    private let webAssetHandler: WebAssetHandler
     public var onFind: (() -> Void)?
     /// 焦点在正文里时按了 ⌃⇧F（在项目中查找）。
     public var onFindInPath: (() -> Void)?
@@ -221,6 +223,9 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     override public init() {
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        let assets = WebAssetHandler(root: WebResources.shellURL?.deletingLastPathComponent())
+        webAssetHandler = assets
+        configuration.setURLSchemeHandler(assets, forURLScheme: WebAsset.scheme)
         webView = CursorRestoringWebView(frame: .zero, configuration: configuration)
         // 页面加载完成前 WKWebView 会先画自己的底色（白），深色下会闪一下；关掉它，
         // 透出宿主的 editorBackground（动态色，两个主题各自对得上）

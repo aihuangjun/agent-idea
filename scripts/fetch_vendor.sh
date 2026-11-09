@@ -33,4 +33,33 @@ for mode in xml javascript css htmlmixed jsx vue python shell swift markdown yam
   fetch "$CM/mode/$mode/$mode.js" "codemirror/mode/$mode.js"
 done
 
+# 语法着色：web-tree-sitter（WASM 运行时）+ 各语言的语法包（.wasm）与官方高亮查询（.scm）。
+# 语言表在 web/syntax.js 的 LANGUAGES，语法包与查询的文件名和这里一一对应（ArchitectureTests 核对三份一致）。
+# 自写的查询（IDEA 式的声明 / 调用 / 参数 / 字段 / 全局区分）在 web/syntax/，不是 vendor，升级不要覆盖。
+TS_RUNTIME="0.27.1"
+TS="vendor/tree-sitter"
+mkdir -p "$WEB/$TS/queries"
+fetch "https://cdn.jsdelivr.net/npm/web-tree-sitter@$TS_RUNTIME/web-tree-sitter.wasm" "tree-sitter/web-tree-sitter.wasm"
+# 只有 ES module 与 CommonJS 两种构建，WebKit 不从 file:// 加载 module 脚本：取 CommonJS 版包一层，挂成 window.TreeSitter
+fetch "https://cdn.jsdelivr.net/npm/web-tree-sitter@$TS_RUNTIME/web-tree-sitter.cjs" "tree-sitter/web-tree-sitter.cjs"
+{
+  printf '/* web-tree-sitter %s 的 CommonJS 构建，由 scripts/fetch_vendor.sh 包一层挂到 window.TreeSitter（生成文件，别手改）。 */\n' "$TS_RUNTIME"
+  printf '(function () {\nvar module = { exports: {} }, exports = module.exports;\n'
+  cat "$WEB/$TS/web-tree-sitter.cjs"
+  printf '\nwindow.TreeSitter = module.exports;\n})();\n'
+} > "$WEB/$TS/web-tree-sitter.js"
+rm "$WEB/$TS/web-tree-sitter.cjs"
+# 「npm 包@版本:wasm 名」。TypeScript 一个包出两个语法（.ts 与 .tsx）。
+for grammar in java@0.23.5:java cpp@0.23.4:cpp python@0.25.0:python go@0.25.0:go javascript@0.23.1:javascript typescript@0.23.2:typescript typescript@0.23.2:tsx json@0.24.8:json; do
+  package="${grammar%%:*}"
+  fetch "https://cdn.jsdelivr.net/npm/tree-sitter-$package/tree-sitter-${grammar##*:}.wasm" "tree-sitter/tree-sitter-${grammar##*:}.wasm"
+done
+# 「npm 包@版本:查询文件」。C++ 的查询要叠在 C 上、TypeScript 叠在 JavaScript 上，版本取各自语法包依赖的那一版。
+for query in java@0.23.5:highlights c@0.23.6:highlights cpp@0.23.4:highlights python@0.25.0:highlights go@0.25.0:highlights javascript@0.23.1:highlights javascript@0.23.1:highlights-jsx javascript@0.23.1:highlights-params typescript@0.23.2:highlights json@0.24.8:highlights; do
+  package="${query%%:*}"
+  name="${package%@*}"
+  mkdir -p "$WEB/$TS/queries/$name"
+  fetch "https://cdn.jsdelivr.net/npm/tree-sitter-$package/queries/${query##*:}.scm" "tree-sitter/queries/$name/${query##*:}.scm"
+done
+
 echo; ls -lh "$VENDOR" | tail -n +2

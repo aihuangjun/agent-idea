@@ -6,13 +6,18 @@ import Testing
 @Test func webShellAndAssetsShip() throws {
     let shell = try #require(WebResources.shellURL)
     let web = shell.deletingLastPathComponent()
-    for name in ["render.js", "style.css", "hljs-idea.css", "vendor/markdown-it.min.js", "vendor/highlight.min.js", "vendor/mermaid.min.js"] {
+    for name in ["render.js", "style.css", "hljs-idea.css", "vendor/markdown-it.min.js", "vendor/highlight.min.js", "vendor/mermaid.min.js",
+                 "syntax.js", "syntax-idea.css", "vendor/tree-sitter/web-tree-sitter.js", "vendor/tree-sitter/web-tree-sitter.wasm",
+                 "vendor/tree-sitter/tree-sitter-java.wasm", "vendor/tree-sitter/queries/java/highlights.scm", "syntax/java.scm", "syntax/java-locals.scm"] {
         #expect(FileManager.default.fileExists(atPath: web.appendingPathComponent(name).path), "缺 \(name)")
     }
     let html = try String(contentsOf: shell, encoding: .utf8)
     // CSP 必须在，且不能给脚本 unsafe-inline：Markdown 允许内嵌 HTML
     #expect(html.contains("Content-Security-Policy"))
     #expect(!html.contains("script-src 'self' 'unsafe-inline'"))
+    // tree-sitter 要编译 WASM：只给 'wasm-unsafe-eval'，不给能执行任意字符串的 'unsafe-eval'
+    #expect(html.contains("'wasm-unsafe-eval'"))
+    #expect(!html.contains("'unsafe-eval'"))
 }
 
 @Test func renderScriptExposesTheContract() throws {

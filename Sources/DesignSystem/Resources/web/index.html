@@ -4,14 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!-- Markdown 允许内嵌 HTML，没有 CSP 的话文档里的 <script src="https://…"> 会真的联网执行，
-     而页面又持有全盘读权限。图片放行本地文件与 https/data；脚本只允许本地文件，且不给 'unsafe-inline'。 -->
+     而页面又持有全盘读权限。图片放行本地文件与 https/data；脚本只允许本地文件，且不给 'unsafe-inline'。
+     语法着色（syntax.js）要编译 tree-sitter 的 WASM：'wasm-unsafe-eval' 只放行 WebAssembly 编译，不放行 eval；
+     WASM 与查询文件经宿主的 agentidea-asset: 协议取（file:// 页面 fetch 不到本地文件），connect-src 只放行它。 -->
 <meta http-equiv="Content-Security-Policy"
-      content="default-src 'self'; img-src 'self' file: https: data:; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'none'; frame-src 'none'; object-src 'none'">
+      content="default-src 'self'; img-src 'self' file: https: data:; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src agentidea-asset:; frame-src 'none'; object-src 'none'">
 <title>Agent IDEA</title>
 <link rel="stylesheet" href="hljs-idea.css">
 <link rel="stylesheet" href="vendor/codemirror/codemirror.css">
 <link rel="stylesheet" href="vendor/codemirror/merge.css">
 <link rel="stylesheet" href="cm-idea.css">
+<!-- tree-sitter 的 token 类（cm-ts-*）：选择器比 cm-idea.css 多一级，盖住 CodeMirror mode 的颜色 -->
+<link rel="stylesheet" href="syntax-idea.css">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -54,6 +58,9 @@
 <script src="vendor/codemirror/mode/protobuf.js"></script>
 <script src="vendor/codemirror/mode/groovy.js"></script>
 <script src="vendor/codemirror/mode/dart.js"></script>
+<!-- 语法着色：web-tree-sitter（vendor 里包成全局 TreeSitter 的 CommonJS 构建）+ 自写的 syntax.js -->
+<script src="vendor/tree-sitter/web-tree-sitter.js"></script>
+<script src="syntax.js"></script>
 <script src="diff-review.js"></script>
 <script src="render.js"></script>
 </body>

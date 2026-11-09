@@ -42,6 +42,38 @@ public struct ThemePalette: Sendable, Equatable {
     public let iconBlue: UInt32
     public let iconTeal: UInt32
 
+    // 语法色：Swift 侧只是事实源（正文在 WebView 里，用的是 style.css 顶部同名的 --syn-* 变量），
+    // 字段 syntaxFooBar 对应 --syn-foo-bar，ArchitectureTests 逐个核对。前一组 highlight.js / CodeMirror mode 用，
+    // 后一组是 tree-sitter 着色（syntax.js）新增的：声明 / 调用、参数、局部、字段、静态 / 全局、类型、类型参数……
+    public let syntaxText: UInt32
+    public let syntaxComment: UInt32
+    public let syntaxDoctag: UInt32
+    public let syntaxKeyword: UInt32
+    public let syntaxString: UInt32
+    public let syntaxNumber: UInt32
+    public let syntaxRegexp: UInt32
+    public let syntaxFunction: UInt32
+    public let syntaxClass: UInt32
+    public let syntaxAttr: UInt32
+    public let syntaxTag: UInt32
+    public let syntaxMeta: UInt32
+    public let syntaxCursor: UInt32
+    public let syntaxBracketFg: UInt32
+    public let syntaxEscape: UInt32
+    public let syntaxDocComment: UInt32
+    public let syntaxFunctionDecl: UInt32
+    public let syntaxFunctionCall: UInt32
+    public let syntaxParameter: UInt32
+    public let syntaxLocal: UInt32
+    public let syntaxField: UInt32
+    public let syntaxStatic: UInt32
+    public let syntaxType: UInt32
+    public let syntaxTypeParam: UInt32
+    public let syntaxBuiltin: UInt32
+    public let syntaxSelf: UInt32
+    public let syntaxOperator: UInt32
+    public let syntaxLabel: UInt32
+
     /// IntelliJ 新版 UI 的 Dark。
     public static let dark = ThemePalette(
         editorBackground: 0x1E1F22,
@@ -68,7 +100,35 @@ public struct ThemePalette: Sendable, Equatable {
         iconYellow: 0xD5B778,
         iconPurple: 0xC77DBB,
         iconBlue: 0x56A8F5,
-        iconTeal: 0x4DBB94
+        iconTeal: 0x4DBB94,
+        syntaxText: 0xBCBEC4,
+        syntaxComment: 0x7A7E85,
+        syntaxDoctag: 0x67A37C,
+        syntaxKeyword: 0xCF8E6D,
+        syntaxString: 0x6AAB73,
+        syntaxNumber: 0x2AACB8,
+        syntaxRegexp: 0x42C3D1,
+        syntaxFunction: 0x56A8F5,
+        syntaxClass: 0xBCBEC4,
+        syntaxAttr: 0xC77DBB,
+        syntaxTag: 0xD5B778,
+        syntaxMeta: 0xB3AE60,
+        syntaxCursor: 0xDFE1E5,
+        syntaxBracketFg: 0xFFEF28,
+        syntaxEscape: 0xCF8E6D,
+        syntaxDocComment: 0x5F826B,
+        syntaxFunctionDecl: 0x56A8F5,
+        syntaxFunctionCall: 0x57AAF7,
+        syntaxParameter: 0x56C1D6,
+        syntaxLocal: 0xBCBEC4,
+        syntaxField: 0xC77DBB,
+        syntaxStatic: 0xC77DBB,
+        syntaxType: 0xB5B6E3,
+        syntaxTypeParam: 0x16BAAC,
+        syntaxBuiltin: 0x8888C6,
+        syntaxSelf: 0x94558D,
+        syntaxOperator: 0xBCBEC4,
+        syntaxLabel: 0x32B8AF
     )
 
     /// IntelliJ 新版 UI 的 Light。
@@ -97,7 +157,35 @@ public struct ThemePalette: Sendable, Equatable {
         iconYellow: 0x9A7B12,
         iconPurple: 0x9B4F96,
         iconBlue: 0x2E7BC4,
-        iconTeal: 0x1F8A76
+        iconTeal: 0x1F8A76,
+        syntaxText: 0x080808,
+        syntaxComment: 0x8C8C8C,
+        syntaxDoctag: 0x067D17,
+        syntaxKeyword: 0x0033B3,
+        syntaxString: 0x067D17,
+        syntaxNumber: 0x1750EB,
+        syntaxRegexp: 0x264EFF,
+        syntaxFunction: 0x00627A,
+        syntaxClass: 0x000000,
+        syntaxAttr: 0x871094,
+        syntaxTag: 0x0033B3,
+        syntaxMeta: 0x9E880D,
+        syntaxCursor: 0x1E1F22,
+        syntaxBracketFg: 0xB58900,
+        syntaxEscape: 0x0037A6,
+        syntaxDocComment: 0x8C8C8C,
+        syntaxFunctionDecl: 0x00627A,
+        syntaxFunctionCall: 0x36666B,
+        syntaxParameter: 0x2A8C7C,
+        syntaxLocal: 0x080808,
+        syntaxField: 0x871094,
+        syntaxStatic: 0x871094,
+        syntaxType: 0x336ECC,
+        syntaxTypeParam: 0x007E8A,
+        syntaxBuiltin: 0x000080,
+        syntaxSelf: 0x94558D,
+        syntaxOperator: 0x080808,
+        syntaxLabel: 0x080808
     )
 }
 
