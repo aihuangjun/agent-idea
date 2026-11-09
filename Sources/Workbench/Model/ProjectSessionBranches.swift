@@ -135,6 +135,16 @@ extension ProjectSession {
         }
     }
 
+    /// 分支弹窗右键「与当前分支比较」：当前分支比它多改了什么（`<分支>...HEAD`），在提交历史工具窗口的比较模式里看。
+    /// 不动工作区，同步、切分支进行中也能看。
+    func compareWithCurrentBranch(_ branch: String) {
+        guard let history else { return }
+        isBranchPopupShown = false
+        history.currentHead = gitSnapshot.branch.headOID
+        history.compare(withBranch: branch)
+        onRequestToolWindow?(.history)
+    }
+
     /// 能不能切分支 / 建分支：有仓库、没在同步、没在切。
     var canSwitchBranch: Bool { hasGit && !isSyncingRemote && !isSwitchingBranch && !isRollingBack }
 

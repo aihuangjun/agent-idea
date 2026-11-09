@@ -119,6 +119,30 @@ import TestSupport
         #expect(try String(contentsOf: directory.appendingPathComponent("d.txt"), encoding: .utf8) == "d")
         let reverted = try await git.snapshot(repositoryRoot: directory)
         #expect(reverted.changes.map(\.path) == ["d.txt"])
+
+        // 区间比较：feature 分支上提两笔，与 main 比 = 两笔合起来改的文件；多选这两笔得到同一段
+        try await run(["switch", "-q", "-c", "feature"])
+        try "x".write(to: directory.appendingPathComponent("x.txt"), atomically: true, encoding: .utf8)
+        try await run(["add", "x.txt"])
+        try await run(["commit", "-q", "-m", "x"])
+        try "a\nc\nd\n".write(to: directory.appendingPathComponent("g.txt"), atomically: true, encoding: .utf8)
+        try await run(["commit", "-q", "-am", "g"])
+        let range = try await git.compareRange(withBranch: "main", repositoryRoot: directory)
+        #expect(range.base == latest.hash)
+        #expect(range.commitCount == 2)
+        let rangeCommits = try await git.log(repositoryRoot: directory, limit: 100, range: range)
+        #expect(rangeCommits.map(\.subject) == ["g", "x"])
+        #expect(rangeCommits.first?.hash == range.target)
+        let combined = try await git.changedFiles(base: range.base, target: range.target, repositoryRoot: directory)
+        #expect(combined.map(\.path) == ["g.txt", "x.txt"])
+        let counts = try await git.diffStatistics(base: range.base, target: range.target, repositoryRoot: directory)
+        #expect(counts["g.txt"] == DiffLineCounts(added: 1, removed: 0))
+        let selected = try #require(GitCommitRange.selection(Set(rangeCommits.map(\.id)), in: rangeCommits))
+        #expect(selected.base == range.base && selected.target == range.target)
+        // 与自己比：没有多出来的提交，也没有文件
+        let same = try await git.compareRange(withBranch: "feature", repositoryRoot: directory)
+        #expect(same.commitCount == 0 && same.base == same.target)
+        #expect(try await git.changedFiles(base: same.base, target: same.target, repositoryRoot: directory).isEmpty)
     }
 }
 

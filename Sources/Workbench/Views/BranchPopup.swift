@@ -70,6 +70,11 @@ struct BranchPopup: View {
                     .contextMenu {
                         if !entry.isCurrent { Button("签出") { entry.action() } }
                         Button("从 \(entry.name) 新建分支…") { requestNewBranch(from: entry.name) }
+                        if !entry.isCurrent {
+                            Divider()
+                            // 当前分支比它多改了什么（<分支>...HEAD），在提交历史的比较模式里看；不动工作区，同步、切分支进行中也能用
+                            Button("与当前分支比较") { session.compareWithCurrentBranch(entry.name) }
+                        }
                     }
             }
         }

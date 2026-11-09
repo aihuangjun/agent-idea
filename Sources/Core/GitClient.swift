@@ -150,34 +150,83 @@ public struct GitClient: Sendable {
     }
 
     public func diffStatistics(in commit: GitCommit, repositoryRoot: URL) async throws -> [String: DiffLineCounts] {
-        let output = try await run(["diff", "--numstat", "-z", "--no-ext-diff", "--find-renames", commit.diffBase, commit.hash, "--"], in: repositoryRoot)
+        try await diffStatistics(base: commit.diffBase, target: commit.hash, repositoryRoot: repositoryRoot)
+    }
+
+    /// 两个版本之间（一次提交、一段区间）每个文件的增删行数。
+    public func diffStatistics(base: String, target: String, repositoryRoot: URL) async throws -> [String: DiffLineCounts] {
+        let output = try await run(["diff", "--numstat", "-z", "--no-ext-diff", "--find-renames", base, target, "--"], in: repositoryRoot)
         return GitNumstatParser.parse(output.standardOutput)
     }
 
     // MARK: - 提交历史
 
     /// 当前分支的提交，新的在前（按提交时间 `%ct`，与界面上显示的时间一致）。`skip` 用来翻页。仓库还没有提交时返回空数组。
-    public func log(repositoryRoot: URL, limit: Int, skip: Int = 0) async throws -> [GitCommit] {
-        // 只有第一页需要先确认有 HEAD（没有提交时 git log 会报错）；翻页时第一页已经证明有了
-        if skip == 0, !(await hasHead(repositoryRoot: repositoryRoot)) { return [] }
+    /// `range` 给了（`base..target`，比较模式）就只列这一段里的提交。
+    public func log(repositoryRoot: URL, limit: Int, skip: Int = 0, range: GitCommitRange? = nil) async throws -> [GitCommit] {
+        // 只有第一页需要先确认有 HEAD（没有提交时 git log 会报错）；翻页时第一页已经证明有了。区间两头都是解析过的 hash，不用查
+        if skip == 0, range == nil, !(await hasHead(repositoryRoot: repositoryRoot)) { return [] }
         // --date-order：明确按提交时间排，且子提交永远排在父提交前面（拉回来的分支时间戳交错时不至于乱序）
         var arguments = ["log", "--date-order", "-z", "--format=" + GitLogParser.format, "-n", String(limit)]
         if skip > 0 { arguments += ["--skip", String(skip)] }
+        if let range { arguments += [range.base + ".." + range.target, "--"] }
         let output = try await run(arguments, in: repositoryRoot)
         return GitLogParser.parse(output.standardOutput)
     }
 
     /// 一次提交改了哪些文件：对比它的第一个父提交（根提交对比空树；合并提交看的是相对主线的变化）。
     public func changedFiles(in commit: GitCommit, repositoryRoot: URL) async throws -> [GitChange] {
-        let output = try await run(["diff", "--name-status", "-z", "--find-renames", commit.diffBase, commit.hash], in: repositoryRoot)
+        try await changedFiles(base: commit.diffBase, target: commit.hash, repositoryRoot: repositoryRoot)
+    }
+
+    /// 两个版本之间改了哪些文件（一次提交：第一个父提交 → 它；一段区间：最老那个的父提交 → 最新那个）。
+    public func changedFiles(base: String, target: String, repositoryRoot: URL) async throws -> [GitChange] {
+        let output = try await run(["diff", "--name-status", "-z", "--find-renames", base, target], in: repositoryRoot)
         return GitNameStatusParser.parse(output.standardOutput)
     }
 
     /// 某次提交里一个文件的 diff（相对第一个父提交）。
     public func diff(change: GitChange, in commit: GitCommit, repositoryRoot: URL) async throws -> String {
-        var arguments = ["diff", "--no-color", "--no-ext-diff", "-U3", "--find-renames", commit.diffBase, commit.hash, "--", change.path]
+        try await diff(change: change, base: commit.diffBase, target: commit.hash, repositoryRoot: repositoryRoot)
+    }
+
+    /// 两个版本之间一个文件的 diff。
+    public func diff(change: GitChange, base: String, target: String, repositoryRoot: URL) async throws -> String {
+        var arguments = ["diff", "--no-color", "--no-ext-diff", "-U3", "--find-renames", base, target, "--", change.path]
         if let original = change.originalPath { arguments.append(original) }
         return try await run(arguments, in: repositoryRoot, acceptable: [0, 1]).text
+    }
+
+    // MARK: - 区间比较
+
+    /// 把一个版本名（分支、HEAD）解析成提交的完整 hash。
+    public func resolveCommit(_ revision: String, repositoryRoot: URL) async throws -> String {
+        let output = try await run(["rev-parse", "--verify", "-q", revision + "^{commit}"], in: repositoryRoot)
+        return output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 两个版本最近的共同祖先。没有共同祖先（不相关的历史）时 git 退出码是 1，抛 `GitCompareError.noCommonAncestor`。
+    public func mergeBase(_ branch: String, _ other: String, repositoryRoot: URL) async throws -> String {
+        let output = try await run(["merge-base", branch, other], in: repositoryRoot, acceptable: [0, 1])
+        let hash = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard output.status == 0, !hash.isEmpty else { throw GitCompareError.noCommonAncestor(branch) }
+        return hash
+    }
+
+    /// `base..target` 里有几个提交。
+    public func commitCount(base: String, target: String, repositoryRoot: URL) async throws -> Int {
+        let output = try await run(["rev-list", "--count", base + ".." + target, "--"], in: repositoryRoot)
+        return Int(output.text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+
+    /// 当前分支与另一个分支比较（`<分支>...HEAD`：当前分支比它多改了什么）：base = merge-base(分支, HEAD)，target = HEAD，都解析成 hash。
+    public func compareRange(withBranch branch: String, repositoryRoot: URL) async throws -> GitCommitRange {
+        // 还没有提交的仓库 rev-parse -q 什么都不说，只有退出码：先单独问一句换成人话；其余错误（git 坏了、仓库损坏）原样抛
+        guard await hasHead(repositoryRoot: repositoryRoot) else { throw GitCompareError.noHead }
+        let head = try await resolveCommit("HEAD", repositoryRoot: repositoryRoot)
+        let base = try await mergeBase(branch, head, repositoryRoot: repositoryRoot)
+        let count = try await commitCount(base: base, target: head, repositoryRoot: repositoryRoot)
+        return .branch(branch, mergeBase: base, head: head, commitCount: count)
     }
 
     /// 回滚某次提交里的一个文件变更（IDEA 历史里的 Revert Selected Changes）：
@@ -186,7 +235,12 @@ public struct GitClient: Sendable {
     /// 只动工作区、不动索引，也不产生提交——回滚完就是一条普通的工作区变更，用户看过 diff 再决定提不提交。
     /// 工作区在那之后又改过同一处的话 `apply` 会失败，错误原样显示。
     public func revert(change: GitChange, in commit: GitCommit, repositoryRoot: URL) async throws {
-        var arguments = ["diff", "--binary", "--no-color", "--no-ext-diff", "--find-renames", commit.diffBase, commit.hash, "--", change.path]
+        try await revert(change: change, base: commit.diffBase, target: commit.hash, repositoryRoot: repositoryRoot)
+    }
+
+    /// 同上，作用于两个版本之间（一段区间合起来）的补丁。
+    public func revert(change: GitChange, base: String, target: String, repositoryRoot: URL) async throws {
+        var arguments = ["diff", "--binary", "--no-color", "--no-ext-diff", "--find-renames", base, target, "--", change.path]
         if let original = change.originalPath { arguments.append(original) }
         let patch = try await run(arguments, in: repositoryRoot, acceptable: [0, 1]).standardOutput
         guard !patch.isEmpty else { throw GitRevertError.nothingToRevert }

@@ -46,6 +46,8 @@ enum ToolWindowIcon {
     static let stop = "stop.fill"
     static let clear = "trash"
     static let hide = "minus"
+    /// 提交历史：退出比较模式，回到普通历史列表。
+    static let exitComparison = "xmark"
 }
 
 /// 工具窗口里的空态，几个窗口共用。

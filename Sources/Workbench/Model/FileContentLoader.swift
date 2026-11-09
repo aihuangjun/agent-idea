@@ -39,10 +39,15 @@ enum FileContentLoader {
 
     /// 工作区变更的 diff；`commit` 给了就是那次提交里这个文件的 diff。
     nonisolated static func loadDiff(_ change: GitChange, in commit: GitCommit? = nil, git: GitClient, repositoryRoot: URL) async -> TabContent {
+        await loadDiff(change, revisions: commit.map { ($0.diffBase, $0.hash) }, git: git, repositoryRoot: repositoryRoot)
+    }
+
+    /// `revisions` 给了就是这两版之间（一次提交、一段区间）这个文件的 diff；nil 是工作区对比 HEAD。
+    nonisolated static func loadDiff(_ change: GitChange, revisions: (base: String, target: String)?, git: GitClient, repositoryRoot: URL) async -> TabContent {
         do {
             let raw: String
-            if let commit {
-                raw = try await git.diff(change: change, in: commit, repositoryRoot: repositoryRoot)
+            if let revisions {
+                raw = try await git.diff(change: change, base: revisions.base, target: revisions.target, repositoryRoot: repositoryRoot)
             } else {
                 raw = try await git.diff(change: change, repositoryRoot: repositoryRoot)
             }
@@ -53,10 +58,10 @@ enum FileContentLoader {
             do {
                 let old: String?
                 if change.kind == .added || change.kind == .untracked { old = "" }
-                else { old = try await git.textContent(path: change.originalPath ?? change.path, revision: commit?.diffBase ?? "HEAD", repositoryRoot: repositoryRoot) }
+                else { old = try await git.textContent(path: change.originalPath ?? change.path, revision: revisions?.base ?? "HEAD", repositoryRoot: repositoryRoot) }
                 let new: String?
                 if change.kind == .deleted { new = "" }
-                else if let commit { new = try await git.textContent(path: change.path, revision: commit.hash, repositoryRoot: repositoryRoot) }
+                else if let revisions { new = try await git.textContent(path: change.path, revision: revisions.target, repositoryRoot: repositoryRoot) }
                 else if case .text(let text, _, _) = TextFileLoader.load(repositoryRoot.appendingPathComponent(change.path), limit: 2 * 1024 * 1024) { new = text }
                 else { new = nil }
                 if let old, let new { return .textDiff(oldText: old, newText: new, language: language) }

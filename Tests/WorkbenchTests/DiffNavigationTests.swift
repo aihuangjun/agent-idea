@@ -126,8 +126,8 @@ import TestSupport
         let commit = GitCommit(hash: "commit", shortHash: "commit", parents: ["parent"], authorName: "", authorEmail: "", authorDate: Date(), subject: "", body: "")
         let history = try #require(session.history)
         history.select(commit)
-        try await waitForDiff("历史文件和统计加载") { history.statisticsByCommit[commit.id]?.count == 2 }
-        session.openCommitDiff(try #require(history.filesByCommit[commit.id]?.last), in: commit)
+        try await waitForDiff("历史文件和统计加载") { history.statistics[commit.id]?.count == 2 }
+        session.openCommitDiff(try #require(history.files[commit.id]?.last), in: commit)
         try await waitForDiff("历史文件第一处差异") { (try? await renderer.webView.evaluateJavaScript("document.querySelector('tr.current-change td.src')?.textContent.includes('first')")) as? Bool == true }
         session.navigateChange(.previous)
         try await waitForDiff("上个历史文件最后一处差异") {
@@ -138,7 +138,7 @@ import TestSupport
         #expect(session.activeTab?.diffChange?.path == "a.txt", "\(String(describing: diagnostic))")
         #expect((diagnostic as? String)?.contains("last") == true, "\(String(describing: diagnostic))")
         #expect(session.activeTab?.commitDiff?.commit.hash == commit.hash)
-        #expect(history.statisticsByCommit[commit.id]?["z.txt"] == DiffLineCounts(added: 2, removed: 2))
+        #expect(history.statistics[commit.id]?["z.txt"] == DiffLineCounts(added: 2, removed: 2))
         _ = window.contentView
     }
 }

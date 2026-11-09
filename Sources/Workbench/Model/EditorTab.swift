@@ -10,6 +10,8 @@ struct EditorTab: Identifiable, Equatable {
         case diff(GitChange)
         /// 某次历史提交里一个文件的变更。
         case commitDiff(GitCommit, GitChange)
+        /// 一段提交合起来（历史多选、与分支比较）里一个文件的变更。
+        case rangeDiff(GitCommitRange, GitChange)
     }
 
     let id: String
@@ -45,6 +47,7 @@ struct EditorTab: Identifiable, Equatable {
         case .file(let url): id = Self.id(forFile: url)
         case .diff(let change): id = Self.id(forDiff: change)
         case .commitDiff(let commit, let change): id = Self.id(forCommit: commit, change: change)
+        case .rangeDiff(let range, let change): id = Self.id(forRange: range, change: change)
         }
     }
 
@@ -58,11 +61,12 @@ struct EditorTab: Identifiable, Equatable {
     }
     static func id(forDiff change: GitChange) -> String { "diff:" + change.path }
     static func id(forCommit commit: GitCommit, change: GitChange) -> String { "commit:" + commit.hash + ":" + change.path }
+    static func id(forRange range: GitCommitRange, change: GitChange) -> String { "range:" + range.id + ":" + change.path }
 
     var title: String {
         switch kind {
         case .file(let url): return url.lastPathComponent
-        case .diff(let change), .commitDiff(_, let change): return change.fileName
+        case .diff(let change), .commitDiff(_, let change), .rangeDiff(_, let change): return change.fileName
         }
     }
 
@@ -83,11 +87,35 @@ struct EditorTab: Identifiable, Equatable {
         return nil
     }
 
+    /// 一段提交合起来的 diff：哪段区间、哪个文件。
+    var rangeDiff: (range: GitCommitRange, change: GitChange)? {
+        if case .rangeDiff(let range, let change) = kind { return (range, change) }
+        return nil
+    }
+
+    /// 历史里的 diff（单个提交或一段区间）比的是哪两版：加载内容、跨文件导航都只看这两个值。工作区 diff 与文件是 nil。
+    var historyRevisions: (base: String, target: String)? {
+        switch kind {
+        case .commitDiff(let commit, _): return (commit.diffBase, commit.hash)
+        case .rangeDiff(let range, _): return (range.base, range.target)
+        case .file, .diff: return nil
+        }
+    }
+
+    /// 历史 diff 的文件列表在 `HistoryController.files` 里的键：单个提交是 hash，区间是 `range.id`。
+    var historyFilesKey: String? {
+        switch kind {
+        case .commitDiff(let commit, _): return commit.id
+        case .rangeDiff(let range, _): return range.id
+        case .file, .diff: return nil
+        }
+    }
+
     /// 任一种 diff 标签对应的变更（面包屑、定位文件、渲染路径用）。
     var diffChange: GitChange? {
         switch kind {
         case .file: return nil
-        case .diff(let change), .commitDiff(_, let change): return change
+        case .diff(let change), .commitDiff(_, let change), .rangeDiff(_, let change): return change
         }
     }
 

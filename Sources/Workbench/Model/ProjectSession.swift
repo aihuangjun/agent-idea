@@ -612,6 +612,21 @@ final class ProjectSession: ObservableObject, Identifiable {
         if contents[tab.id] == nil { loadDiff(for: tab) }
     }
 
+    /// 一段提交合起来（历史多选、与分支比较）里一个文件的 diff。
+    func openRangeDiff(_ change: GitChange, in range: GitCommitRange, pinned: Bool = false) {
+        let tab = EditorTab(kind: .rangeDiff(range, change), isPreview: !pinned)
+        show(tab)
+        if contents[tab.id] == nil { loadDiff(for: tab) }
+    }
+
+    /// 提交历史详情区里的文件：单个提交或一段区间。
+    func openHistoryDiff(_ change: GitChange, in detail: HistoryDetail, pinned: Bool = false) {
+        switch detail {
+        case .commit(let commit): openCommitDiff(change, in: commit, pinned: pinned)
+        case .range(let range): openRangeDiff(change, in: range, pinned: pinned)
+        }
+    }
+
     /// 把标签放进标签栏并激活。已经开着的直接切过去；预览标签只保留一个。**这是标签进栏的唯一入口。**
     private func show(_ incoming: EditorTab) {
         if let index = tabs.firstIndex(where: { $0.id == incoming.id }) {
@@ -731,9 +746,12 @@ final class ProjectSession: ObservableObject, Identifiable {
             // 取状态期间用户可能切走，git 刷新也可能改变相邻文件；只使用完成时仍有效的目标。
             guard self.isActive, self.activeTabID == tab.id, let change = self.adjacentDiff(step) else { return }
             _ = self.remember(state, of: tab.id)
-            let targetID = tab.commitDiff.map { EditorTab.id(forCommit: $0.commit, change: change) } ?? EditorTab.id(forDiff: change)
+            let targetID = tab.commitDiff.map { EditorTab.id(forCommit: $0.commit, change: change) }
+                ?? tab.rangeDiff.map { EditorTab.id(forRange: $0.range, change: change) }
+                ?? EditorTab.id(forDiff: change)
             self.pendingDiffReveal = (targetID, step.entryEdge)
             if let commit = tab.commitDiff?.commit { self.openCommitDiff(change, in: commit) }
+            else if let range = tab.rangeDiff?.range { self.openRangeDiff(change, in: range) }
             else { self.openDiff(change) }
         }
     }
@@ -747,7 +765,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     }
 
     private var diffNavigationChanges: [GitChange] {
-        if let commit = activeTab?.commitDiff?.commit { return history?.filesByCommit[commit.id] ?? [] }
+        if let key = activeTab?.historyFilesKey { return history?.files[key] ?? [] }
         return (changeGroups.trackedTree.rows + changeGroups.untrackedTree.rows).compactMap(\.change)
     }
 
@@ -956,7 +974,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         case .diff(let change):
             guard change.kind != .deleted, let url = url(for: change) else { return nil }
             return EditorTab.id(forFile: url.resolvingSymlinksInPath().standardizedFileURL)
-        case .commitDiff: return nil
+        case .commitDiff, .rangeDiff: return nil
         }
     }
 
@@ -1149,10 +1167,10 @@ final class ProjectSession: ObservableObject, Identifiable {
             }
             return
         }
-        let commit = tab.commitDiff?.commit
+        let revisions = tab.historyRevisions
         contents[tab.id] = .loading
         Task { [weak self] in
-            let content = await FileContentLoader.loadDiff(change, in: commit, git: git, repositoryRoot: repositoryRoot)
+            let content = await FileContentLoader.loadDiff(change, revisions: revisions, git: git, repositoryRoot: repositoryRoot)
             guard self?.diffRequests[tab.id] == request else { return }
             self?.store(content, for: tab.id)
         }

@@ -52,11 +52,16 @@ private struct HistoryBody: View {
 
     @ViewBuilder
     private var content: some View {
+        if history.comparedBranch != nil {
+            ComparisonBanner(history: history)
+        }
         if let error = history.error {
-            ToolWindowEmptyState(title: "git 出错了", detail: error)
+            ToolWindowEmptyState(title: history.comparedBranch == nil ? "git 出错了" : "无法比较", detail: error)
         } else if history.commits.isEmpty {
             if history.isLoading {
                 Spacer()
+            } else if let comparison = history.comparison {
+                ToolWindowEmptyState(title: "没有可比较的提交", detail: comparison.note ?? "")
             } else {
                 ToolWindowEmptyState(title: "还没有提交", detail: "第一次提交之后这里会列出历史。")
             }
@@ -64,13 +69,45 @@ private struct HistoryBody: View {
             GeometryReader { geometry in
                 VStack(spacing: 0) {
                     CommitList(history: history)
-                    if let commit = history.selectedCommit {
-                        CommitDetails(session: session, history: history, commit: commit)
+                    if let detail = history.detail {
+                        HistoryDetails(session: session, history: history, detail: detail)
                             .frame(height: max(160, geometry.size.height * 0.45))
                     }
                 }
             }
         }
+    }
+}
+
+// MARK: - 比较模式
+
+/// 比较模式顶上那一条（IDEA 的 Compare with Branch）：在比什么、几个提交几个文件；点它回到整段比较，✕ 退出回普通历史。
+private struct ComparisonBanner: View {
+    @ObservedObject var history: HistoryController
+
+    var body: some View {
+        let branch = history.comparedBranch ?? ""
+        let isShowingWhole = history.selection.isEmpty && history.comparison != nil
+        HStack(spacing: 0) {
+            // 按下手势只套在文字这一段上，不包住退出按钮：嵌套的手势会互相等待，按钮可能点不动
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.left.arrow.right").font(.system(size: 11)).foregroundStyle(Theme.accent)
+                Text(history.comparison.map { $0.title(fileCount: history.files[$0.id]?.count) } ?? "与 \(branch) 比较…")
+                    .font(Theme.smallFont).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+            }
+            .padding(.leading, 10)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            // 选了某个提交之后，点这一条回到整段比较
+            .onPress { _ in history.select(nil) }
+            .toolTip("当前分支比 \(branch) 多改了什么（merge-base → HEAD）。点这里看整段比较的文件列表")
+            IconButton(ToolWindowIcon.exitComparison, help: "退出比较，回到提交历史", size: 20) { history.exitComparison() }
+                .padding(.trailing, 4)
+        }
+        .frame(height: 28)
+        .background(Rectangle().fill(isShowingWhole ? Theme.selection : Theme.hover.opacity(0.35)))
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 }
 
@@ -85,11 +122,10 @@ private struct CommitList: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(history.commits) { commit in
-                        CommitRow(commit: commit, isSelected: history.selectedCommitID == commit.id, isFocused: isFocused) {
-                            isFocused = true
-                            history.select(commit)
-                        }
+                    ForEach(Array(history.commits.enumerated()), id: \.element.id) { index, commit in
+                        CommitRow(commit: commit, isSelected: history.selection.contains(commit.id), isFocused: isFocused,
+                                  press: { press(commit, modifiers: $0) },
+                                  compareToHead: index == 0 ? nil : { history.selectThroughHead(from: commit) })
                         .id(commit.id)
                     }
                     if history.hasMore {
@@ -109,7 +145,7 @@ private struct CommitList: View {
                 }
                 .padding(.vertical, 4)
             }
-            .onChange(of: history.selectedCommitID) { _, id in
+            .onChange(of: history.selection.anchor) { _, id in
                 guard let id, scrollOnSelection else { return }
                 scrollOnSelection = false
                 proxy.scrollTo(id)
@@ -127,6 +163,19 @@ private struct CommitList: View {
             }
         }
     }
+
+    /// 照变更列表：⌃点击是右键菜单，不动选中；⌘点击加减；⇧点击连选；单击只选它。
+    private func press(_ commit: GitCommit, modifiers: NSEvent.ModifierFlags) {
+        isFocused = true
+        if modifiers.contains(.control) { return }
+        if modifiers.contains(.command) {
+            history.toggleSelection(commit)
+        } else if modifiers.contains(.shift) {
+            history.extendSelection(to: commit)
+        } else {
+            history.select(commit)
+        }
+    }
 }
 
 /// 一条提交，两行：主题 + 短 hash；作者 · 时间。不观察任何对象，状态由父视图传入。
@@ -134,7 +183,9 @@ private struct CommitRow: View {
     let commit: GitCommit
     let isSelected: Bool
     let isFocused: Bool
-    let select: () -> Void
+    let press: (NSEvent.ModifierFlags) -> Void
+    /// 最上面那个（HEAD）自己没有「到 HEAD」可比，是 nil。
+    let compareToHead: (() -> Void)?
     @State private var isHovering = false
 
     var body: some View {
@@ -162,17 +213,27 @@ private struct CommitRow: View {
         .background(Rectangle().fill(isSelected ? (isFocused ? Theme.selection : Theme.inactiveSelection) : (isHovering ? Theme.hover.opacity(0.5) : .clear)))
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        .onPress { _ in select() }
+        .onPress(modifiers: { _, modifiers in press(modifiers) })
+        .contextMenu {
+            if let compareToHead {
+                Button("比较从这里到 HEAD") { compareToHead() }
+                Divider()
+            }
+            Button("复制提交 hash") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(commit.hash, forType: .string)
+            }
+        }
         .help(commit.subject)
     }
 }
 
-// MARK: - 提交详情
+// MARK: - 详情
 
-private struct CommitDetails: View {
+private struct HistoryDetails: View {
     let session: ProjectSession
     @ObservedObject var history: HistoryController
-    let commit: GitCommit
+    let detail: HistoryDetail
     @State private var clicks = DoubleClickDetector(interval: NSEvent.doubleClickInterval)
     @FocusState private var filesFocused: Bool
 
@@ -181,22 +242,10 @@ private struct CommitDetails: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(commit.subject).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text).textSelection(.enabled)
-                        if !commit.body.isEmpty {
-                            Text(commit.body).font(Theme.smallFont).foregroundStyle(Theme.secondaryText).textSelection(.enabled).lineLimit(8)
+                        switch detail {
+                        case .commit(let commit): CommitHeader(commit: commit)
+                        case .range(let range): RangeHeader(range: range, fileCount: history.files[range.id]?.count)
                         }
-                        HStack(spacing: 6) {
-                            Text(commit.authorName).help(commit.authorEmail)
-                            Text("·")
-                            Text(DateText.full(commit.commitDate))
-                            if commit.authorDateDiffers {
-                                // rebase / cherry-pick 过的提交，作者时间和落库时间对不上：两个都给出来，省得看着像排错了序
-                                Text("（编写于 \(DateText.full(commit.authorDate))）")
-                            }
-                            Text("·")
-                            Text(commit.shortHash).font(.system(size: 11, design: .monospaced)).help(commit.hash).textSelection(.enabled)
-                        }
-                        .font(Theme.smallFont).foregroundStyle(Theme.mutedText)
                         Divider().overlay(Theme.border).padding(.top, 2)
                         files
                             .focusable()
@@ -209,10 +258,10 @@ private struct CommitDetails: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .onChange(of: session.activeTab?.id) { _, _ in
-                    guard let active = session.activeTab?.commitDiff, active.commit.id == commit.id else { return }
+                    guard let active = session.activeTab, active.historyFilesKey == detail.key, let change = active.diffChange else { return }
                     Task { @MainActor in
                         await Task.yield()
-                        proxy.scrollTo("history-file:" + active.change.path, anchor: .center)
+                        proxy.scrollTo("history-file:" + change.path, anchor: .center)
                     }
                 }
             }
@@ -228,23 +277,23 @@ private struct CommitDetails: View {
 
     @ViewBuilder
     private var files: some View {
-        if let files = history.filesByCommit[commit.id] {
+        if let files = history.files[detail.key] {
             if files.isEmpty {
-                Text("这次提交没有文件变化").font(Theme.smallFont).foregroundStyle(Theme.mutedText)
+                Text(detail.isRange ? "这一段没有文件变化" : "这次提交没有文件变化").font(Theme.smallFont).foregroundStyle(Theme.mutedText)
             } else {
                 Text("\(files.count) 个文件").font(Theme.smallFont).foregroundStyle(Theme.mutedText)
                 LazyVStack(spacing: 0) {
                     ForEach(files) { change in
-                        CommitFileRow(session: session, history: history, clicks: clicks, commit: commit, change: change,
-                                      isActive: session.activeTab?.commitDiff.map { $0.commit.id == commit.id && $0.change.path == change.path } ?? false,
-                                      statistics: history.statisticsByCommit[commit.id]?[change.path],
-                                      focus: { filesFocused = true })
+                        HistoryFileRow(session: session, history: history, clicks: clicks, detail: detail, change: change,
+                                       isActive: session.activeTab.map { $0.historyFilesKey == detail.key && $0.diffChange?.path == change.path } ?? false,
+                                       statistics: history.statistics[detail.key]?[change.path],
+                                       focus: { filesFocused = true })
                             .id("history-file:" + change.path)
                     }
                 }
                 .padding(.horizontal, -10)
             }
-        } else if let error = history.filesError[commit.id] {
+        } else if let error = history.filesError[detail.key] {
             Text("取不到文件列表：\(error)").font(Theme.smallFont).foregroundStyle(Theme.danger).textSelection(.enabled)
         } else {
             HStack(spacing: 6) {
@@ -255,12 +304,63 @@ private struct CommitDetails: View {
     }
 }
 
-/// 提交里的一个文件：单击预览 diff，双击固定，右键可以把这个变更回滚到工作区。
-private struct CommitFileRow: View {
+/// 单个提交：主题、正文、作者 · 时间 · hash。
+private struct CommitHeader: View {
+    let commit: GitCommit
+
+    var body: some View {
+        Text(commit.subject).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text).textSelection(.enabled)
+        if !commit.body.isEmpty {
+            Text(commit.body).font(Theme.smallFont).foregroundStyle(Theme.secondaryText).textSelection(.enabled).lineLimit(8)
+        }
+        HStack(spacing: 6) {
+            Text(commit.authorName).help(commit.authorEmail)
+            Text("·")
+            Text(DateText.full(commit.commitDate))
+            if commit.authorDateDiffers {
+                // rebase / cherry-pick 过的提交，作者时间和落库时间对不上：两个都给出来，省得看着像排错了序
+                Text("（编写于 \(DateText.full(commit.authorDate))）")
+            }
+            Text("·")
+            Text(commit.shortHash).font(.system(size: 11, design: .monospaced)).help(commit.hash).textSelection(.enabled)
+        }
+        .font(Theme.smallFont).foregroundStyle(Theme.mutedText)
+    }
+}
+
+/// 一段提交合起来：「3 个提交 · 12 个文件」、比的是哪两版，不连续 / 没有提交时补一句。
+private struct RangeHeader: View {
+    let range: GitCommitRange
+    let fileCount: Int?
+
+    var body: some View {
+        Text(range.title(fileCount: fileCount)).font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.text)
+        HStack(spacing: 6) {
+            Text(range.summary)
+            Text("·")
+            Text(Self.short(range.base) + " → " + Self.short(range.target))
+                .font(.system(size: 11, design: .monospaced))
+                .textSelection(.enabled)
+                .help(range.base + " → " + range.target)
+        }
+        .font(Theme.smallFont).foregroundStyle(Theme.mutedText)
+        if let note = range.note {
+            Text(note).font(Theme.smallFont).foregroundStyle(Theme.warning).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// 空树（从根提交之前开始比）写成「空」，其余取前 7 位。
+    private static func short(_ hash: String) -> String {
+        hash == GitClient.emptyTree ? "（空）" : String(hash.prefix(7))
+    }
+}
+
+/// 提交 / 区间里的一个文件：单击预览 diff，双击固定，右键可以把这个变更回滚到工作区。
+private struct HistoryFileRow: View {
     let session: ProjectSession
     let history: HistoryController
     let clicks: DoubleClickDetector
-    let commit: GitCommit
+    let detail: HistoryDetail
     let change: GitChange
     let isActive: Bool
     let statistics: DiffLineCounts?
@@ -280,18 +380,18 @@ private struct CommitFileRow: View {
         .onHover { isHovering = $0 }
         .onPress { _ in
             focus()
-            session.openCommitDiff(change, in: commit, pinned: false)
+            session.openHistoryDiff(change, in: detail, pinned: false)
         } release: { isClick in
-            if isClick, clicks.registerClick(on: commit.hash + change.path) { session.openCommitDiff(change, in: commit, pinned: true) }
+            if isClick, clicks.registerClick(on: detail.key + ":" + change.path) { session.openHistoryDiff(change, in: detail, pinned: true) }
         }
         .contextMenu {
-            Button("显示 diff") { session.openCommitDiff(change, in: commit, pinned: true) }
+            Button("显示 diff") { session.openHistoryDiff(change, in: detail, pinned: true) }
             if let url = session.url(for: change), session.fileExists(url) {
                 Button("打开文件（当前版本）") { session.openFile(url, pinned: true) }
                 Button("在项目视图中显示") { session.reveal(url) }
             }
             Divider()
-            Button("回滚这个变更（Revert）") { history.revert(change, in: commit) }
+            Button("回滚这个变更（Revert）") { history.revert(change, in: detail) }
         }
     }
 }

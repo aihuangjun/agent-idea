@@ -123,9 +123,10 @@ private struct TabItem: View {
                 .foregroundStyle(isActive ? Theme.text : Theme.secondaryText)
                 .lineLimit(1)
             if tab.isDiff {
-                // 工作区 diff 标「diff」，历史提交的标它的短 hash，一眼分得清看的是哪一份
-                Text(tab.commitDiff?.commit.shortHash ?? "diff")
-                    .font(.system(size: 9, weight: .semibold, design: tab.commitDiff == nil ? .default : .monospaced))
+                // 工作区 diff 标「diff」，历史提交的标它的短 hash，一段区间标「老…新」/「对比 分支」，一眼分得清看的是哪一份
+                Text(tab.commitDiff?.commit.shortHash ?? tab.rangeDiff?.range.badge ?? "diff")
+                    .font(.system(size: 9, weight: .semibold, design: tab.historyRevisions == nil ? .default : .monospaced))
+                    .lineLimit(1)
                     .foregroundStyle(Theme.vcsModified)
                     .padding(.horizontal, 4).padding(.vertical, 1)
                     .background(Capsule().fill(Theme.vcsModified.opacity(0.15)))
@@ -295,7 +296,7 @@ private struct Breadcrumb: View {
     var body: some View {
         ViewThatFits(in: .horizontal) {
             expanded.fixedSize(horizontal: true, vertical: false)
-            Text(([tab.commitDiff?.commit.shortHash].compactMap { $0 } + components).joined(separator: " / "))
+            Text(([tab.commitDiff?.commit.shortHash ?? tab.rangeDiff?.range.badge].compactMap { $0 } + components).joined(separator: " / "))
                 .font(Theme.smallFont).foregroundStyle(Theme.secondaryText).lineLimit(1).truncationMode(.middle)
         }
         .help(components.joined(separator: "/"))
@@ -307,6 +308,10 @@ private struct Breadcrumb: View {
             if let commitDiff = tab.commitDiff {
                 Text(commitDiff.commit.shortHash).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.vcsModified)
                 Text(commitDiff.commit.subject).font(Theme.smallFont).foregroundStyle(Theme.secondaryText).lineLimit(1)
+                Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold)).foregroundStyle(Theme.mutedText)
+            } else if let range = tab.rangeDiff?.range {
+                Text(range.badge).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.vcsModified)
+                Text(range.summary).font(Theme.smallFont).foregroundStyle(Theme.secondaryText).lineLimit(1)
                 Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold)).foregroundStyle(Theme.mutedText)
             }
             ForEach(Array(parts.enumerated()), id: \.offset) { index, part in

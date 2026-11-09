@@ -74,14 +74,14 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
         // 选中 → 拉文件列表
         let first = history.commits[0]
         history.select(first)
-        await waitUntil { history.filesByCommit[first.id] != nil }
-        #expect(history.filesByCommit[first.id]?.map(\.path) == ["b.md", "src/a.swift"])
+        await waitUntil { history.files[first.id] != nil }
+        #expect(history.files[first.id]?.map(\.path) == ["b.md", "src/a.swift"])
         #expect(runner.calls(startingWith: "diff").contains(["diff", "--name-status", "-z", "--find-renames", first.parents[0], first.hash]))
         history.moveSelection(by: 1)
         #expect(history.selectedCommit?.subject == "提交 1")
 
         // 打开提交里的文件 diff：标签 id 带 hash，内容是 diff；工作区 git 刷新不会把它关掉
-        let change = try #require(history.filesByCommit[first.id]?.first)
+        let change = try #require(history.files[first.id]?.first)
         session.openCommitDiff(change, in: first)
         let tab = try #require(session.activeTab)
         #expect(tab.id == "commit:\(first.hash):b.md")
