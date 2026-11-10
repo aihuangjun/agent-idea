@@ -121,6 +121,8 @@ private func makeRepository(_ git: GitClient, in directory: URL) async throws ->
             switch arguments.first {
             case "rev-parse" where arguments.contains("--show-toplevel"): return shellOutput(root + "\n")
             case "rev-parse" where arguments.contains("--git-path"): return shellOutput("/nonexistent/" + (arguments.last ?? ""))
+            // 撤销提交退回新提交的第一个父提交（`<hash>^`），这里就是提交前的 h1
+            case "rev-parse" where arguments.last?.hasSuffix("^") == true: return shellOutput("h1h1h1h1h1\n")
             case "rev-parse": return shellOutput(head.value + "\n")
             case "symbolic-ref": return shellOutput("main\n")
             case "status":
