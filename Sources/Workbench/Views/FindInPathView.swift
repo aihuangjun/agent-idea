@@ -5,7 +5,7 @@ import SwiftUI
 
 /// 「查找」工具窗口（IDEA 的 Find in Path，⌃⇧F）：输入框 + 选项（区分大小写 / 全词 / 正则）+ 文件掩码，
 /// 下面是按文件分组的结果。照现有列表的交互：按下即选中并用预览标签打开、跳到那一行并选中命中，双击固定标签；
-/// ↑ ↓ 在结果间移动、回车打开；右键「复制引用」。
+/// ↑ ↓ 在结果间移动、回车用固定标签打开（照 IDEA 的 Find 窗口）；右键「复制引用」。
 struct FindInPathView: View {
     @ObservedObject var session: ProjectSession
     @ObservedObject var search: TextSearchController
@@ -49,7 +49,7 @@ struct FindInPathView: View {
                     switch key {
                     case .up: search.moveSelection(by: -1)
                     case .down: search.moveSelection(by: 1)
-                    case .submit: openSelected(pinned: false)
+                    case .submit: openSelected(pinned: true)
                     case .cancel: session.focusContent()
                     }
                     return true
@@ -171,7 +171,7 @@ struct FindInPathView: View {
             .focused($isListFocused)
             .onKeyPress(.upArrow) { search.moveSelection(by: -1); return .handled }
             .onKeyPress(.downArrow) { search.moveSelection(by: 1); return .handled }
-            .onKeyPress(.return) { openSelected(pinned: false); return .handled }
+            .onKeyPress(.return) { openSelected(pinned: true); return .handled }
             .onChange(of: search.selected) { _, hit in
                 guard let hit else { return }
                 proxy.scrollTo(Self.rowID(hit.path, hit.line))
