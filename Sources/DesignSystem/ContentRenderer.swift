@@ -24,8 +24,17 @@ final class CursorRestoringWebView: WKWebView {
     var onFindInPath: (() -> Void)?
     var contextActions: (() -> [ContentRenderer.ContextAction])?
 
+    /// 每个进程只把 WebKit 原始的右键菜单记一次日志（`ContextMenuPruning.describe`）。
+    private static var loggedOriginalMenu = false
+
     override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
         super.willOpenMenu(menu, with: event)
+        if !Self.loggedOriginalMenu {
+            Self.loggedOriginalMenu = true
+            Log.info("web", "右键菜单原样：\(ContextMenuPruning.describe(menu))")
+        }
+        // WebKit 给可编辑文字的那一套（拼写、替换、字体、语音、段落方向……）在代码编辑器里没用，只留白名单
+        ContextMenuPruning.prune(menu)
         let actions = contextActions?() ?? []
         guard !actions.isEmpty else { return }
         if !menu.items.isEmpty { menu.insertItem(.separator(), at: 0) }

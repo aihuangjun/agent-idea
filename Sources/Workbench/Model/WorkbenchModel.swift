@@ -136,10 +136,23 @@ final class WorkbenchModel: ObservableObject {
         self.renderer.onShellReloaded = { [weak self] in self?.active?.renderActiveTab() }
         self.renderer.onFind = { [weak self] in self?.active?.showFind() }
         self.renderer.onFindInPath = { [weak self] in self?.active?.showFindInPath() }
+        // 正文右键菜单里我们自己的项：复制路径和行号（IDEA 编辑器右键的 Copy Reference）、工作区 diff 的回滚
         self.renderer.contextActions = { [weak self] in
-            guard let session = self?.active, let change = session.activeTab?.change,
-                  let action = session.rollbackMenuAction(for: change) else { return [] }
-            return [action]
+            guard let session = self?.active, let tab = session.activeTab else { return [] }
+            var actions: [ContentRenderer.ContextAction] = []
+            if session.referenceURL(for: tab) != nil {
+                let id = tab.id
+                actions.append(ContentRenderer.ContextAction(title: "复制路径和行号") { [weak session] in
+                    session?.reference(of: id) { text in
+                        Desktop.copyToClipboard(text)
+                        session?.notify("已复制 \(text)")
+                    }
+                })
+            }
+            if let change = tab.change, let action = session.rollbackMenuAction(for: change) {
+                actions.append(action)
+            }
+            return actions
         }
         self.renderer.onRendered = { [weak self] _, _ in self?.active?.findInFile() }
         self.renderer.onChangePosition = { [weak self] position in self?.active?.setChangePosition(position) }
