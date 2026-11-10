@@ -9,7 +9,19 @@ public struct AgentIDEARootScene: Scene {
     @StateObject private var updater = Updater()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
-    public init() {}
+    public init() {
+        Self.disableSystemEditMenuExtras()
+    }
+
+    /// AppKit 往「编辑」菜单末尾自动追加的「开始听写」「表情与符号」：代码阅读 / 提交场景用不上（用户定的，
+    /// 不要没用的菜单项）。「自动填充」没有对应的键，去不掉。这几个键 AppKit 在建菜单时读，`AppDelegate.init` 已经太晚（macOS 27 起它在启动完之后才建），
+    /// 所以放在 Scene 的 init——`register` 只是登记默认值，构造几次都无妨。
+    static func disableSystemEditMenuExtras() {
+        UserDefaults.standard.register(defaults: [
+            "NSDisabledDictationMenuItem": true,
+            "NSDisabledCharacterPaletteMenuItem": true,
+        ])
+    }
 
     private static var defaultWindowSize: CGSize {
         let available = NSScreen.main?.visibleFrame.size ?? CGSize(width: 1440, height: 900)
@@ -92,8 +104,6 @@ public struct AgentIDEARootScene: Scene {
                     .disabled(!(workbench.active?.commit?.canPush ?? false))
                 Divider()
                 Button("分支…") { workbench.active?.showBranches() }
-                    .disabled(!(workbench.active?.hasGit ?? false))
-                Button("刷新 git 状态") { workbench.active?.refreshAll() }
                     .disabled(!(workbench.active?.hasGit ?? false))
             }
         }

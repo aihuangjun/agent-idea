@@ -7,7 +7,7 @@ extension ProjectSession {
         let targets = changesForAction(on: change).filter { $0.kind != .untracked }
         guard !targets.isEmpty else { return nil }
         return ContentRenderer.ContextAction(
-            title: targets.count == 1 ? "回滚（Revert）" : "回滚 \(targets.count) 个文件（Revert）"
+            title: targets.count == 1 ? "回滚" : "回滚 \(targets.count) 个文件"
         ) { [weak self] in self?.rollback(targets) }
     }
 }

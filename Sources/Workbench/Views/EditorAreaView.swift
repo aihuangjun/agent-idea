@@ -65,7 +65,7 @@ private struct EmptyEditorView: View {
                 shortcut("复制路径和行号", "⌥⇧⌘C")
                 shortcut("后退 / 前进", "⌥← / ⌥→")
                 shortcut("上一处 / 下一处变更", "⇧F7 / F7")
-                shortcut("拉取最新（fetch + rebase）", "⌘T")
+                shortcut("拉取最新", "⌘T")
                 shortcut("提交 / 推送", "⌘K / ⇧⌘K")
                 shortcut("保存", "⌘S")
                 shortcut("从磁盘重新加载", "⌘R")
@@ -247,7 +247,7 @@ private struct EditorHeader: View {
         if tab.isDiff {
             DiffReviewControls(preferences: preferences, progress: session.diffReviewProgress, supported: session.supportsDiffReading)
             if session.supportsDiffReading { wordWrapControl }
-            IconButton(ToolWindowIcon.refresh, help: "刷新文件与 diff（⌘R）", size: 22) { session.refreshAll() }
+            IconButton(ToolWindowIcon.refresh, help: "从磁盘重新加载（⌘R）", size: 22) { session.refreshAll() }
             Picker("", selection: $preferences.diffMode) {
                 ForEach(DiffViewMode.allCases, id: \.self) { Text($0.label).tag($0) }
             }

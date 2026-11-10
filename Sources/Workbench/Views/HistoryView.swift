@@ -448,7 +448,7 @@ private struct HistoryFileRow: View {
                 Button("在项目视图中显示") { session.reveal(url) }
             }
             Divider()
-            Button("回滚这个变更（Revert）") { history.revert(change, in: detail) }
+            Button("回滚这个变更") { history.revert(change, in: detail) }
         }
     }
 }

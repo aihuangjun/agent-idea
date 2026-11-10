@@ -210,13 +210,13 @@ private func makeSession(in directory: URL, active: Bool = true, renderer: Conte
         defer { session.tearDown() }
         await waitUntil { session.changeGroups.total == 3 }
         let change = try #require(session.gitSnapshot.changes.first { $0.path == "m.txt" })
-        #expect(session.rollbackMenuAction(for: change)?.title == "回滚（Revert）")
+        #expect(session.rollbackMenuAction(for: change)?.title == "回滚")
         session.selectChange("m.txt")
         let order = session.gitSnapshot.changes.map(\.path)
         session.toggleChangeSelection("gone.txt", order: order)
         session.toggleChangeSelection("n.txt", order: order)
         let action = try #require(session.rollbackMenuAction(for: change))
-        #expect(action.title == "回滚 2 个文件（Revert）")
+        #expect(action.title == "回滚 2 个文件")
         action.perform()
         await waitUntil { !runner.calls(startingWith: "restore").isEmpty }
         #expect(runner.calls(startingWith: "restore").first == ["restore", "--source=HEAD", "--staged", "--worktree", "--", "gone.txt", "m.txt"])

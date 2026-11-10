@@ -311,7 +311,7 @@ private struct ChangeRow: View {
         if targets.count > 1 {
             let rollbackable = targets.filter { $0.kind != .untracked }.count
             let deletable = targets.filter(commit.canDelete).count
-            if rollbackable > 0 { Button("回滚 \(rollbackable) 个文件（Revert）") { onRollback(targets) } }
+            if rollbackable > 0 { Button("回滚 \(rollbackable) 个文件") { onRollback(targets) } }
             if deletable > 0 { Button("删除 \(deletable) 个文件…（⌫）") { onDelete(targets) } }
         } else {
             // 分隔线跟着这一组走：已删除的变更这一组整个没有，菜单第一项就不该是一条线
@@ -321,7 +321,7 @@ private struct ChangeRow: View {
                 Divider()
             }
             if change.kind != .untracked {
-                Button("回滚（Revert）") { onRollback([change]) }
+                Button("回滚") { onRollback([change]) }
             }
             if let node = session.node(for: change) {
                 Button("重命名…") { onRename(node) }
