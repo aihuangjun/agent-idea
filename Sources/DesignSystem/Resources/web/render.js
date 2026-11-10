@@ -418,25 +418,6 @@
     return foldMarks(cm, line, line).some(mark => mark.find().from.line === line);
   }
 
-  /* ⌘-（IDEA 的 Collapse）：折起包住光标的最里层区块；光标就在已折起的区块头上时往外一层。 */
-  function collapseAtCursor(cm) {
-    const line = cm.getCursor().line;
-    for (let at = line; at >= Math.max(cm.firstLine(), line - FOLD_SCAN_LIMIT); at--) {
-      if (foldedAt(cm, at)) continue;
-      const range = findFoldRange(cm, window.CodeMirror.Pos(at, 0));
-      if (range && range.to.line > range.from.line && range.from.line <= line && range.to.line >= line) {
-        cm.foldCode(window.CodeMirror.Pos(at, 0), { rangeFinder: () => range }, "fold");
-        return;
-      }
-    }
-  }
-
-  /* ⌘=（IDEA 的 Expand）：展开光标那一行上折起的区块。 */
-  function expandAtCursor(cm) {
-    const line = cm.getCursor().line;
-    cm.operation(() => { for (const mark of foldMarks(cm, line, line)) if (mark.find().from.line === line) mark.clear(); });
-  }
-
   /* 光标 / 选区要落进折起的区块（跳到行、查找、F7）：先展开，CodeMirror 会把落在里面的光标顶出去。 */
   function revealFolded(cm, from, to) {
     const CodeMirror = window.CodeMirror;
@@ -483,19 +464,14 @@
     });
   }
 
-  /* 普通编辑器独有的选项：折叠箭头排在变更条右边（IDEA：行号 → 变更条 → 折叠箭头），折叠与同名高亮的键位。
-   * ⌘- / ⌘= 在应用菜单里是缩小 / 放大：焦点在编辑器里时折叠优先（CodeMirror 处理了就 preventDefault，WebKit 不再交给菜单）。 */
+  /* 普通编辑器独有的选项：折叠箭头排在变更条右边（IDEA：行号 → 变更条 → 折叠箭头）。
+   * 折叠没有快捷键（1.7.3）：以前写过 ⌘- / ⌘= / ⇧⌘- / ⇧⌘=，实机上应用菜单的缩小 / 放大先接走了 ⌘- / ⌘=，从没生效过；
+   * 用户确认折叠用行号旁的三角就够，⌘- / ⌘= 一律是缩小 / 放大。别再加回来。 */
   function plainEditorOptions() {
     return {
       gutters: ["CodeMirror-linenumbers", CHANGE_GUTTER, FOLD_GUTTER],
       foldGutter: { rangeFinder: findFoldRange },
       foldOptions: { rangeFinder: findFoldRange, widget: "...", minFoldSize: 1 },
-      extraKeys: {
-        "Cmd--": collapseAtCursor,
-        "Cmd-=": expandAtCursor,
-        "Shift-Cmd--": "foldAll",
-        "Shift-Cmd-=": "unfoldAll",
-      },
     };
   }
 

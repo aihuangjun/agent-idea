@@ -53,7 +53,7 @@ private final class EditorPage {
         await installHelpers()
     }
 
-    /// 页面里的小工具：取编辑器、合成按键（CodeMirror 按 keyCode 认键）、列出折起的区间。
+    /// 页面里的小工具：取编辑器、合成按键（CodeMirror 按 keyCode 认键）、点折叠三角、列出折起的区间。
     func installHelpers() async {
         _ = await evaluate("""
         (() => {
@@ -64,6 +64,8 @@ private final class EditorPage {
             window.__cm().triggerOnKeyDown(e);
             return e.defaultPrevented;
           };
+          // 点行号旁的折叠三角：CodeMirror 把 gutter 上的 mousedown 转成 gutterClick，foldgutter 插件听的就是它
+          window.__gutter = (line) => { const cm = window.__cm(); window.CodeMirror.signal(cm, 'gutterClick', cm, line, 'CodeMirror-foldgutter', new MouseEvent('mousedown')); };
           window.__folds = () => window.__cm().getAllMarks().filter(m => m.__isFold && m.find()).map(m => m.find().from.line + '-' + m.find().to.line).sort().join(',');
           return true;
         })()
@@ -93,7 +95,7 @@ public class Counter {
 }
 """
 
-/// 折叠：⌘- 折起包住光标的区块（光标在方法体里也行）、⌘= 展开、⇧⌘- / ⇧⌘= 全部；箭头排在变更条右边；
+/// 折叠：点行号旁的三角折起 / 展开（没有快捷键，⌘- / ⌘= 留给应用的缩小 / 放大）；全部折起 / 展开的区块范围；箭头排在变更条右边；
 /// 切主题（重建编辑器）后折叠还在；经 Swift 的 payload 往返恢复，文本变了就丢弃；Markdown 源码同样往返。
 @Test @MainActor func foldingFollowsIDEAKeysAndSurvivesRebuilds() async throws {
     let page = EditorPage()
@@ -103,9 +105,9 @@ public class Counter {
     #expect(await page.string("JSON.stringify(__cm().getOption('gutters'))") == #"["CodeMirror-linenumbers","cm-changes","CodeMirror-foldgutter"]"#)
     #expect(await page.wait(for: "document.querySelectorAll('.CodeMirror-foldgutter-open').length >= 3"), "类、构造器、方法三处都有折叠箭头")
 
-    // 光标在 run 的方法体里（第 10 行）：⌘- 折起整个 run（9–13）
-    let collapsed = await page.string("(() => { __cm().setCursor({line: 10, ch: 8}); const handled = __key(189, {metaKey: true}); return [handled, __folds(), __cm().isFolded({line: 10, ch: 0}) === true].join('|'); })()")
-    #expect(collapsed == "true|9-13|true", "\(collapsed)")
+    // ⌘- / ⌘= / ⇧⌘- / ⇧⌘= 编辑器不处理（交给应用菜单缩放）；点 run 那一行（第 9 行）的三角折起整个 run（9–13）
+    let collapsed = await page.string("(() => { const cm = __cm(); cm.setCursor({line: 10, ch: 8}); const handled = [__key(189, {metaKey: true}), __key(187, {metaKey: true}), __key(189, {metaKey: true, shiftKey: true}), __key(187, {metaKey: true, shiftKey: true})].some(Boolean); const before = __folds() || 'none'; __gutter(9); return [handled, before, __folds(), cm.isFolded({line: 10, ch: 0}) === true].join('|'); })()")
+    #expect(collapsed == "false|none|9-13|true", "\(collapsed)")
     #expect(await page.wait(for: "document.querySelector('.CodeMirror-foldgutter-folded')"), "折起的区块箭头换成朝右的")
     #expect(await page.string("document.querySelector('.CodeMirror-foldmarker').textContent") == "...")
 
@@ -118,10 +120,10 @@ public class Counter {
     _ = await page.evaluate("window.ide.setTheme('dark')")
     await page.installHelpers()
 
-    // ⌘= 在区块头那一行展开；⇧⌘- 全部折起（类、构造器、方法都折，类在最外层）；⇧⌘= 全部展开
-    let expanded = await page.string("(() => { __cm().setCursor({line: 9, ch: 2}); __key(187, {metaKey: true}); return __folds() || 'none'; })()")
+    // 再点一次三角展开；全部折起（类、构造器、方法都折，类在最外层）/ 全部展开的区块范围
+    let expanded = await page.string("(() => { __gutter(9); return __folds() || 'none'; })()")
     #expect(expanded == "none")
-    let all = await page.string("(() => { __key(189, {metaKey: true, shiftKey: true}); const folded = __folds(); __key(187, {metaKey: true, shiftKey: true}); return folded + '|' + (__folds() || 'none'); })()")
+    let all = await page.string("(() => { const cm = __cm(); cm.execCommand('foldAll'); const folded = __folds(); cm.execCommand('unfoldAll'); return folded + '|' + (__folds() || 'none'); })()")
     #expect(all == "2-14,5-7,9-13|none", "\(all)")
 
     // 经 Swift 契约往返：同一份文字恢复折叠；文字变了（行号对不上）整份丢弃
@@ -132,7 +134,7 @@ public class Counter {
 
     // Markdown 源码：标题折叠，切主题后还在（source 分支是新拼的 payload，要把 foldState 带上）
     await page.render(RenderPayload(.markdown(path: "/p/a.md", markdown: "# 一\n正文\n更多\n# 二\n尾巴\n", documentDirectory: URL(fileURLWithPath: "/p/"), view: .source, editable: true)))
-    let markdown = await page.string("(() => { __cm().setCursor({line: 1, ch: 0}); __key(189, {metaKey: true}); const folded = __folds(); window.ide.setTheme('light'); return folded + '|' + window.__folds(); })()")
+    let markdown = await page.string("(() => { __gutter(0); const folded = __folds(); window.ide.setTheme('light'); return folded + '|' + window.__folds(); })()")
     #expect(markdown == "0-2|0-2", "\(markdown)")
     _ = await page.evaluate("window.ide.setTheme('dark')")
 }
@@ -142,7 +144,7 @@ public class Counter {
     let page = EditorPage()
     let edited = sample.replacingOccurrences(of: "System.out.println(local);", with: "System.out.println(local + 1);")
     await page.render(RenderPayload(.code(path: "/p/Counter.java", text: edited, language: "java", editable: true, base: sample)))
-    let fold = "(() => { const cm = __cm(); cm.setCursor({line: 10, ch: 0}); __key(189, {metaKey: true}); cm.setCursor({line: 0, ch: 0}); return __folds(); })()"
+    let fold = "(() => { const cm = __cm(); __gutter(9); cm.setCursor({line: 0, ch: 0}); return __folds(); })()"
     #expect(await page.string(fold) == "9-13")
     let reveal = await page.string("(() => { window.ide.revealLine({line: 12, ch: 8}); return [__folds() || 'none', __cm().getCursor().line, __cm().getCursor().ch].join('|'); })()")
     #expect(reveal == "none|12|8", "\(reveal)")
