@@ -254,7 +254,9 @@ final class CommitController: ObservableObject {
     }
 
     /// 撤销提交之后把那次的信息填回输入框——只在输入框空着、也没勾「修改上一次提交」时（勾着时 HEAD 一变 amend 会自己重新预填，两边会打架）。
+    /// 提交按钮下那行「已提交 abc1234」同时清掉：提交已经撤了，留着会让人以为还在。
     func restoreMessage(_ text: String) {
+        status = nil
         guard !isAmending, message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         message = text
     }
