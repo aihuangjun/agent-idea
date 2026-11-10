@@ -16,7 +16,7 @@ enum Desktop {
     }
 
     /// 在终端里运行一个脚本：生成 `.command` 包装文件交给系统打开，默认由终端执行（见 `TerminalLauncher`）。
-    /// 命令与「运行」窗口是同一条（`ScriptRunner`），给要交互（`input()`、`read`）的脚本用——运行窗口的 stdin 是空的。
+    /// 命令由 `ScriptRunner` 定（Python 优先用 uv、shell 按扩展名选解释器）。1.7.2 起这是唯一的运行方式：内置运行窗口已删。
     /// 读的是磁盘上的内容，调用方先 `saveAll`。失败了返回错误文案，由调用方决定显示在哪。
     @discardableResult
     static func runInTerminal(_ script: URL) -> String? {

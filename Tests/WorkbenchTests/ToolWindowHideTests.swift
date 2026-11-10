@@ -49,7 +49,7 @@ import TestSupport
 }
 
 /// 每个左侧工具窗口（项目 / 提交 / 提交历史 / 查找）的标题条右侧都有「隐藏（⇧Esc）」按钮，点了就收起
-/// （1.7.0 验收：查找窗口展开后找不到地方关）。运行窗口的标题条一直有自己的隐藏按钮。
+/// （1.7.0 验收：查找窗口展开后找不到地方关）。
 @Test @MainActor func everyToolWindowHeaderHasAWorkingHideButton() async throws {
     try await withTemporaryDirectory { directory in
         let project = directory.appendingPathComponent("proj")
@@ -85,13 +85,12 @@ import TestSupport
     }
 }
 
-/// 左侧图标 / ⌘1 再点当前那个就收起；⇧Esc（隐藏工具窗口）先收左边的，左边没开才收底部的运行窗口。
+/// 左侧图标 / ⌘1 再点当前那个就收起；⇧Esc（隐藏工具窗口）收起左边开着的那个，没开时菜单项灰掉。
 @Test @MainActor func toolWindowTogglesAndHideOrder() throws {
     try withTemporaryDirectory { directory in
         let workbench = WorkbenchModel(git: nil, defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!,
                                        recentFile: directory.appendingPathComponent("recent.json"))
         workbench.toolWindow = nil
-        workbench.isRunWindowShown = false
         #expect(!workbench.canHideToolWindow)
 
         workbench.toggleToolWindow(.find)
@@ -102,12 +101,9 @@ import TestSupport
         #expect(workbench.toolWindow == nil, "再点当前那个是收起")
 
         workbench.toolWindow = .find
-        workbench.isRunWindowShown = true
-        workbench.hideToolWindow()
-        #expect(workbench.toolWindow == nil && workbench.isRunWindowShown, "先收左边的")
         #expect(workbench.canHideToolWindow)
         workbench.hideToolWindow()
-        #expect(!workbench.isRunWindowShown, "再按一次收底部的运行窗口")
+        #expect(workbench.toolWindow == nil)
         #expect(!workbench.canHideToolWindow)
     }
 }

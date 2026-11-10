@@ -70,31 +70,21 @@ private struct ProjectContent: View {
     var body: some View {
         HStack(spacing: 0) {
             ToolStrip(session: session)
-            // 底部的运行窗口照 IDEA 横跨左边的工具窗口与编辑区，工具条除外
-            VStack(spacing: 0) {
-                HStack(spacing: 0) {
-                    if let toolWindow = workbench.toolWindow {
-                        Group {
-                            switch toolWindow {
-                            case .project: ProjectTreeView(session: session)
-                            case .commit: ChangesView(session: session)
-                            case .history: HistoryView(session: session)
-                            case .find: FindInPathView(session: session)
-                            }
-                        }
-                        .frame(width: workbench.toolWindowWidth)
-                        // 标题条右侧的「—」：收起左边这个工具窗口（运行窗口的标题条自己带收起按钮，不给它）
-                        .environment(\.hideToolWindow) { [weak workbench] in workbench?.toolWindow = nil }
-                        ResizeHandle(width: $workbench.toolWindowWidth, range: 180...700)
+            if let toolWindow = workbench.toolWindow {
+                Group {
+                    switch toolWindow {
+                    case .project: ProjectTreeView(session: session)
+                    case .commit: ChangesView(session: session)
+                    case .history: HistoryView(session: session)
+                    case .find: FindInPathView(session: session)
                     }
-                    EditorAreaView(session: session)
                 }
-                if workbench.isRunWindowShown {
-                    HeightResizeHandle(height: $workbench.runWindowHeight, range: 90...800)
-                    RunToolWindow(run: session.run, session: session)
-                        .frame(height: workbench.runWindowHeight)
-                }
+                .frame(width: workbench.toolWindowWidth)
+                // 标题条右侧的「—」：收起左边这个工具窗口
+                .environment(\.hideToolWindow) { [weak workbench] in workbench?.toolWindow = nil }
+                ResizeHandle(width: $workbench.toolWindowWidth, range: 180...700)
             }
+            EditorAreaView(session: session)
         }
         // ⌘E 最近的文件：浮在整个项目主体上，没有标签时也能用
         .overlay(alignment: .top) { RecentFilesPopup(session: session, recent: session.recentFiles) }
@@ -290,8 +280,6 @@ private struct ToolStrip: View {
             stripButton(.history, systemName: "clock.arrow.circlepath", help: "提交历史（⌘9）", badge: 0)
             stripButton(.find, systemName: ToolWindowIcon.findInPath, help: "查找：在项目中查找文字（⌃⇧F，开关 ⌘3）", badge: 0)
             Spacer()
-            // 底部窗口的开关放在最下面，照 IDEA 左下角那一组
-            RunStripButton(run: session.run)
         }
         .padding(.bottom, 8)
         .padding(.top, 8)
@@ -313,19 +301,3 @@ private struct ToolStrip: View {
     }
 }
 
-/// 工具条最下面的「运行」开关。在跑的时候图标右上角亮个小绿点，收起了也看得出来还在跑。
-private struct RunStripButton: View {
-    @EnvironmentObject private var workbench: WorkbenchModel
-    @ObservedObject var run: RunController
-
-    var body: some View {
-        IconButton("play.rectangle", help: "运行（⌘4）", isActive: workbench.isRunWindowShown, size: 30) {
-            workbench.isRunWindowShown.toggle()
-        }
-        .overlay(alignment: .topTrailing) {
-            if run.isRunning {
-                Circle().fill(Theme.success).frame(width: 7, height: 7).offset(x: -3, y: 3)
-            }
-        }
-    }
-}

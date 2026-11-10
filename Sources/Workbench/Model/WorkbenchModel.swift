@@ -59,30 +59,19 @@ final class WorkbenchModel: ObservableObject {
     @Published var toolWindowWidth: CGFloat {
         didSet { defaults.set(Double(toolWindowWidth), forKey: "toolWindow.width") }
     }
-    /// 底部的「运行」工具窗口开着没有（与左边的工具窗口互不相干，两个能同时开）。
-    @Published var isRunWindowShown: Bool {
-        didSet { defaults.set(isRunWindowShown, forKey: "runWindow.shown") }
-    }
-    @Published var runWindowHeight: CGFloat {
-        didSet { defaults.set(Double(runWindowHeight), forKey: "runWindow.height") }
-    }
 
     /// 左侧工具条 / ⌘1 这类开关：点的是开着的那个就收起，否则切过去。
     func toggleToolWindow(_ window: ToolWindow) {
         toolWindow = toolWindow == window ? nil : window
     }
 
-    /// 显示 → 工具窗口 → 隐藏工具窗口（⇧Esc，IDEA 的 Hide Active Tool Window）。我们不跟踪焦点在哪个工具窗口里，
-    /// 所以先收左边的，左边没开才收底部的运行窗口；再按一次就把剩下的那个也收掉。
+    /// 显示 → 工具窗口 → 隐藏工具窗口（⇧Esc，IDEA 的 Hide Active Tool Window）：收起左边开着的那个。
+    /// （1.7.2 前还有底部的运行窗口，左边没开才收它；运行窗口已删，用户只用「在终端中运行」。）
     func hideToolWindow() {
-        if toolWindow != nil {
-            toolWindow = nil
-        } else if isRunWindowShown {
-            isRunWindowShown = false
-        }
+        toolWindow = nil
     }
 
-    var canHideToolWindow: Bool { toolWindow != nil || isRunWindowShown }
+    var canHideToolWindow: Bool { toolWindow != nil }
 
     let preferences: ReadingPreferences
     let renderer = ContentRenderer()
@@ -95,7 +84,6 @@ final class WorkbenchModel: ObservableObject {
     private var preferenceObservation: Task<Void, Never>?
     /// 当前会话一变（草稿、标签、导航）就把 workbench 的变化也发出去：菜单项的启用状态只观察 workbench。
     private var activeSessionObservation: AnyCancellable?
-    private var runObservation: AnyCancellable?
 
     var active: ProjectSession? {
         guard let activeSessionID else { return nil }
@@ -112,9 +100,6 @@ final class WorkbenchModel: ObservableObject {
 
         let savedWidth = defaults.double(forKey: "toolWindow.width")
         toolWindowWidth = savedWidth > 0 ? CGFloat(savedWidth) : 280
-        let savedHeight = defaults.double(forKey: "runWindow.height")
-        runWindowHeight = savedHeight > 0 ? CGFloat(savedHeight) : 240
-        isRunWindowShown = defaults.bool(forKey: "runWindow.shown")
         if let saved = defaults.string(forKey: "toolWindow") {
             toolWindow = saved.isEmpty ? nil : ToolWindow(rawValue: saved)
         }
@@ -223,7 +208,6 @@ final class WorkbenchModel: ObservableObject {
             let session = ProjectSession(root: chosen, git: git, renderer: renderer, preferences: preferences, defaults: defaults,
                                          editorHistories: editorHistories)
             session.onRequestToolWindow = { [weak self] window in self?.toolWindow = window }
-            session.onRequestRunWindow = { [weak self] in self?.isRunWindowShown = true }
             sessions.append(session)
             activate(session.id)
             recentProjects = RecentProjects.adding(root, to: recentProjects)
@@ -240,12 +224,6 @@ final class WorkbenchModel: ObservableObject {
         activeSessionID = sessionID
         next.setActive(true)
         activeSessionObservation = next.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
-        // 运行窗口是单独的 ObservableObject：「停止」「重新运行」的启用要跟着它变。只转发开始 / 结束 / 换脚本，
-        // 不转发输出——整个窗口都观察着 workbench，跑脚本时每 50ms 一次的输出刷新会让它跟着重算
-        runObservation = next.run.$isRunning.combineLatest(next.run.$script)
-            .removeDuplicates { $0 == $1 }
-            .dropFirst()
-            .sink { [weak self] _ in self?.objectWillChange.send() }
         saveOpenProjects()
     }
 
@@ -257,7 +235,6 @@ final class WorkbenchModel: ObservableObject {
             session.setActive(false)
             activeSessionID = nil
             activeSessionObservation = nil
-            runObservation = nil
             if let next = sessions.indices.contains(index) ? sessions[index] : sessions.last {
                 activate(next.id)
             } else {

@@ -269,16 +269,17 @@ private func imports(in file: URL) throws -> Set<String> {
 }
 
 /// 菜单栏只能有一个视图菜单：我们的项放进 SwiftUI 自带的 View 菜单（`CommandGroup(before: .toolbar)`），
-/// 不再另开 `CommandMenu("视图")`（否则系统那个「显示 / View」也在，两个并排）；「代码」菜单已经删掉（用户说用不上）。
+/// 不再另开 `CommandMenu("视图")`（否则系统那个「显示 / View」也在，两个并排）；「代码」「运行」菜单已经删掉（用户说用不上）。
 /// 同一个功能也不许占两个菜单项（以前「文件内查找…」⌘F 与「文件内查找（Ctrl+F）」各一项）。
 @Test func menuBarHasNoDuplicateMenus() throws {
     let scene = try String(contentsOf: packageRoot.appendingPathComponent("Sources/Workbench/Shell/RootScene.swift"), encoding: .utf8)
     #expect(!scene.contains("CommandMenu(\"视图\")"))
     #expect(!scene.contains("CommandMenu(\"代码\")"))
+    #expect(!scene.contains("CommandMenu(\"运行\")"), "「运行」菜单与底部运行窗口 1.7.2 删掉了（用户只用「在终端中运行」）")
     #expect(scene.contains("CommandGroup(before: .toolbar)"))
     #expect(scene.components(separatedBy: "Button(\"文件内查找").count == 2, "「文件内查找」只该有一个菜单项")
     #expect(!scene.contains(".keyboardShortcut(\"f\", modifiers: .control)"), "Ctrl+F 由 CursorRestoringWebView 接下，不另占菜单项")
-    for menu in ["CommandMenu(\"导航\")", "CommandMenu(\"运行\")", "CommandMenu(\"Git\")"] {
+    for menu in ["CommandMenu(\"导航\")", "CommandMenu(\"Git\")"] {
         #expect(scene.components(separatedBy: menu).count == 2, "\(menu) 应该正好一个")
     }
 }

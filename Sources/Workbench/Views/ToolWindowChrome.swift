@@ -7,7 +7,7 @@ import SwiftUI
 /// 走环境值而不是 `@EnvironmentObject`：单独挂一个工具窗口的测试不给 WorkbenchModel 也不会崩，只是没有这个按钮。
 struct ToolWindowHeader<Detail: View, Actions: View>: View {
     let title: String
-    /// 标题后面跟的东西（运行窗口：脚本名与状态）。
+    /// 标题后面跟的东西。
     @ViewBuilder let detail: () -> Detail
     @ViewBuilder let actions: () -> Actions
     @Environment(\.hideToolWindow) private var hideToolWindow
@@ -41,7 +41,7 @@ private struct HideToolWindowKey: EnvironmentKey {
 }
 
 extension EnvironmentValues {
-    /// 收起左侧当前的工具窗口。`ProjectContent` 只给左边那一组设，运行窗口的标题条自己带收起按钮。
+    /// 收起左侧当前的工具窗口。`ProjectContent` 给左边那一组设。
     var hideToolWindow: (() -> Void)? {
         get { self[HideToolWindowKey.self] }
         set { self[HideToolWindowKey.self] = newValue }

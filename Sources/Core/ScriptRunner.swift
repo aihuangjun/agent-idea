@@ -137,17 +137,6 @@ public enum ScriptRunner {
         return directories
     }
 
-    /// 子进程的环境：登录 shell 的那一份，再加两条。
-    /// - `PYTHONUNBUFFERED`：输出不是终端时 Python 默认整块缓冲，不设的话 `print` 要等进程退出才一起冒出来，像是卡住了
-    ///   （`uv run` 会把环境原样交给它起的 python）。
-    /// - `PYTHONIOENCODING`：GUI 应用的环境里常常没有 `LANG`，Python 会退回 ASCII，打印中文直接 UnicodeEncodeError。
-    public static func environment(base: [String: String]) -> [String: String] {
-        var environment = base
-        environment["PYTHONUNBUFFERED"] = "1"
-        environment["PYTHONIOENCODING"] = "utf-8"
-        return environment
-    }
-
     /// 源码里有没有 PEP 723 的 `script` 内联元数据块：
     ///
     ///     # /// script

@@ -82,7 +82,7 @@ import TestSupport
     #expect(TerminalLauncher.fnv1a("") == "33niihzj4ux45", "空串的 FNV-1a 偏移基准，换了算法这里会变")
     #expect(TerminalLauncher.commandFileURL(for: URL(fileURLWithPath: "/tmp/x.sh"), in: URL(fileURLWithPath: "/run")).lastPathComponent == "x-\(TerminalLauncher.fnv1a("/tmp/x.sh")).command")
 
-    // 终端里跑的是与运行窗口同一条命令，路径逐个加引号
+    // 终端里跑的命令由 ScriptRunner 定，路径逐个加引号
     let script = URL(fileURLWithPath: "/tmp/my dir/it's.py")
     let command = ScriptCommand(executable: URL(fileURLWithPath: "/opt/uv"), arguments: ["run", "--script", script.path],
                                 workingDirectory: script.deletingLastPathComponent(), display: "uv run --script it's.py")

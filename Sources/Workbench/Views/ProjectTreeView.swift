@@ -664,7 +664,7 @@ private struct TreeContextMenu: View {
             Button("用默认应用打开") { Desktop.openWithDefaultApp(node.url) }
             if TerminalLauncher.canRun(fileNamed: node.name) {
                 Divider()
-                // 右键只留「在终端中运行」（1.7.1 用户定的）；跑进底部运行窗口走「运行」菜单 ⌃⇧R
+                // 只有「在终端中运行」（1.7.2 起没有内置运行窗口，用户定的）
                 Button("在终端中运行") { session.saveAll { Desktop.runInTerminal(node.url) } }
             }
         }
