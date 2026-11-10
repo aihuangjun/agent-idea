@@ -278,17 +278,14 @@
       autoCloseBrackets: true,
       styleActiveLine: true,
       viewportMargin: 20,
-      // 多光标的鼠标键位照 IDEA（configureMouse 见 mouseBehavior）
+      // 不要多光标（用户定的，1.7.1）：⌘点击 / ⌥拖动都只是普通点击 / 选择，见 mouseBehavior
       configureMouse: mouseBehavior,
       extraKeys: {
         Tab: (cm) => (cm.somethingSelected() ? cm.indentSelection("add") : cm.execCommand("insertSoftTab")),
         "Shift-Tab": "indentLess",
-        // 应用级的后退 / 前进；焦点在编辑器里时由这里转发，别让 CodeMirror 当成按词移动。多光标时也一样。
+        // 应用级的后退 / 前进；焦点在编辑器里时由这里转发，别让 CodeMirror 当成按词移动。
         "Alt-Left": () => post({ type: "navigate", direction: "back" }),
         "Alt-Right": () => post({ type: "navigate", direction: "forward" }),
-        // IDEA 的 Add Selection for Next Occurrence / Unselect Occurrence；Esc 回到单光标是 CodeMirror 自带的（keyMap.basic）
-        "Ctrl-G": selectNextOccurrence,
-        "Shift-Ctrl-G": unselectOccurrence,
       },
     });
     const keys = options.extraKeys;
@@ -297,16 +294,12 @@
     return options;
   }
 
-  /* ---------- 多光标（CodeMirror 原生支持，这里只改键位） ---------- */
+  /* ---------- 鼠标：只有一个光标 ---------- */
 
-  /* 鼠标：⌥⇧点击加一个光标（IDEA 的 Add / Remove Caret）、⌥拖动列选择；⌘点击就是普通点击——
-   * CodeMirror 在 mac 上默认 ⌘点击加光标，IDEA 里 ⌘点击是跳到定义（我们没有），所以显式回 addNew: false 盖掉。
-   * extend 默认取 shiftKey：⌥⇧点击不显式回 false 就成了「扩展主选区」而不是加光标。 */
-  function mouseBehavior(cm, repeat, event) {
-    const unit = repeat === "double" ? "word" : repeat === "triple" ? "line" : "char";
-    if (event.altKey && event.shiftKey) return { addNew: true, extend: false, unit };
-    if (event.altKey) return { addNew: false, unit: "rectangle" };
-    return { addNew: false };
+  /* 1.7.0 加过 IDEA 式多光标（⌥⇧点击、⌃G），1.7.1 用户验收说用不上，删掉了，别加回来。CodeMirror 自己的多光标入口也关掉：
+   * mac 上默认 ⌘点击加光标（addNew 显式回 false）、⌥拖动列选择（unit 显式按点击次数给，不让它变成 rectangle）。 */
+  function mouseBehavior(cm, repeat) {
+    return { addNew: false, unit: repeat === "double" ? "word" : repeat === "triple" ? "line" : "char" };
   }
 
   const WORD_CHAR = /[\p{L}\p{N}_$]/u;
@@ -326,65 +319,6 @@
     return (from === 0 || !WORD_CHAR.test(text.charAt(from - 1))) && (to >= text.length || !WORD_CHAR.test(text.charAt(to)));
   }
 
-  function selectionKey(cm) {
-    return JSON.stringify(cm.listSelections().map(range => [range.anchor.line, range.anchor.ch, range.head.line, range.head.ch]));
-  }
-
-  /* 主选区（最后加的那个）：CodeMirror 的 getCursor 取的就是它。 */
-  function primaryRange(cm) {
-    const anchor = cm.getCursor("anchor"), head = cm.getCursor("head");
-    return { anchor, head, from: window.CodeMirror.cmpPos(anchor, head) <= 0 ? anchor : head, to: window.CodeMirror.cmpPos(anchor, head) <= 0 ? head : anchor };
-  }
-
-  /* ⌃G（IDEA 的 Add Selection for Next Occurrence）：没有选区先选中光标处的词（之后按整词找），
-   * 有选区就从主选区往后找下一处同样的文字（到文末绕回开头），加成新的主选区。大小写敏感，与 IDEA 一致。 */
-  function selectNextOccurrence(cm) {
-    const state = cm.state.nextOccurrence || (cm.state.nextOccurrence = { key: null, word: false, stack: [] });
-    const ranges = cm.listSelections();
-    if (ranges.length === 1 && ranges[0].empty()) {
-      const word = wordAt(cm, ranges[0].head);
-      if (!word) return;
-      cm.setSelection(word.from, word.to);
-      Object.assign(state, { word: true, stack: [{ anchor: word.from, head: word.to }], key: selectionKey(cm) });
-      return;
-    }
-    // 选区不是上一次 ⌃G 留下的样子（用户自己改过）：重新开始，不再要求整词
-    if (state.key !== selectionKey(cm)) Object.assign(state, { word: false, stack: [primaryRange(cm)] });
-    const primary = primaryRange(cm);
-    const query = cm.getRange(primary.from, primary.to);
-    if (!query) return;
-    const text = cm.getValue();
-    const taken = ranges.map(range => [cm.indexFromPos(range.from()), cm.indexFromPos(range.to())]);
-    const usable = (at) => !taken.some(([from, to]) => at < to && at + query.length > from) && (!state.word || wordBounded(text, at, at + query.length));
-    const start = cm.indexFromPos(primary.to);
-    let found = -1;
-    for (let at = text.indexOf(query, start); at >= 0; at = text.indexOf(query, at + 1)) if (usable(at)) { found = at; break; }
-    if (found < 0) for (let at = text.indexOf(query); at >= 0 && at < start; at = text.indexOf(query, at + 1)) if (usable(at)) { found = at; break; }
-    if (found < 0) return;
-    const from = cm.posFromIndex(found), to = cm.posFromIndex(found + query.length);
-    cm.addSelection(from, to);
-    cm.scrollIntoView({ from, to }, 60);
-    state.stack.push({ anchor: from, head: to });
-    state.key = selectionKey(cm);
-  }
-
-  /* ⇧⌃G（IDEA 的 Unselect Occurrence）：撤掉最后加的那个，主选区回到上一个加的。 */
-  function unselectOccurrence(cm) {
-    const ranges = cm.listSelections();
-    if (ranges.length < 2) return;
-    const state = cm.state.nextOccurrence;
-    const same = (range, saved) => window.CodeMirror.cmpPos(range.anchor, saved.anchor) === 0 && window.CodeMirror.cmpPos(range.head, saved.head) === 0;
-    const primary = primaryRange(cm);
-    const remaining = ranges.filter(range => !same(range, primary));
-    let stack = state && state.key === selectionKey(cm) ? state.stack.filter(saved => !same(saved, primary)) : [];
-    stack = stack.filter(saved => remaining.some(range => same(range, saved)));
-    const previous = stack.length ? stack[stack.length - 1] : null;
-    const index = previous ? remaining.findIndex(range => same(range, previous)) : remaining.length - 1;
-    cm.setSelections(remaining, index);
-    cm.scrollIntoView(cm.getCursor("head"), 60);
-    if (state) { state.stack = stack; state.key = selectionKey(cm); }
-  }
-
   /* ---------- 同名高亮（IDEA 的 Identifier Under Caret） ---------- */
 
   const OCCURRENCE_LINE_LIMIT = 20000;  // 超过这么多行不标：每次换词都要重画视口，大文件不值得
@@ -392,7 +326,7 @@
   // 光标停在这些 token 上不标（IDEA 只标标识符）。getTokenTypeAt 给的是 CodeMirror mode 的类型，overlay 的类已经被它去掉
   const NOT_IDENTIFIER = /(^|\s)(keyword|atom|string|string-2|comment|number|meta|header|quote|link|url)(\s|$)/;
 
-  /* 要标什么：单光标停在标识符上 → 这个词（整词）；所有选区是同一段单行文字（⌃G 选出来的、自己选的）→ 这段文字。
+  /* 要标什么：单光标停在标识符上 → 这个词（整词）；选中的是一段单行文字 → 这段文字。
    * 多个空光标、多行选区不标。 */
   function occurrenceQuery(cm) {
     if (cm.lineCount() > OCCURRENCE_LINE_LIMIT) return null;

@@ -6,7 +6,7 @@ import Testing
 import TestSupport
 @preconcurrency import WebKit
 
-/// 编辑器的代码折叠、同名高亮、多光标（render.js）：真起 WKWebView 核对。一条用例一个 WebView，
+/// 编辑器的代码折叠、同名高亮、只有一个光标（render.js）：真起 WKWebView 核对。一条用例一个 WebView，
 /// 同一条用例里的几种情形在同一个页面里依次渲染（别为一种情形多起一个 WebView）。
 @MainActor
 private final class EditorPage {
@@ -183,8 +183,8 @@ public class Counter {
     #expect(await page.wait(for: "document.querySelectorAll('.cm-matchhighlight').length === 4"))
     _ = await page.evaluate("__cm().setCursor({line: 9, ch: 6}); true")
     #expect(await page.wait(for: "document.querySelectorAll('.cm-matchhighlight').length === 0"))
-    // ⌃G 选中 count：选中的那处不画，其余三处画
-    _ = await page.evaluate("(() => { __cm().setCursor({line: 10, ch: 21}); __key(71, {ctrlKey: true}); return true; })()")
+    // 选中 count（双击 / 拖选出来的）：选中的那处不画，其余三处画
+    _ = await page.evaluate("(() => { const cm = __cm(); const at = cm.getLine(10).search(/\\bcount\\b/); cm.setSelection({line: 10, ch: at}, {line: 10, ch: at + 5}); return true; })()")
     #expect(await page.wait(for: "__cm().getSelection() === 'count' && document.querySelectorAll('.cm-matchhighlight').length === 3"))
 
     // 超过行数上限不标
@@ -195,9 +195,9 @@ public class Counter {
     #expect(bigResult == "true|0", "\(bigResult)")
 }
 
-/// 多光标：⌃G 逐个加下一处、⇧⌃G 撤掉最后一个、Esc 回到单光标；⌥⇧点击加光标、⌘点击是普通点击；
-/// 多光标输入一次改所有处，tree-sitter 着色与整份重新解析一致，edited 消息带新全文，一次撤销撤掉全部；⌥← 仍是导航。
-@Test @MainActor func multipleCursorsFollowIDEAKeys() async throws {
+/// 没有多光标（1.7.1 用户定的，删掉了）：⌃G、⌥⇧点击、⌘点击都不加光标，⌥拖动不是列选择；⌥← 仍是导航。
+/// 一次操作多处改动（程序里 setSelections 造出来，撤销多处改动也会这样）时，tree-sitter 着色与整份重新解析一致、一次撤销撤掉全部。
+@Test @MainActor func editorHasOnlyOneCursor() async throws {
     let page = EditorPage()
     let edits = Locked<[String]>([])
     let navigation = Locked<[String]>([])
@@ -206,26 +206,37 @@ public class Counter {
     await page.render(code("/p/Counter.java", "java", sample))
     #expect(await page.wait(for: "document.querySelector('.CodeMirror[data-syntax=\"tree-sitter\"]')"))
 
-    let selectNext = await page.string("""
-    (() => { const cm = __cm(); cm.setCursor({line: 3, ch: 17});
-      const counts = [];
-      for (let i = 0; i < 5; i++) { __key(71, {ctrlKey: true}); counts.push(cm.listSelections().length); }
-      return counts.join(',') + '|' + cm.getSelections().join(',') + '|' + cm.getCursor().line; })()
-    """)
-    // 第一下只选中光标处的词；之后逐个往后加，整词匹配（Counter 不算），加满 4 个再按不变
-    #expect(selectNext == "1,2,3,4,4|count,count,count,count|12", "\(selectNext)")
-    let unselect = await page.string("(() => { const cm = __cm(); __key(71, {ctrlKey: true, shiftKey: true}); return cm.listSelections().length + '|' + cm.getCursor().line; })()")
-    #expect(unselect == "3|10", "撤掉最后加的（第 12 行那个），主选区回到上一个：\(unselect)")
+    let keys = await page.string("(() => { const cm = __cm(); cm.setCursor({line: 3, ch: 17}); __key(71, {ctrlKey: true}); __key(71, {ctrlKey: true}); return String(cm.listSelections().length); })()")
+    #expect(keys == "1", "⌃G 不再加选区：\(keys)")
 
-    // ⌥← 在多光标时仍是应用的后退
     _ = await page.evaluate("__key(37, {altKey: true}); true")
     let navigationDeadline = Date().addingTimeInterval(10)
     while navigation.value.isEmpty, Date() < navigationDeadline { try? await Task.sleep(nanoseconds: 20_000_000) }
     #expect(navigation.value == ["back"])
 
+    let mouse = await page.string("""
+    (() => { const cm = __cm(); cm.setCursor({line: 6, ch: 4});
+      const click = (line, ch, mods) => {
+        const at = cm.charCoords({line, ch}, 'window');
+        const options = Object.assign({bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: at.left + 1, clientY: (at.top + at.bottom) / 2, detail: 1}, mods);
+        cm.display.scroller.dispatchEvent(new MouseEvent('mousedown', options));
+        document.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, options, {buttons: 0})));
+      };
+      click(10, 8, {altKey: true, shiftKey: true});
+      const altShift = cm.listSelections().length;
+      click(11, 8, {metaKey: true});
+      const plain = cm.listSelections().length + ':' + cm.getCursor().line;
+      const behavior = cm.getOption('configureMouse');
+      return [altShift, plain, behavior(cm, 'single', {altKey: true}).unit, behavior(cm, 'single', {metaKey: true}).addNew].join('|'); })()
+    """)
+    #expect(mouse == "1|1:11|char|false", "\(mouse)")
+
     // 三处一起改成 total：一次操作多处改动，tree-sitter 增量路径（changes 批处理）要与整份重新解析一致
     let typed = await page.string("""
-    (() => { const cm = __cm(); cm.replaceSelection('total', 'end', '+input');
+    (() => { const cm = __cm();
+      const ranges = []; cm.getValue().split('\\n').forEach((text, line) => { const at = text.search(/\\bcount\\b/); if (at >= 0 && ranges.length < 3) ranges.push({anchor: {line, ch: at}, head: {line, ch: at + 5}}); });
+      cm.setSelections(ranges);
+      cm.replaceSelection('total', 'end', '+input');
       cm.refresh();
       const fresh = window.Syntax.highlightLines('java', '/p/Fresh.java', cm.getValue() + '\\n// fresh');
       const cellsOf = (nodes) => { const out = []; for (const node of nodes) {
@@ -239,35 +250,13 @@ public class Counter {
         const holder = document.createElement('div'); holder.innerHTML = fresh[line];
         if (!entry || cellsOf(entry.node.querySelector('pre').childNodes).join(',') !== cellsOf(holder.childNodes).join(',')) wrong.push(line);
       }
-      return [cm.getValue().split('total').length - 1, cm.getValue().split('count').length - 1, cm.listSelections().length, wrong.join(' ')].join('|'); })()
+      return [ranges.length, cm.getValue().split('total').length - 1, wrong.join(' ')].join('|'); })()
     """)
-    #expect(typed == "3|1|3|", "三处改了、剩下第 12 行那个没选的 count、着色与整份解析一致：\(typed)")
+    #expect(typed == "3|3|", "三处改了、着色与整份解析一致：\(typed)")
     let deadline = Date().addingTimeInterval(10)
     while edits.value.last.map({ !$0.contains("total") }) ?? true, Date() < deadline { try? await Task.sleep(nanoseconds: 20_000_000) }
     #expect(edits.value.last?.components(separatedBy: "total").count == 4, "edited 消息带上三处都改过的全文")
 
     let undone = await page.string("(() => { const cm = __cm(); cm.undo(); return [cm.getValue() === \(String(reflecting: sample)), cm.historySize().undo].join('|'); })()")
-    #expect(undone == "true|0", "一次撤销撤掉全部光标的那一笔：\(undone)")
-
-    // Esc 回到单光标
-    let escaped = await page.string("(() => { const cm = __cm(); cm.setCursor({line: 3, ch: 17}); __key(71, {ctrlKey: true}); __key(71, {ctrlKey: true}); const before = cm.listSelections().length; __key(27); return before + '|' + cm.listSelections().length; })()")
-    #expect(escaped == "2|1", "\(escaped)")
-
-    // 鼠标：⌥⇧点击加一个光标；⌘点击是普通点击（不加光标）；⌥拖动是列选择
-    let mouse = await page.string("""
-    (() => { const cm = __cm(); cm.setCursor({line: 6, ch: 4});
-      const click = (line, ch, mods) => {
-        const at = cm.charCoords({line, ch}, 'window');
-        const options = Object.assign({bubbles: true, cancelable: true, button: 0, buttons: 1, clientX: at.left + 1, clientY: (at.top + at.bottom) / 2, detail: 1}, mods);
-        cm.display.scroller.dispatchEvent(new MouseEvent('mousedown', options));
-        document.dispatchEvent(new MouseEvent('mouseup', Object.assign({}, options, {buttons: 0})));
-      };
-      click(10, 8, {altKey: true, shiftKey: true});
-      const added = cm.listSelections().length;
-      click(11, 8, {metaKey: true});
-      const plain = cm.listSelections().length + ':' + cm.getCursor().line;
-      const behavior = cm.getOption('configureMouse');
-      return [added, plain, behavior(cm, 'single', {altKey: true}).unit, behavior(cm, 'single', {metaKey: true}).addNew].join('|'); })()
-    """)
-    #expect(mouse == "2|1:11|rectangle|false", "\(mouse)")
+    #expect(undone == "true|0", "一次撤销撤掉三处：\(undone)")
 }

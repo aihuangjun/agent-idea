@@ -373,7 +373,8 @@ private struct CommitPanel: View {
                     pushButton("推送 ↑\(branch.ahead)", color: Theme.accent)
                         .toolTip("把本地领先的 \(branch.ahead) 个提交推到远端")
                 } else if branch.upstream == nil, !branch.isUnborn {
-                    pushButton("推送（建上游）", color: Theme.secondaryText)
+                    pushButton("推送（首次推送新分支）", color: Theme.secondaryText)
+                        .toolTip("远端还没有这个分支：推上去，并让本地分支以后跟踪它")
                 }
             }
             .controlSize(.small)
@@ -391,7 +392,7 @@ private struct CommitPanel: View {
         Button {
             commit.pushCurrentBranch()
         } label: {
-            Label(title, systemImage: "arrow.up.circle").font(Theme.smallFont)
+            Label(title, systemImage: "arrow.up.circle").font(Theme.smallFont).lineLimit(1)
         }
         .buttonStyle(.plain).foregroundStyle(color)
         .disabled(!commit.canPush)

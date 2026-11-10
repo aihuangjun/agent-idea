@@ -193,8 +193,7 @@ private struct TabItem: View {
                 Button("用默认应用打开") { Desktop.openWithDefaultApp(url) }
                 if TerminalLauncher.canRun(fileNamed: url.lastPathComponent) {
                     Divider()
-                    // 先把没保存的写回去，跑的才是编辑器里看到的那份（runScript 自己会先 saveAll）
-                    Button("运行 '\(url.lastPathComponent)'") { session.runScript(url) }
+                    // 右键只留「在终端中运行」（1.7.1 用户定的）；跑进底部运行窗口走「运行」菜单 ⌃⇧R。先把没保存的写回去
                     Button("在终端中运行") { session.saveAll { Desktop.runInTerminal(url) } }
                 }
             }

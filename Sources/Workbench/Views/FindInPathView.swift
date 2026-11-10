@@ -141,8 +141,6 @@ struct FindInPathView: View {
                         SearchFileRow(file: file, isCollapsed: isCollapsed) {
                             isListFocused = true
                             search.toggleCollapsed(file.path)
-                        } copyPath: {
-                            copy(file.path)
                         }
                         .id(Self.rowID(file.path, nil))
                         if !isCollapsed {
@@ -223,7 +221,6 @@ private struct SearchFileRow: View {
     let file: TextSearchFile
     let isCollapsed: Bool
     let toggle: () -> Void
-    let copyPath: () -> Void
     @State private var isHovering = false
 
     var body: some View {
@@ -246,9 +243,7 @@ private struct SearchFileRow: View {
         .onHover { isHovering = $0 }
         .onPress(modifiers: { _, modifiers in if !modifiers.contains(.control) { toggle() } })
         .toolTip(file.path)
-        .contextMenu {
-            Button("复制路径") { copyPath() }
-        }
+        // 文件行不挂右键菜单：「复制路径」与匹配行的「复制路径和行号」重复（1.7.1 用户定的，只留后者）
     }
 }
 
