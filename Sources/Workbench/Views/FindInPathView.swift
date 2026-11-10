@@ -5,7 +5,7 @@ import SwiftUI
 
 /// 「查找」工具窗口（IDEA 的 Find in Path，⌃⇧F）：输入框 + 选项（区分大小写 / 全词 / 正则）+ 文件掩码，
 /// 下面是按文件分组的结果。照现有列表的交互：按下即选中并用预览标签打开、跳到那一行并选中命中，双击固定标签；
-/// ↑ ↓ 在结果间移动、回车用固定标签打开（照 IDEA 的 Find 窗口）；右键「复制引用」。
+/// ↑ ↓ 在结果间移动、回车用固定标签打开（照 IDEA 的 Find 窗口）；右键「复制路径和行号」。
 struct FindInPathView: View {
     @ObservedObject var session: ProjectSession
     @ObservedObject var search: TextSearchController
@@ -289,7 +289,7 @@ private struct SearchLineRow: View {
             if isPlainPress { release(isClick) }
         })
         .contextMenu {
-            Button("复制引用（路径:行号）") { copyReference() }
+            Button("复制路径和行号") { copyReference() }
         }
     }
 

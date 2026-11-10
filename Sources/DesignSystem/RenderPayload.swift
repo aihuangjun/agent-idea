@@ -142,18 +142,6 @@ public extension RenderPayload.Content {
         case .message: return "message"
         }
     }
-
-    /// render.js 会用哪一种 CodeMirror 编辑器画这份内容（菜单栏「代码」菜单据此灰掉不适用的项）。
-    /// 与 render.js 的分支一一对应：`renderCode` 只在 editable 时 `renderEditor`；Markdown 预览没有编辑器、只读的源码走静态视图，
-    /// 只读的分栏退回预览；diff 只有带全文（`edit`）时才是编辑器，补丁表格不是。
-    var editorKind: EditorKind? {
-        switch self {
-        case .code(_, _, _, let editable, _, _, _): return editable ? .plain : nil
-        case .markdown(_, _, _, let view, let editable, _, _, _): return editable && view != .preview ? .plain : nil
-        case .diff(_, _, _, _, _, let edit): return edit == nil ? nil : .diff
-        case .image, .html, .message: return nil
-        }
-    }
 }
 
 extension RenderPayload: Encodable {

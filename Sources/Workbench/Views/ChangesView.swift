@@ -27,7 +27,7 @@ struct ChangesView: View {
                 if session.isRefreshingGit {
                     ProgressView().controlSize(.mini).padding(.trailing, 4)
                 }
-                IconButton(ToolWindowIcon.refresh, help: "刷新（⌘R）：重读工作区文件与 diff，不联网", size: 22) { session.refreshAll() }
+                IconButton(ToolWindowIcon.refresh, help: "从磁盘重新加载（⌘R）：重读工作区文件与 diff，不联网", size: 22) { session.refreshAll() }
             }
             if let commit = session.commit {
                 if let error = session.gitError {

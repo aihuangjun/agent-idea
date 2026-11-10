@@ -17,7 +17,7 @@ struct RunToolWindow: View {
                     .disabled(!run.isRunning)
                 IconButton(ToolWindowIcon.clear, help: "清空输出", size: 22) { run.clear() }
                     .disabled(run.buffer.isEmpty)
-                IconButton(ToolWindowIcon.hide, help: "收起（⌘4）", size: 22) { workbench.isRunWindowShown = false }
+                IconButton(ToolWindowIcon.hide, help: "隐藏（⌘4）", size: 22) { workbench.isRunWindowShown = false }
             }
             if run.buffer.isEmpty, run.script == nil {
                 ToolWindowEmptyState(title: "还没有运行过脚本",

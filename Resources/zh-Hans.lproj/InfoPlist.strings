@@ -1,0 +1,5 @@
+/* 中文本地化的标记：应用包里有了 zh-Hans.lproj（加上 Info.plist 的 CFBundleLocalizations），
+   AppKit / SwiftUI / WebKit 的系统字符串（菜单栏的 文件 / 编辑 / 显示 / 窗口 / 帮助、服务、退出、网页右键菜单等）才按中文出。
+   由 scripts/build_app.sh 拷进 Contents/Resources。 */
+"CFBundleName" = "Agent IDEA";
+"CFBundleDisplayName" = "Agent IDEA";

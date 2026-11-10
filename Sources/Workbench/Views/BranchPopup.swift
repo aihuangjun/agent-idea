@@ -204,7 +204,7 @@ struct NewBranchSheet: View {
                 .labelsHidden()
             }
             Text(tracksBase
-                 ? "新分支会跟踪 \(base)：以后点「与远程同步」就把 \(base) 上的新提交 rebase 进来；推送推到远端的同名分支。没提交的改动会带到新分支上。"
+                 ? "新分支会跟踪 \(base)：以后点「拉取最新」就把 \(base) 上的新提交 rebase 进来；推送推到远端的同名分支。没提交的改动会带到新分支上。"
                  : "新分支没有上游：第一次推送时建立。没提交的改动会带到新分支上。")
                 .font(Theme.smallFont).foregroundStyle(Theme.secondaryText).fixedSize(horizontal: false, vertical: true)
             HStack {

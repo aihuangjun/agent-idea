@@ -47,6 +47,9 @@ public struct AgentIDEARootScene: Scene {
         .windowStyle(.titleBar)
         .defaultSize(Self.defaultWindowSize)
         .commands {
+            // 菜单结构照 IDEA 归类：应用 / 文件 / 编辑 / 显示（系统的 View 菜单）/ 导航 / 运行 / Git / 窗口 / 帮助。
+            // 系统菜单（File / Edit / View / Window / Help 及其中的系统项）的中文名靠应用包声明中文本地化
+            //（build_app.sh 写的 CFBundleDevelopmentRegion / CFBundleLocalizations + zh-Hans.lproj），不在这里写死。
             CommandGroup(replacing: .appInfo) {
                 Button("关于 Agent IDEA") { AboutPanel.show(build: updater.build) }
             }
@@ -55,170 +58,10 @@ public struct AgentIDEARootScene: Scene {
                 Button("检查更新…") { updater.check() }
                 Button("显示日志…") { Self.revealLogs() }
             }
-            CommandGroup(replacing: .newItem) {
-                Button("打开项目…") { NotificationCenter.default.post(name: .agentIDEAOpenProject, object: nil) }
-                    .keyboardShortcut("o", modifiers: .command)
-                Menu("最近项目") {
-                    ForEach(workbench.recentProjects) { recent in
-                        Button(recent.displayPath) { workbench.openProject(recent.url) }
-                    }
-                }
-                Divider()
-                Button("保存") { workbench.active?.saveActiveTab() }
-                    .keyboardShortcut("s", modifiers: .command)
-                    .disabled(!(workbench.active.flatMap { session in session.activeTab.map(session.isModified) } ?? false))
-                Button("全部保存") { workbench.saveAll() }
-                    .keyboardShortcut("s", modifiers: [.command, .option])
-                    .disabled(workbench.sessions.allSatisfy { $0.drafts.isEmpty })
-                Divider()
-                Button("关闭标签") { workbench.active?.closeActiveTab() }
-                    .keyboardShortcut("w", modifiers: .command)
-                    .disabled(workbench.active?.activeTab == nil)
-                Button("关闭全部标签") { workbench.active?.closeAllTabs() }
-                    .keyboardShortcut("w", modifiers: [.command, .shift])
-                    .disabled(workbench.active?.tabs.isEmpty ?? true)
-                Button("关闭项目") { workbench.closeProject() }
-                    .keyboardShortcut("w", modifiers: [.command, .option])
-                    .disabled(workbench.active == nil)
-            }
-            // 撤销 / 重做按焦点分发（UndoDispatcher）。焦点在编辑器里时 ⌘Z 由 CodeMirror 处理、不会到这里；
-            // 标题显示的是文件操作栈顶那一步（「撤销重命名 a.txt」）
-            // IDEA 的 Copy Reference（⌥⇧⌘C）：相对项目根的路径加行号，粘给 Agent 用
-            CommandGroup(after: .pasteboard) {
-                Divider()
-                Button("复制引用（路径:行号）") {
-                    guard let session = workbench.active, let id = session.activeTabID else { return }
-                    session.reference(of: id) { text in
-                        Desktop.copyToClipboard(text)
-                        session.notify("已复制 \(text)")
-                    }
-                }
-                .keyboardShortcut("c", modifiers: [.command, .option, .shift])
-                .disabled(workbench.active?.activeTab == nil)
-            }
-            CommandGroup(replacing: .undoRedo) {
-                Button(workbench.active?.undoTitle ?? "撤销") { UndoDispatcher.undo(workbench) }
-                    .keyboardShortcut("z", modifiers: .command)
-                Button(workbench.active?.redoTitle ?? "重做") { UndoDispatcher.redo(workbench) }
-                    .keyboardShortcut("z", modifiers: [.command, .shift])
-            }
-            CommandMenu("视图") {
-                Button("项目") { workbench.toolWindow = workbench.toolWindow == .project ? nil : .project }
-                    .keyboardShortcut("1", modifiers: .command)
-                Button("提交") { workbench.toolWindow = workbench.toolWindow == .commit ? nil : .commit }
-                    .keyboardShortcut("0", modifiers: .command)
-                Button("提交历史") { workbench.toolWindow = workbench.toolWindow == .history ? nil : .history }
-                    .keyboardShortcut("9", modifiers: .command)
-                Button("查找") { workbench.toolWindow = workbench.toolWindow == .find ? nil : .find }
-                    .keyboardShortcut("3", modifiers: .command)
-                Button(workbench.isRunWindowShown ? "收起运行窗口" : "运行窗口") { workbench.isRunWindowShown.toggle() }
-                    .keyboardShortcut("4", modifiers: .command)
-                    .disabled(workbench.active == nil)
-                Divider()
-                Button("查找文件…") {
-                    workbench.toolWindow = .project
-                    workbench.active?.search.activate()
-                }
-                .keyboardShortcut("f", modifiers: [.command, .shift])
-                .disabled(workbench.active == nil)
-                // IDEA 的 Recent Files：打开过的文件（关掉的也在），第一项是上一个文件，回车就切回去
-                Button("最近的文件…") { workbench.active?.showRecentFiles() }
-                    .keyboardShortcut("e", modifiers: .command)
-                    .disabled(workbench.active == nil)
-                // IDEA Windows 键位的 Find in Path（用户定的）。焦点在正文里时 CodeMirror 会吞掉这个键，
-                // 由 CursorRestoringWebView 先截下来（ContentRenderer.onFindInPath）
-                Button("在项目中查找…") { workbench.active?.showFindInPath() }
-                    .keyboardShortcut("f", modifiers: [.control, .shift])
-                    .disabled(workbench.active == nil)
-                Button("文件内查找…") { workbench.active?.showFind() }
-                    .keyboardShortcut("f", modifiers: .command)
-                    .disabled(workbench.active?.activeTab == nil)
-                Button("文件内查找（Ctrl+F）") { workbench.active?.showFind() }
-                    .keyboardShortcut("f", modifiers: .control)
-                    .disabled(workbench.active?.activeTab == nil)
-                Button("查找下一个") { workbench.active?.findInFile() }
-                    .keyboardShortcut("g", modifiers: .command)
-                    .disabled(!(workbench.active?.isFindShown ?? false))
-                Button("查找上一个") { workbench.active?.findInFile(backwards: true) }
-                    .keyboardShortcut("g", modifiers: [.command, .shift])
-                    .disabled(!(workbench.active?.isFindShown ?? false))
-                Button("在项目视图中定位当前文件") { workbench.active?.revealActiveTab() }
-                    .keyboardShortcut("l", modifiers: [.command, .option])
-                    .disabled(workbench.active?.activeTab == nil)
-                // IDEA 的 Go to Line（⌘L）
-                Button("跳到行…") { workbench.active?.showGoToLine() }
-                    .keyboardShortcut("l", modifiers: .command)
-                    .disabled(!(workbench.active?.canGoToLine ?? false))
-                Divider()
-                Button("后退") { workbench.active?.goBack() }
-                    .keyboardShortcut(.leftArrow, modifiers: .option)
-                    .disabled(!(workbench.active?.canGoBack ?? false))
-                Button("前进") { workbench.active?.goForward() }
-                    .keyboardShortcut(.rightArrow, modifiers: .option)
-                    .disabled(!(workbench.active?.canGoForward ?? false))
-                Divider()
-                // IDEA 的 F7 / ⇧F7。焦点在 WebView 里时页面自己处理（render.js），这里管焦点在别处的情况
-                Button("下一处变更") { workbench.active?.navigateChange(.next) }
-                    .keyboardShortcut(.f7, modifiers: [])
-                    .disabled(!(workbench.active?.canNavigateChange(.next) ?? false))
-                Button("上一处变更") { workbench.active?.navigateChange(.previous) }
-                    .keyboardShortcut(.f7, modifiers: .shift)
-                    .disabled(!(workbench.active?.canNavigateChange(.previous) ?? false))
-                Divider()
-                Button("刷新") { workbench.active?.refreshAll() }
-                    .keyboardShortcut("r", modifiers: .command)
-                    .disabled(workbench.active == nil)
-                Divider()
-                Picker("外观", selection: Binding(
-                    get: { workbench.preferences.theme },
-                    set: { workbench.preferences.theme = $0 }
-                )) {
-                    ForEach(AppTheme.allCases, id: \.self) { theme in
-                        Text(theme.title).tag(theme)
-                    }
-                }
-                Divider()
-                Button("放大") { workbench.preferences.zoomIn() }.keyboardShortcut("=", modifiers: .command)
-                Button("缩小") { workbench.preferences.zoomOut() }.keyboardShortcut("-", modifiers: .command)
-                Button("实际大小") { workbench.preferences.resetZoom() }.keyboardShortcut("0", modifiers: [.command, .option])
-                Divider()
-                Button("下一个标签") { workbench.active?.selectNextTab(offset: 1) }
-                    .keyboardShortcut("]", modifiers: [.command, .shift])
-                Button("上一个标签") { workbench.active?.selectNextTab(offset: -1) }
-                    .keyboardShortcut("[", modifiers: [.command, .shift])
-                Button("下一个项目") { workbench.selectNextProject(offset: 1) }
-                    .keyboardShortcut("`", modifiers: .command)
-                    .disabled(workbench.sessions.count < 2)
-                Divider()
-                Button(workbench.preferences.diffMode == .sideBySide ? "diff：切到单列视图" : "diff：切到并排视图") {
-                    workbench.preferences.diffMode = workbench.preferences.diffMode == .sideBySide ? .unified : .sideBySide
-                }
-                Button("Markdown：预览 / 源码 / 分栏") { workbench.active?.cycleMarkdownView() }
-                    .keyboardShortcut("m", modifiers: [.command, .shift])
-            }
-            // 编辑器里的专有键位（render.js 的 extraKeys）都在这里有一项，新用户翻菜单就能发现（Core/EditorCommand 是清单）。
-            // 焦点在编辑器里时快捷键由页面处理（CodeMirror 处理了就 preventDefault，WebKit 不再交给菜单，F7 同理），
-            // 不会页面一次、菜单一次；焦点在别处或用鼠标点菜单时才走这里，经 window.ide.editorCommand 调进页面。
-            CommandMenu("代码") {
-                // ⌘- / ⌘= 在「视图」里是缩小 / 放大，同一个键不能挂两个菜单项：焦点在编辑器里时是折叠，只写在标题里
-                editorCommandButton("折叠代码块（编辑器中 ⌘-）", .fold)
-                editorCommandButton("展开代码块（编辑器中 ⌘=）", .unfold)
-                editorCommandButton("全部折叠", .foldAll)
-                    .keyboardShortcut("-", modifiers: [.command, .shift])
-                editorCommandButton("全部展开", .unfoldAll)
-                    .keyboardShortcut("=", modifiers: [.command, .shift])
-                Divider()
-                editorCommandButton("选中下一处相同文字（多光标）", .selectNextOccurrence)
-                    .keyboardShortcut("g", modifiers: .control)
-                editorCommandButton("取消最后选中的一处", .unselectOccurrence)
-                    .keyboardShortcut("g", modifiers: [.control, .shift])
-                // Esc 不能挂成菜单的键：查找框、对话框都要用它关
-                editorCommandButton("回到单个光标（Esc）", .singleSelection)
-                Divider()
-                // 鼠标操作没有菜单动作可做，照「当前版本」那一行的做法写成灰色的说明，至少翻菜单时看得见
-                Button("⌥⇧点击：添加 / 移除光标") {}.disabled(true)
-                Button("⌥拖动：列选择（矩形选区）") {}.disabled(true)
-            }
+            fileCommands
+            editCommands
+            viewCommands
+            navigateCommands
             // 键位照 IDEA 的 macOS 方案：⌃⇧R 运行当前文件、⌃R 重新运行、⌘F2 停止
             CommandMenu("运行") {
                 Button(workbench.active?.runnableActiveFile.map { "运行 '\($0.lastPathComponent)'" } ?? "运行当前文件") {
@@ -236,6 +79,11 @@ public struct AgentIDEARootScene: Scene {
                     .disabled(!(workbench.active?.run.isRunning ?? false))
             }
             CommandMenu("Git") {
+                // 最常用的放第一项。IDEA 的 Update Project 也是 ⌘T；行为是 fetch + rebase（项目工具窗口、提交历史上那个按钮）。
+                // 没有上游时也能点：弹出选择（跟踪 origin/master，或推送并建立上游）
+                Button("拉取最新") { workbench.active?.requestSync() }
+                    .keyboardShortcut("t", modifiers: .command)
+                    .disabled(!(workbench.active?.canRequestSync ?? false))
                 Button("提交…") { workbench.toolWindow = .commit }
                     .keyboardShortcut("k", modifiers: .command)
                     .disabled(!(workbench.active?.hasGit ?? false))
@@ -243,11 +91,6 @@ public struct AgentIDEARootScene: Scene {
                     .keyboardShortcut("k", modifiers: [.command, .shift])
                     .disabled(!(workbench.active?.commit?.canPush ?? false))
                 Divider()
-                // IDEA 的 Update Project 也是 ⌘T
-                // 没有上游时也能点：弹出选择（跟踪 origin/master，或推送并建立上游）
-                Button("与远程同步（fetch + rebase）") { workbench.active?.requestSync() }
-                    .keyboardShortcut("t", modifiers: .command)
-                    .disabled(!(workbench.active?.canRequestSync ?? false))
                 Button("分支…") { workbench.active?.showBranches() }
                     .disabled(!(workbench.active?.hasGit ?? false))
                 Button("刷新 git 状态") { workbench.active?.refreshAll() }
@@ -256,10 +99,182 @@ public struct AgentIDEARootScene: Scene {
         }
     }
 
-    /// 「代码」菜单的一项：当前正文里没有对应的编辑器（只读视图、预览、diff 里的折叠）就灰掉。
-    private func editorCommandButton(_ title: String, _ command: EditorCommand) -> some View {
-        Button(title) { workbench.active?.perform(command) }
-            .disabled(!(workbench.active?.canPerform(command) ?? false))
+    /// 文件：打开 / 最近项目、保存、从磁盘重新加载、关闭。
+    @CommandsBuilder private var fileCommands: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("打开项目…") { NotificationCenter.default.post(name: .agentIDEAOpenProject, object: nil) }
+                .keyboardShortcut("o", modifiers: .command)
+            Menu("最近项目") {
+                ForEach(workbench.recentProjects) { recent in
+                    Button(recent.displayPath) { workbench.openProject(recent.url) }
+                }
+            }
+            Divider()
+            Button("保存") { workbench.active?.saveActiveTab() }
+                .keyboardShortcut("s", modifiers: .command)
+                .disabled(!(workbench.active.flatMap { session in session.activeTab.map(session.isModified) } ?? false))
+            Button("全部保存") { workbench.saveAll() }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+                .disabled(workbench.sessions.allSatisfy { $0.drafts.isEmpty })
+            // IDEA 的 Reload All from Disk：重读开着的文件（磁盘上被 Agent 改过的）并刷新目录树与 git 状态
+            Button("从磁盘重新加载") { workbench.active?.refreshAll() }
+                .keyboardShortcut("r", modifiers: .command)
+                .disabled(workbench.active == nil)
+            Divider()
+            Button("关闭标签") { workbench.active?.closeActiveTab() }
+                .keyboardShortcut("w", modifiers: .command)
+                .disabled(workbench.active?.activeTab == nil)
+            Button("关闭全部标签") { workbench.active?.closeAllTabs() }
+                .keyboardShortcut("w", modifiers: [.command, .shift])
+                .disabled(workbench.active?.tabs.isEmpty ?? true)
+            Button("关闭项目") { workbench.closeProject() }
+                .keyboardShortcut("w", modifiers: [.command, .option])
+                .disabled(workbench.active == nil)
+        }
+        // 系统的「关闭」⌘W /「全部关闭」⌥⌘W 与上面的关闭标签 / 关闭项目抢同一个键，单窗口应用也用不着它们
+        CommandGroup(replacing: .saveItem) {}
+    }
+
+    /// 编辑：撤销 / 重做、系统的剪切拷贝粘贴、复制路径和行号、查找 ▸（IDEA 的 Edit → Find）。
+    @CommandsBuilder private var editCommands: some Commands {
+        // 撤销 / 重做按焦点分发（UndoDispatcher）。焦点在编辑器里时 ⌘Z 由 CodeMirror 处理、不会到这里；
+        // 标题显示的是文件操作栈顶那一步（「撤销重命名 a.txt」）
+        CommandGroup(replacing: .undoRedo) {
+            Button(workbench.active?.undoTitle ?? "撤销") { UndoDispatcher.undo(workbench) }
+                .keyboardShortcut("z", modifiers: .command)
+            Button(workbench.active?.redoTitle ?? "重做") { UndoDispatcher.redo(workbench) }
+                .keyboardShortcut("z", modifiers: [.command, .shift])
+        }
+        // IDEA 的 Copy Reference（⌥⇧⌘C）：相对项目根的路径加行号（`src/a.py:150`、`:12-20`），粘给 Agent 用
+        CommandGroup(after: .pasteboard) {
+            Divider()
+            Button("复制路径和行号") {
+                guard let session = workbench.active, let id = session.activeTabID else { return }
+                session.reference(of: id) { text in
+                    Desktop.copyToClipboard(text)
+                    session.notify("已复制 \(text)")
+                }
+            }
+            .keyboardShortcut("c", modifiers: [.command, .option, .shift])
+            .disabled(workbench.active?.activeTab == nil)
+        }
+        // 换掉系统的文字编辑组（它若带「查找」子菜单就会出现两个「查找」），放我们自己的查找子菜单
+        CommandGroup(replacing: .textEditing) {
+            Divider()
+            Menu("查找") {
+                // Ctrl+F 是同一个功能的第二个键位，不另占菜单项：焦点在哪儿都由 CursorRestoringWebView.performKeyEquivalent
+                // 截下来（窗口的键位分发会走遍整个视图层级，正文 WebView 总挂在窗口里）
+                Button("文件内查找…") { workbench.active?.showFind() }
+                    .keyboardShortcut("f", modifiers: .command)
+                    .disabled(workbench.active?.activeTab == nil)
+                Button("查找下一个") { workbench.active?.findInFile() }
+                    .keyboardShortcut("g", modifiers: .command)
+                    .disabled(!(workbench.active?.isFindShown ?? false))
+                Button("查找上一个") { workbench.active?.findInFile(backwards: true) }
+                    .keyboardShortcut("g", modifiers: [.command, .shift])
+                    .disabled(!(workbench.active?.isFindShown ?? false))
+                Divider()
+                // IDEA Windows 键位的 Find in Path（用户定的）。焦点在正文里时 CodeMirror 会吞掉这个键，
+                // 由 CursorRestoringWebView 先截下来（ContentRenderer.onFindInPath）
+                Button("在项目中查找…") { workbench.active?.showFindInPath() }
+                    .keyboardShortcut("f", modifiers: [.control, .shift])
+                    .disabled(workbench.active == nil)
+            }
+        }
+    }
+
+    /// 显示（系统的 View 菜单，中文系统里叫「显示」）：工具窗口 ▸、外观 ▸、缩放、diff / Markdown 视图。
+    /// 放进系统的 View 菜单而不是另开一个叫「视图」的 CommandMenu：SwiftUI 总会建出系统那个（里面有「进入全屏幕」），
+    /// 另开一个就是菜单栏上两个视图菜单（1.7.0 验收时用户报的）。
+    @CommandsBuilder private var viewCommands: some Commands {
+        CommandGroup(before: .toolbar) {
+            // IDEA 的 View → Tool Windows
+            Menu("工具窗口") {
+                Button("项目") { workbench.toggleToolWindow(.project) }
+                    .keyboardShortcut("1", modifiers: .command)
+                Button("提交") { workbench.toggleToolWindow(.commit) }
+                    .keyboardShortcut("0", modifiers: .command)
+                Button("提交历史") { workbench.toggleToolWindow(.history) }
+                    .keyboardShortcut("9", modifiers: .command)
+                Button("查找") { workbench.toggleToolWindow(.find) }
+                    .keyboardShortcut("3", modifiers: .command)
+                Button(workbench.isRunWindowShown ? "收起运行窗口" : "运行窗口") { workbench.isRunWindowShown.toggle() }
+                    .keyboardShortcut("4", modifiers: .command)
+                    .disabled(workbench.active == nil)
+                Divider()
+                // IDEA 的 Hide Active Tool Window。Esc 本身不能挂成菜单键（查找框、对话框要用它关），⇧Esc 不冲突：
+                // 编辑器里 CodeMirror 没绑 Shift-Esc，不 preventDefault，WebKit 照样交给菜单
+                Button("隐藏工具窗口") { workbench.hideToolWindow() }
+                    .keyboardShortcut(.escape, modifiers: .shift)
+                    .disabled(!workbench.canHideToolWindow)
+            }
+            Divider()
+            Picker("外观", selection: Binding(
+                get: { workbench.preferences.theme },
+                set: { workbench.preferences.theme = $0 }
+            )) {
+                ForEach(AppTheme.allCases, id: \.self) { theme in
+                    Text(theme.title).tag(theme)
+                }
+            }
+            Divider()
+            Button("放大") { workbench.preferences.zoomIn() }.keyboardShortcut("=", modifiers: .command)
+            Button("缩小") { workbench.preferences.zoomOut() }.keyboardShortcut("-", modifiers: .command)
+            Button("实际大小") { workbench.preferences.resetZoom() }.keyboardShortcut("0", modifiers: [.command, .option])
+            Divider()
+            Button(workbench.preferences.diffMode == .sideBySide ? "diff：切到单列视图" : "diff：切到并排视图") {
+                workbench.preferences.diffMode = workbench.preferences.diffMode == .sideBySide ? .unified : .sideBySide
+            }
+            Button("Markdown：预览 / 源码 / 分栏") { workbench.active?.cycleMarkdownView() }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+            Divider()
+        }
+    }
+
+    /// 导航（IDEA 的 Navigate）：找文件、跳到行、定位、后退前进、变更之间、标签与项目之间。
+    @CommandsBuilder private var navigateCommands: some Commands {
+        CommandMenu("导航") {
+            Button("查找文件…") {
+                workbench.toolWindow = .project
+                workbench.active?.search.activate()
+            }
+            .keyboardShortcut("f", modifiers: [.command, .shift])
+            .disabled(workbench.active == nil)
+            // IDEA 的 Recent Files：打开过的文件（关掉的也在），第一项是上一个文件，回车就切回去
+            Button("最近的文件…") { workbench.active?.showRecentFiles() }
+                .keyboardShortcut("e", modifiers: .command)
+                .disabled(workbench.active == nil)
+            // IDEA 的 Go to Line（⌘L）
+            Button("跳到行…") { workbench.active?.showGoToLine() }
+                .keyboardShortcut("l", modifiers: .command)
+                .disabled(!(workbench.active?.canGoToLine ?? false))
+            Button("在项目视图中定位当前文件") { workbench.active?.revealActiveTab() }
+                .keyboardShortcut("l", modifiers: [.command, .option])
+                .disabled(workbench.active?.activeTab == nil)
+            Divider()
+            Button("后退") { workbench.active?.goBack() }
+                .keyboardShortcut(.leftArrow, modifiers: .option)
+                .disabled(!(workbench.active?.canGoBack ?? false))
+            Button("前进") { workbench.active?.goForward() }
+                .keyboardShortcut(.rightArrow, modifiers: .option)
+                .disabled(!(workbench.active?.canGoForward ?? false))
+            Divider()
+            // IDEA 的 F7 / ⇧F7。焦点在 WebView 里时页面自己处理（render.js），这里管焦点在别处的情况
+            Button("下一处变更") { workbench.active?.navigateChange(.next) }
+                .keyboardShortcut(.f7, modifiers: [])
+                .disabled(!(workbench.active?.canNavigateChange(.next) ?? false))
+            Button("上一处变更") { workbench.active?.navigateChange(.previous) }
+                .keyboardShortcut(.f7, modifiers: .shift)
+                .disabled(!(workbench.active?.canNavigateChange(.previous) ?? false))
+            Divider()
+            Button("下一个标签") { workbench.active?.selectNextTab(offset: 1) }
+                .keyboardShortcut("]", modifiers: [.command, .shift])
+            Button("上一个标签") { workbench.active?.selectNextTab(offset: -1) }
+                .keyboardShortcut("[", modifiers: [.command, .shift])
+            Button("下一个项目") { workbench.selectNextProject(offset: 1) }
+                .keyboardShortcut("`", modifiers: .command)
+                .disabled(workbench.sessions.count < 2)
+        }
     }
 
     private static func revealLogs() {

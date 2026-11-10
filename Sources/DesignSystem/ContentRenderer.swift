@@ -434,25 +434,16 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
 
     /// 编辑器里的撤销 / 重做（CodeMirror 自己的历史）。回调告诉调用方页面里有没有编辑器接下这一步：
     /// 没有（只读视图）的话调用方去撤文件操作。
-    public func undo(_ completion: @escaping (Bool) -> Void) { callEditor("undo()", completion) }
-    public func redo(_ completion: @escaping (Bool) -> Void) { callEditor("redo()", completion) }
+    public func undo(_ completion: @escaping (Bool) -> Void) { performEditorCommand("undo", completion) }
+    public func redo(_ completion: @escaping (Bool) -> Void) { performEditorCommand("redo", completion) }
 
-    /// 菜单栏「代码」菜单里的编辑器命令（折叠、多光标），与编辑器里的快捷键是同一批函数。
-    /// 先把键盘焦点交给 WebView、页面再聚焦编辑器：从菜单点了 ⌃G 之后接着打字，要打进编辑器而不是原先的目录树。
-    /// 回调告诉调用方页面里有没有编辑器接下这一步（只读视图、diff 里的折叠回 false）。
-    public func perform(_ command: EditorCommand, completion: @escaping (Bool) -> Void = { _ in }) {
-        guard isReady, !showingHTML else { completion(false); return }
-        webView.window?.makeFirstResponder(webView)
-        callEditor("editorCommand(\"\(command.rawValue)\")", completion)
-    }
-
-    private func callEditor(_ call: String, _ completion: @escaping (Bool) -> Void) {
+    private func performEditorCommand(_ command: String, _ completion: @escaping (Bool) -> Void) {
         guard isReady, !showingHTML else {
             completion(false)
             return
         }
-        webView.evaluateJavaScript("window.ide.\(call)") { value, error in
-            if let error { Log.warn("web", "\(call) 失败：\(error)") }
+        webView.evaluateJavaScript("window.ide.\(command)()") { value, error in
+            if let error { Log.warn("web", "\(command) 失败：\(error)") }
             completion((value as? Bool) ?? false)
         }
     }

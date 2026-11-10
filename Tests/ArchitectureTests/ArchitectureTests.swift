@@ -252,3 +252,33 @@ private func imports(in file: URL) throws -> Set<String> {
     #expect(limit(syntax, "SIZE_LIMIT") != nil && limit(syntax, "SIZE_LIMIT") == limit(render, "HIGHLIGHT_LIMIT"),
             "syntax.js SIZE_LIMIT 与 render.js HIGHLIGHT_LIMIT 不一致：\(limit(syntax, "SIZE_LIMIT") ?? "无") vs \(limit(render, "HIGHLIGHT_LIMIT") ?? "无")")
 }
+
+/// 应用包声明中文本地化：否则 AppKit / SwiftUI / WebKit 的系统字符串（File / Edit / View 菜单、Services、Quit、
+/// 网页右键菜单）一律按英文出（1.7.0 验收时用户报的）。build_app.sh 的 Info.plist 要声明 zh-Hans，
+/// 包里要有 zh-Hans.lproj，而且拷进去要在签名之前（签完名动包里的文件签名就失效）。
+@Test func appBundleDeclaresChineseLocalization() throws {
+    let build = try String(contentsOf: packageRoot.appendingPathComponent("scripts/build_app.sh"), encoding: .utf8)
+    #expect(build.contains("<key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>"))
+    #expect(build.contains("<key>CFBundleLocalizations</key>") && build.contains("<array><string>zh-Hans</string></array>"))
+    let copy = try #require(build.range(of: "cp -R Resources/zh-Hans.lproj \"$APP/Contents/Resources/\""), "build_app.sh 没把 zh-Hans.lproj 拷进包里")
+    let sign = try #require(build.range(of: "codesign --force"))
+    #expect(copy.lowerBound < sign.lowerBound, "zh-Hans.lproj 要在签名之前拷进去")
+    let strings = packageRoot.appendingPathComponent("Resources/zh-Hans.lproj/InfoPlist.strings")
+    let text = try String(contentsOf: strings, encoding: .utf8)
+    #expect(text.contains("\"CFBundleDisplayName\" = \"Agent IDEA\";"))
+}
+
+/// 菜单栏只能有一个视图菜单：我们的项放进 SwiftUI 自带的 View 菜单（`CommandGroup(before: .toolbar)`），
+/// 不再另开 `CommandMenu("视图")`（否则系统那个「显示 / View」也在，两个并排）；「代码」菜单已经删掉（用户说用不上）。
+/// 同一个功能也不许占两个菜单项（以前「文件内查找…」⌘F 与「文件内查找（Ctrl+F）」各一项）。
+@Test func menuBarHasNoDuplicateMenus() throws {
+    let scene = try String(contentsOf: packageRoot.appendingPathComponent("Sources/Workbench/Shell/RootScene.swift"), encoding: .utf8)
+    #expect(!scene.contains("CommandMenu(\"视图\")"))
+    #expect(!scene.contains("CommandMenu(\"代码\")"))
+    #expect(scene.contains("CommandGroup(before: .toolbar)"))
+    #expect(scene.components(separatedBy: "Button(\"文件内查找").count == 2, "「文件内查找」只该有一个菜单项")
+    #expect(!scene.contains(".keyboardShortcut(\"f\", modifiers: .control)"), "Ctrl+F 由 CursorRestoringWebView 接下，不另占菜单项")
+    for menu in ["CommandMenu(\"导航\")", "CommandMenu(\"运行\")", "CommandMenu(\"Git\")"] {
+        #expect(scene.components(separatedBy: menu).count == 2, "\(menu) 应该正好一个")
+    }
+}

@@ -23,7 +23,7 @@ struct UpstreamPrompt: Identifiable, Equatable {
         guard let remote else {
             return "这个仓库没有配置远程仓库，没有地方可以同步。可以先在终端里 git remote add origin <地址>。"
         }
-        var lines = ["同步要知道从哪个远程分支拉。"]
+        var lines = ["拉取最新要知道从哪个远程分支拉。"]
         if let suggested {
             if suggested == remote + "/" + branch {
                 lines.append("· 跟踪 \(suggested)：远程已经有同名分支，只是本地没跟踪它。以后同步就从它拉。")

@@ -67,6 +67,23 @@ final class WorkbenchModel: ObservableObject {
         didSet { defaults.set(Double(runWindowHeight), forKey: "runWindow.height") }
     }
 
+    /// 左侧工具条 / ⌘1 这类开关：点的是开着的那个就收起，否则切过去。
+    func toggleToolWindow(_ window: ToolWindow) {
+        toolWindow = toolWindow == window ? nil : window
+    }
+
+    /// 视图 → 工具窗口 → 隐藏工具窗口（⇧Esc，IDEA 的 Hide Active Tool Window）。我们不跟踪焦点在哪个工具窗口里，
+    /// 所以先收左边的，左边没开才收底部的运行窗口；再按一次就把剩下的那个也收掉。
+    func hideToolWindow() {
+        if toolWindow != nil {
+            toolWindow = nil
+        } else if isRunWindowShown {
+            isRunWindowShown = false
+        }
+    }
+
+    var canHideToolWindow: Bool { toolWindow != nil || isRunWindowShown }
+
     let preferences: ReadingPreferences
     let renderer = ContentRenderer()
     private let git: GitClient?

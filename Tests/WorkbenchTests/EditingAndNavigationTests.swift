@@ -267,31 +267,3 @@ private func waitUntil(_ timeout: TimeInterval = 10, _ condition: @MainActor () 
         #expect(history.status == nil)
     }
 }
-
-/// 「代码」菜单的启用状态跟着当前正文走：可编辑的代码能折叠、能多光标；Markdown 预览没有编辑器，切到源码才有；
-/// 不是当前项目的会话一律不能用。
-@Test @MainActor func editorCommandsFollowTheActiveContent() async throws {
-    try await withTemporaryDirectory { directory in
-        let code = directory.appendingPathComponent("a.swift")
-        try "struct A {\n    var x = 1\n}\n".write(to: code, atomically: true, encoding: .utf8)
-        let markdown = directory.appendingPathComponent("README.md")
-        try "# 标题\n正文\n".write(to: markdown, atomically: true, encoding: .utf8)
-        let session = makeSession(in: directory)
-        #expect(EditorCommand.allCases.allSatisfy { !session.canPerform($0) }, "没有标签")
-
-        session.openFile(code, pinned: true)
-        #expect(session.activeEditor == .plain)
-        #expect(EditorCommand.allCases.allSatisfy(session.canPerform))
-
-        session.openFile(markdown, pinned: true)
-        #expect(session.activeTab?.markdownView == .preview)
-        #expect(session.activeEditor == nil)
-        #expect(!session.canPerform(.foldAll) && !session.canPerform(.selectNextOccurrence))
-        session.setMarkdownView(.source)
-        await waitUntil { session.activeEditor == .plain }
-        #expect(session.canPerform(.fold))
-
-        session.setActive(false)
-        #expect(!session.canPerform(.fold), "不是当前项目")
-    }
-}

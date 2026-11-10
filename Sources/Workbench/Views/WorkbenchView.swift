@@ -83,6 +83,8 @@ private struct ProjectContent: View {
                             }
                         }
                         .frame(width: workbench.toolWindowWidth)
+                        // 标题条右侧的「—」：收起左边这个工具窗口（运行窗口的标题条自己带收起按钮，不给它）
+                        .environment(\.hideToolWindow) { [weak workbench] in workbench?.toolWindow = nil }
                         ResizeHandle(width: $workbench.toolWindowWidth, range: 180...700)
                     }
                     EditorAreaView(session: session)
@@ -300,8 +302,10 @@ private struct ToolStrip: View {
     }
 
     private func stripButton(_ window: ToolWindow, systemName: String, help: String, badge: Int) -> some View {
-        IconButton(systemName, help: help, isActive: workbench.toolWindow == window, size: 30) {
-            workbench.toolWindow = workbench.toolWindow == window ? nil : window
+        // 再点一次开着的那个就收起（照 IDEA）；提示里写明，免得以为只能开不能关
+        IconButton(systemName, help: workbench.toolWindow == window ? "\(help)：再点一次收起" : help,
+                   isActive: workbench.toolWindow == window, size: 30) {
+            workbench.toggleToolWindow(window)
         }
         .overlay(alignment: .topTrailing) {
             CountBadge(badge).offset(x: 6, y: -5)

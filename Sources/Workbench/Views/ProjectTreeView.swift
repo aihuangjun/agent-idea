@@ -65,7 +65,7 @@ struct ProjectTreeView: View {
         guard session.hasGit else { return "这个项目不在 git 仓库里" }
         let branch = session.gitSnapshot.branch
         if session.isSyncingRemote {
-            return "正在与\(branch.upstream.map { " \($0) " } ?? "远程")同步…（连续 \(Int(GitClient.networkStallTimeout)) 秒没动静会自动放弃）"
+            return "正在拉取最新（\(branch.upstream ?? "远程")）…（连续 \(Int(GitClient.networkStallTimeout)) 秒没动静会自动放弃）"
         }
         if session.isSwitchingBranch { return "正在切换分支…" }
         guard session.hasLoadedGitStatus else {
@@ -76,9 +76,9 @@ struct ProjectTreeView: View {
             return "HEAD 没有停在分支上（游离在 \(branch.name)，多半是正在 rebase / 切到了某个提交），没有分支可同步"
         }
         guard let upstream = branch.upstream else {
-            return "\(branch.name) 没有跟踪远程分支。点一下选择：跟踪远程的默认分支（origin/master），或者推送并建立上游"
+            return "拉取最新（git fetch + rebase）⌘T：\(branch.name) 没有跟踪远程分支。点一下选择：跟踪远程的默认分支（origin/master），或者推送并建立上游"
         }
-        return "与 \(upstream) 同步：git fetch + rebase（⌘T）"
+        return "拉取最新（git fetch + rebase）⌘T：从 \(upstream) 拉"
     }
 
     /// 打开一条搜索结果：固定标签、关掉搜索、在树上定位——照 IDEA 的 Go to File。
@@ -655,8 +655,8 @@ private struct TreeContextMenu: View {
         Button("重命名…（⇧F6）") { requestRename(node) }
         Button("删除…（⌫）") { requestDelete(node) }
         Divider()
-        // 相对项目根的路径，粘给 Agent 用（IDEA 的 Copy Reference；目录树里没有行号）
-        Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个引用" : "复制引用") { copyReferences() }
+        // 相对项目根的路径，粘给 Agent 用（IDEA 的 Copy Reference；目录树里没有行号，所以不叫「复制路径和行号」）
+        Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个相对路径" : "复制相对路径") { copyReferences() }
         Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个绝对路径" : "复制绝对路径") { copyAbsolutePaths() }
         Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个文件名" : "复制文件名") { copyFileNames() }
         Button("在访达中显示") { Desktop.revealInFinder(node.url) }
@@ -679,7 +679,7 @@ private struct TreeContextMenu: View {
     private func copyReferences() {
         let references = copyTargets.map { session.referencePath(of: $0.url) }
         Desktop.copyToClipboard(references.joined(separator: "\n"))
-        session.notify(references.count > 1 ? "已复制 \(references.count) 个引用" : "已复制 \(references[0])")
+        session.notify(references.count > 1 ? "已复制 \(references.count) 个相对路径" : "已复制 \(references[0])")
     }
 
     private func copyAbsolutePaths() {

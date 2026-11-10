@@ -48,6 +48,11 @@ cp -R "$BUILD_DIR/AgentIDEA_DesignSystem.bundle" "$APP/Contents/Resources/"
 # 图标由 scripts/make_icon.swift 预先生成并入库，这里只拷贝。
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 
+# 中文本地化：包里没有任何 .lproj、Info.plist 也不声明时，AppKit / SwiftUI / WebKit 按英文出系统字符串
+# （菜单栏的 File / Edit / View / Window / Help、Services、Quit、网页右键菜单……）。界面本身全是中文，
+# 所以只声明 zh-Hans：系统字符串一律跟着出中文。要放在签名之前（签完名不能再动包里的文件）。
+cp -R Resources/zh-Hans.lproj "$APP/Contents/Resources/"
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -57,6 +62,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key><string>Agent IDEA</string>
     <key>CFBundleExecutable</key><string>AgentIDEA</string>
     <key>CFBundleIdentifier</key><string>local.agentidea</string>
+    <key>CFBundleDevelopmentRegion</key><string>zh-Hans</string>
+    <key>CFBundleLocalizations</key>
+    <array><string>zh-Hans</string></array>
     <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>

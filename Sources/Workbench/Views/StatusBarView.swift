@@ -78,7 +78,7 @@ struct StatusBarView: View {
             presenting: session.upstreamPrompt
         ) { prompt in
             if let suggested = prompt.suggested, prompt.remote != nil {
-                Button("跟踪 \(suggested) 并同步") { session.trackUpstream(suggested) }
+                Button("跟踪 \(suggested) 并拉取") { session.trackUpstream(suggested) }
             }
             if let remote = prompt.remote {
                 Button("推送并建立上游") { session.pushSettingUpstream(to: remote) }

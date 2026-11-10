@@ -2,11 +2,15 @@ import DesignSystem
 import SwiftUI
 
 /// 工具窗口顶上的标题条。
+///
+/// 外壳经环境值 `hideToolWindow` 递进来「收起这个工具窗口」时，最右边多一个「—」按钮（照 IDEA 标题条右侧的 Hide）。
+/// 走环境值而不是 `@EnvironmentObject`：单独挂一个工具窗口的测试不给 WorkbenchModel 也不会崩，只是没有这个按钮。
 struct ToolWindowHeader<Detail: View, Actions: View>: View {
     let title: String
     /// 标题后面跟的东西（运行窗口：脚本名与状态）。
     @ViewBuilder let detail: () -> Detail
     @ViewBuilder let actions: () -> Actions
+    @Environment(\.hideToolWindow) private var hideToolWindow
 
     init(title: String, @ViewBuilder detail: @escaping () -> Detail, @ViewBuilder actions: @escaping () -> Actions) {
         self.title = title
@@ -20,12 +24,27 @@ struct ToolWindowHeader<Detail: View, Actions: View>: View {
             detail().padding(.leading, 8)
             Spacer()
             actions()
+            if let hideToolWindow {
+                IconButton(ToolWindowIcon.hide, help: ToolWindowIcon.hideHelp, size: 22, action: hideToolWindow)
+            }
         }
         .padding(.leading, 12)
         .padding(.trailing, 6)
         .frame(height: 32)
         .background(Theme.panel)
         .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
+    }
+}
+
+private struct HideToolWindowKey: EnvironmentKey {
+    static let defaultValue: (() -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    /// 收起左侧当前的工具窗口。`ProjectContent` 只给左边那一组设，运行窗口的标题条自己带收起按钮。
+    var hideToolWindow: (() -> Void)? {
+        get { self[HideToolWindowKey.self] }
+        set { self[HideToolWindowKey.self] = newValue }
     }
 }
 
@@ -37,7 +56,7 @@ extension ToolWindowHeader where Detail == EmptyView {
 
 /// 工具窗口标题条上按钮的图标名：同一个动作在哪个窗口都得长成同一个样子，所以名字只写在这里一处。
 enum ToolWindowIcon {
-    /// 与远程同步（`git fetch` + `rebase`）。项目工具窗口的同步按钮、提交历史能同步时的刷新按钮做的是同一件事。
+    /// 拉取最新（`git fetch` + `rebase`，Git 菜单的 ⌘T）。项目工具窗口的按钮、提交历史能拉取时的刷新按钮做的是同一件事。
     static let syncWithRemote = "arrow.down.backward"
     /// 只重列本地的状态，不联网。
     static let refresh = "arrow.clockwise"
@@ -46,6 +65,8 @@ enum ToolWindowIcon {
     static let stop = "stop.fill"
     static let clear = "trash"
     static let hide = "minus"
+    /// 左侧工具窗口标题条上「—」按钮的提示（照 IDEA）。⇧Esc 是菜单「显示 → 工具窗口 → 隐藏工具窗口」的键。
+    static let hideHelp = "隐藏（⇧Esc）"
     /// 提交历史：退出比较模式，回到普通历史列表。
     static let exitComparison = "xmark"
     /// 提交历史：退出文件历史（显示历史），回到全部提交。

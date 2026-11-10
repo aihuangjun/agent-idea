@@ -52,19 +52,23 @@ private struct EmptyEditorView: View {
             Spacer()
             Text("在左侧选择一个文件").font(.system(size: 14)).foregroundStyle(Theme.secondaryText)
             Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 6) {
+                // 名字与菜单项一致，用户照着这里的名字去菜单里找得到
                 shortcut("双击文件打开", "")
-                shortcut("项目视图", "⌘1")
-                shortcut("提交视图", "⌘0")
-                shortcut("提交历史", "⌘9")
-                shortcut("文件内查找", "⌘F / Ctrl+F")
+                shortcut("项目 / 提交 / 提交历史 / 查找", "⌘1 / ⌘0 / ⌘9 / ⌘3")
+                shortcut("隐藏工具窗口", "⇧Esc")
                 shortcut("查找文件", "⇧⌘F")
                 shortcut("最近的文件", "⌘E")
-                shortcut("定位当前文件", "⌥⌘L")
+                shortcut("文件内查找", "⌘F / ⌃F")
+                shortcut("在项目中查找", "⌃⇧F")
                 shortcut("跳到行", "⌘L")
-                shortcut("复制引用（路径:行号）", "⌥⇧⌘C")
+                shortcut("在项目视图中定位当前文件", "⌥⌘L")
+                shortcut("复制路径和行号", "⌥⇧⌘C")
                 shortcut("后退 / 前进", "⌥← / ⌥→")
                 shortcut("上一处 / 下一处变更", "⇧F7 / F7")
+                shortcut("拉取最新（fetch + rebase）", "⌘T")
+                shortcut("提交 / 推送", "⌘K / ⇧⌘K")
                 shortcut("保存", "⌘S")
+                shortcut("从磁盘重新加载", "⌘R")
                 shortcut("打开项目", "⌘O")
                 shortcut("关闭标签", "⌘W")
             }
@@ -168,7 +172,7 @@ private struct TabItem: View {
                 Button(action.title, action: action.perform)
                 Divider()
             }
-            Button("复制引用") {
+            Button("复制路径和行号") {
                 session.reference(of: tab.id) { text in
                     Desktop.copyToClipboard(text)
                     session.notify("已复制 \(text)")
