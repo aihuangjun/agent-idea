@@ -374,7 +374,7 @@ private struct CommitPanel: View {
                         .toolTip("把本地领先的 \(branch.ahead) 个提交推到远端")
                 } else if branch.upstream == nil, !branch.isUnborn {
                     pushButton("推送（首次推送新分支）", color: Theme.secondaryText)
-                        .toolTip("远端还没有这个分支：推上去，并让本地分支以后跟踪它")
+                        .toolTip("这个分支还没有跟踪远程分支：推上去并建立跟踪")
                 }
             }
             .controlSize(.small)
