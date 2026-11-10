@@ -625,6 +625,14 @@ public struct GitClient: Sendable {
         return output.status == 0 && !hash.isEmpty ? hash : nil
     }
 
+    /// 一个提交的第一个父提交；根提交为 nil。普通提交撤销时退回的就是它——比提交前另取的 HEAD 准：
+    /// 取 HEAD 与真正提交之间 Agent 若插进一次提交，提交前取的那个会把 Agent 的提交一起退回暂存区。
+    public func firstParent(of hash: String, repositoryRoot: URL) async throws -> String? {
+        let output = try await run(["rev-parse", "--verify", "-q", hash + "^"], in: repositoryRoot, acceptable: [0, 1])
+        let parent = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return output.status == 0 && !parent.isEmpty ? parent : nil
+    }
+
     /// 此刻所在的分支名；游离 HEAD 时为 nil（`symbolic-ref -q` 退出码 1）。还没有提交的分支也有名字。
     public func symbolicBranch(repositoryRoot: URL) async throws -> String? {
         let output = try await run(["symbolic-ref", "-q", "--short", "HEAD"], in: repositoryRoot, acceptable: [0, 1])

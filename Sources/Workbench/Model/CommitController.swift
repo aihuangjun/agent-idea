@@ -204,8 +204,15 @@ final class CommitController: ObservableObject {
                 let files = result.fileCount == 0 ? "只改了提交信息" : "\(result.fileCount) 个文件"
                 Log.info("git", "\(amend ? "修改提交" : "提交") \(result.shortHash)：\(files)")
                 onRepositoryChanged?(changes)
-                if let previousHead, !result.hash.isEmpty, previousHead != result.hash {
-                    onCommitted?(GitCommitRecord(head: result.hash, previousHead: previousHead, branch: branch ?? nil, message: trimmed,
+                // 普通提交退回它自己的父提交（与提交前取的 HEAD 本应相同，但中间若插进 Agent 的提交只有父提交是准的）；
+                // amend 的旧提交不是新提交的父提交，只能用提交前取的那个
+                var undoTarget: String?? = previousHead
+                if !amend, case .some(.some) = previousHead, !result.hash.isEmpty,
+                   let parent = (try? await git.firstParent(of: result.hash, repositoryRoot: repositoryRoot)) ?? nil {
+                    undoTarget = .some(parent)
+                }
+                if let undoTarget, !result.hash.isEmpty, undoTarget != result.hash {
+                    onCommitted?(GitCommitRecord(head: result.hash, previousHead: undoTarget, branch: branch ?? nil, message: trimmed,
                                                  isAmend: amend, pushRequested: push && !pushedBefore))
                 }
                 if push, pushedBefore {
