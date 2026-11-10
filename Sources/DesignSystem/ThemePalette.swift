@@ -202,7 +202,7 @@ public struct ThemePalette: Sendable, Equatable {
     )
 }
 
-/// 界面外观：跟随系统，或者钉死浅色 / 深色。用户在「视图 → 外观」里选，存 UserDefaults。
+/// 界面外观：跟随系统，或者钉死浅色 / 深色。用户在菜单「显示 → 外观」（系统的 View 菜单）里选，存 UserDefaults。
 public enum AppTheme: String, CaseIterable, Sendable {
     case system
     case light
@@ -223,7 +223,7 @@ public enum AppTheme: String, CaseIterable, Sendable {
     public static func symbolName(isDark: Bool) -> String { isDark ? "moon" : "sun.max" }
 
     /// 状态栏那个按钮点一下换到的档：当前实际是深色就切浅色，反过来也一样。
-    /// 跟随系统只从菜单「视图 → 外观」里选，点按钮不会再转回它去。
+    /// 跟随系统只从菜单「显示 → 外观」里选，点按钮不会再转回它去。
     public static func toggled(isDark: Bool) -> AppTheme { isDark ? .light : .dark }
 
     /// 给 `NSApp.appearance` 的值。跟随系统就是 nil（由系统的 appearance 决定）。

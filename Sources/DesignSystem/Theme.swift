@@ -5,7 +5,7 @@ import SwiftUI
 ///
 /// 每个颜色都是**动态色**（`NSColor(name:dynamicProvider:)`）：窗口的 appearance 一变，
 /// AppKit 自己按 `ThemePalette.dark` / `.light` 重新解析，界面代码一行都不用改。
-/// 外观由「视图 → 外观」写进 `NSApp.appearance`（见 `AppTheme`）。
+/// 外观由菜单「显示 → 外观」写进 `NSApp.appearance`（见 `AppTheme`）。
 ///
 /// 色值的事实源是 `ThemePalette`；`Resources/web/style.css` 顶部有同一套 CSS 变量
 /// （正文渲染在 WebView 里、外壳在 SwiftUI 里），架构测试核对两边对得上。

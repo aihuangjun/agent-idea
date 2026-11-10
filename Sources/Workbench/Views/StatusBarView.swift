@@ -57,12 +57,12 @@ struct StatusBarView: View {
                     .buttonStyle(.plain).toolTip("点击恢复 100%")
             }
             // 外观的快捷入口：只在浅色 / 深色之间来回，图标就是当前实际的那一档
-            // （跟随系统仍在「视图 → 外观」里选，这里显示的是它此刻落到的浅色或深色）
+            // （跟随系统仍在菜单栏的「外观」里选——系统的 View 菜单，中文系统叫「显示」；这里显示的是它此刻落到的浅色或深色）
             Button { preferences.theme = AppTheme.toggled(isDark: isDark) } label: {
                 Image(systemName: AppTheme.symbolName(isDark: isDark)).font(.system(size: 11))
             }
             .buttonStyle(.plain)
-            .toolTip("外观：\(isDark ? "深色" : "浅色")。点击切到\(isDark ? "浅色" : "深色")（跟随系统在「视图 → 外观」里）")
+            .toolTip("外观：\(isDark ? "深色" : "浅色")。点击切到\(isDark ? "浅色" : "深色")（跟随系统在菜单栏「显示」→「外观」里）")
         }
         .font(Theme.smallFont)
         .foregroundStyle(Theme.secondaryText)

@@ -71,9 +71,9 @@ struct ProjectTreeView: View {
         guard session.hasLoadedGitStatus else {
             return session.gitError.map { "git 出错了：\($0)" } ?? "正在读取 git 状态…"
         }
-        if branch.isUnborn { return "仓库还没有提交，没有可同步的分支" }
+        if branch.isUnborn { return "仓库还没有提交，没有可拉取的分支" }
         if branch.isDetached {
-            return "HEAD 没有停在分支上（游离在 \(branch.name)，多半是正在 rebase / 切到了某个提交），没有分支可同步"
+            return "HEAD 没有停在分支上（游离在 \(branch.name)，多半是正在 rebase / 切到了某个提交），没有分支可拉取"
         }
         guard let upstream = branch.upstream else {
             return "拉取最新（git fetch + rebase）⌘T：\(branch.name) 没有跟踪远程分支。点一下选择：跟踪远程的默认分支（origin/master），或者推送并建立上游"

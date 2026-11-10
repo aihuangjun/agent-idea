@@ -21,17 +21,17 @@ struct UpstreamPrompt: Identifiable, Equatable {
 
     var message: String {
         guard let remote else {
-            return "这个仓库没有配置远程仓库，没有地方可以同步。可以先在终端里 git remote add origin <地址>。"
+            return "这个仓库没有配置远程仓库，没有地方可以拉取。可以先在终端里 git remote add origin <地址>。"
         }
         var lines = ["拉取最新要知道从哪个远程分支拉。"]
         if let suggested {
             if suggested == remote + "/" + branch {
-                lines.append("· 跟踪 \(suggested)：远程已经有同名分支，只是本地没跟踪它。以后同步就从它拉。")
+                lines.append("· 跟踪 \(suggested)：远程已经有同名分支，只是本地没跟踪它。以后「拉取最新」就从它拉。")
             } else {
-                lines.append("· 跟踪 \(suggested)：以后同步就是 fetch 之后把 \(suggested) 上的新提交 rebase 进来；推送仍然推到远端的同名分支 \(remote)/\(branch)。")
+                lines.append("· 跟踪 \(suggested)：以后「拉取最新」就是 fetch 之后把 \(suggested) 上的新提交 rebase 进来；推送仍然推到远端的同名分支 \(remote)/\(branch)。")
             }
         }
-        lines.append("· 推送并建立上游：把这个分支推到 \(remote)/\(branch)，以后同步拉的是它（拿不到 master 上的新提交）。")
+        lines.append("· 推送并建立上游：把这个分支推到 \(remote)/\(branch)，以后「拉取最新」拉的是它（拿不到 master 上的新提交）。")
         return lines.joined(separator: "\n")
     }
 }
@@ -103,7 +103,7 @@ extension ProjectSession {
             do {
                 _ = try await git.push(repositoryRoot: repositoryRoot, hasUpstream: false, remote: remote)
                 Log.info("git", "已推送 \(branch) 并建立上游")
-                self?.notify("已推送 \(branch) 并建立上游，以后同步从远端的 \(branch) 拉")
+                self?.notify("已推送 \(branch) 并建立上游，以后「拉取最新」从远端的 \(branch) 拉")
             } catch {
                 Log.warn("git", "推送并建立上游失败：\(error)")
                 self?.showError("推送失败：\(error.userFacingDescription)")

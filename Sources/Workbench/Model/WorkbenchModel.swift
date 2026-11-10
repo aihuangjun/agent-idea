@@ -72,7 +72,7 @@ final class WorkbenchModel: ObservableObject {
         toolWindow = toolWindow == window ? nil : window
     }
 
-    /// 视图 → 工具窗口 → 隐藏工具窗口（⇧Esc，IDEA 的 Hide Active Tool Window）。我们不跟踪焦点在哪个工具窗口里，
+    /// 显示 → 工具窗口 → 隐藏工具窗口（⇧Esc，IDEA 的 Hide Active Tool Window）。我们不跟踪焦点在哪个工具窗口里，
     /// 所以先收左边的，左边没开才收底部的运行窗口；再按一次就把剩下的那个也收掉。
     func hideToolWindow() {
         if toolWindow != nil {

@@ -1003,7 +1003,7 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     // MARK: - 在项目中查找
 
-    /// ⌃⇧F / 视图 → 在项目中查找…：切到「查找」工具窗口；编辑器里选中了单行文字就拿它预填（拿不到就算了），焦点给输入框。
+    /// ⌃⇧F / 编辑 → 查找 → 在项目中查找…：切到「查找」工具窗口；编辑器里选中了单行文字就拿它预填（拿不到就算了），焦点给输入框。
     func showFindInPath() {
         onRequestToolWindow?(.find)
         guard isActive, let tab = activeTab, contents[tab.id].map({ $0 != .loading }) == true else {

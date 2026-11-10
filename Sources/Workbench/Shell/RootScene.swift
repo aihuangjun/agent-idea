@@ -157,9 +157,6 @@ public struct AgentIDEARootScene: Scene {
             }
             .keyboardShortcut("c", modifiers: [.command, .option, .shift])
             .disabled(workbench.active?.activeTab == nil)
-        }
-        // 换掉系统的文字编辑组（它若带「查找」子菜单就会出现两个「查找」），放我们自己的查找子菜单
-        CommandGroup(replacing: .textEditing) {
             Divider()
             Menu("查找") {
                 // Ctrl+F 是同一个功能的第二个键位，不另占菜单项：焦点在哪儿都由 CursorRestoringWebView.performKeyEquivalent
@@ -181,6 +178,9 @@ public struct AgentIDEARootScene: Scene {
                     .disabled(workbench.active == nil)
             }
         }
+        // 系统的文字编辑组（若带「查找」子菜单就会和上面的「查找」重复）清空。查找子菜单不放这里：
+        // 这个位置在本应用里没验证过一定会建出来，放在 after: .pasteboard（「复制路径和行号」已在那里出现过）更稳
+        CommandGroup(replacing: .textEditing) {}
     }
 
     /// 显示（系统的 View 菜单，中文系统里叫「显示」）：工具窗口 ▸、外观 ▸、缩放、diff / Markdown 视图。
@@ -322,7 +322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         didPrepare = true
         let build = BuildIdentity.current
         Log.start(banner: "Agent IDEA \(build.display) 启动，配置目录 \(AppPaths.configurationDirectory.path)")
-        // 外观由用户选（视图 → 外观），窗口起来之前先按存下来的值定好，
+        // 外观由用户选（显示 → 外观），窗口起来之前先按存下来的值定好，
         // 免得深色偏好的用户先看见一帧浅色。跟随系统时不设，交给系统。
         NSApplication.shared.appearance = (AppTheme(rawValue: UserDefaults.standard.string(forKey: "appearance") ?? "") ?? .dark).appearance
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 800])

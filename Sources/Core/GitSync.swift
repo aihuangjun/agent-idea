@@ -70,7 +70,7 @@ public enum GitSyncError: Error, LocalizedError, Equatable {
     public var errorDescription: String? {
         switch self {
         case .unborn:
-            return "仓库还没有任何提交，没有可同步的分支"
+            return "仓库还没有任何提交，没有可拉取的分支"
         case .noUpstream(let branch):
             return "\(branch) 没有跟踪远程分支，先 git push -u 建立上游再同步"
         case .rebaseInProgress:
