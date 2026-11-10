@@ -284,7 +284,7 @@ import TestSupport
         let runner = FakeCommandRunner(responses: [shellOutput(""), shellOutput(""), shellOutput("abc1234\n"), shellOutput("ok")])
         let git = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner)
         let result = try await git.commit(paths: ["b.txt", "a.txt", "a.txt"], message: "msg", repositoryRoot: repo)
-        #expect(result == GitClient.CommitResult(shortHash: "abc1234", fileCount: 2))
+        #expect(result == GitClient.CommitResult(hash: "abc1234", fileCount: 2))
         #expect(runner.calls[0].arguments == ["add", "-A", "--", "a.txt", "b.txt"])
         #expect(runner.calls[1].arguments == ["commit", "--quiet", "--only", "-m", "msg", "--", "a.txt", "b.txt"])
         _ = try await git.push(repositoryRoot: repo, hasUpstream: false)

@@ -52,3 +52,22 @@ public struct UndoHistory<Entry>: Sendable where Entry: Sendable {
         redoEntries.removeAll()
     }
 }
+
+/// 「编辑 → 撤销 / 重做」（⌘Z / ⇧⌘Z）该交给谁，按焦点定（视图层的 `UndoDispatcher` 看第一响应者，判定在这里，可测）。
+public enum UndoRoute: Equatable, Sendable {
+    /// 焦点所在的文本控件（提交信息框、搜索框）自己的撤销栈。
+    case textControl
+    /// WebView 里的编辑器（CodeMirror 的历史）；页面说没有编辑器时再落到文件操作。
+    case editor
+    /// 文件操作栈（重命名、移动、删除、回滚、提交……）。
+    case fileOperation
+
+    /// - `textControlCanAct`：文本控件的撤销栈里有没有可撤（重做时：可重做）的。
+    /// - `textControlYieldsToCommit`：焦点在**提交信息框**里，而且文件操作栈顶（重做时：重做栈顶）是一次提交。
+    ///   两条都成立且输入框没东西可撤时落到文件操作——提交完输入框被清空、撤销栈也清了，⌘Z 该撤的是刚才那次提交。
+    ///   别的文本控件（搜索框、对话框里的输入框）没东西可撤时照旧什么都不做，不在背后撤掉一次移动或删除。
+    public static func route(focusInTextControl: Bool, textControlCanAct: Bool, textControlYieldsToCommit: Bool = false, focusInWebView: Bool) -> UndoRoute {
+        if focusInTextControl { return textControlCanAct || !textControlYieldsToCommit ? .textControl : .fileOperation }
+        return focusInWebView ? .editor : .fileOperation
+    }
+}

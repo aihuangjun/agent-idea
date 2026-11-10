@@ -343,7 +343,9 @@ private struct CommitPanel: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             // 占位符由编辑框自己画在第一行文字的位置上，光标与提示对齐（见 PlainTextEditor）
-            PlainTextEditor(text: $commit.message, placeholder: "提交信息", isFocused: $messageFocused)
+            // 提交成功后交出焦点：⌘Z / 编辑 → 撤销 才会落到「撤销提交」上，而不是去撤已经清空的输入框
+            PlainTextEditor(text: $commit.message, placeholder: "提交信息", isFocused: $messageFocused,
+                            releaseFocusRequests: commit.completedCommits)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .background(RoundedRectangle(cornerRadius: 6).fill(Theme.editorBackground))
                 .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(messageFocused ? Theme.accent : Theme.border, lineWidth: 1))

@@ -10,6 +10,8 @@ extension ProjectSession {
     /// 菜单项标题：「撤销重命名 a.txt」；没有可撤的就是「撤销」。
     var undoTitle: String { undoHistory.nextUndo.map { "撤销" + $0.title } ?? "撤销" }
     var redoTitle: String { undoHistory.nextRedo.map { "重做" + $0.title } ?? "重做" }
+    var nextUndoIsCommit: Bool { if case .commit? = undoHistory.nextUndo?.kind { return true } else { return false } }
+    var nextRedoIsCommit: Bool { if case .commit? = undoHistory.nextRedo?.kind { return true } else { return false } }
 
     @discardableResult
     func recordUndo(_ title: String, _ kind: UndoableOperation.Kind) -> UndoableOperation {
@@ -22,6 +24,11 @@ extension ProjectSession {
     /// 这几秒里用户要是又做了别的，按钮不该撤错东西）。
     func undo(expecting id: UUID? = nil) {
         guard !isUndoing, !isRollingBack, let entry = undoHistory.nextUndo, id == nil || entry.id == id else { return }
+        // 提交 / 推送 / 同步正在跑：这一步留在栈里，等那边做完再撤（弹出来再失败的话它就被丢掉了）
+        if let problem = gitBusyProblem(for: entry) {
+            showError("不能撤销\(entry.title)：\(problem.message)")
+            return
+        }
         _ = undoHistory.popUndo()
         isUndoing = true
         Task { [weak self] in
@@ -41,7 +48,12 @@ extension ProjectSession {
     }
 
     func redo() {
-        guard !isUndoing, !isRollingBack, let entry = undoHistory.popRedo() else { return }
+        guard !isUndoing, !isRollingBack, let next = undoHistory.nextRedo else { return }
+        if let problem = gitBusyProblem(for: next) {
+            showError("不能重做\(next.title)：\(problem.message)")
+            return
+        }
+        guard let entry = undoHistory.popRedo() else { return }
         isUndoing = true
         Task { [weak self] in
             guard let self else { return }
@@ -125,6 +137,8 @@ extension ProjectSession {
             var updated = entry
             updated.kind = .createFile(url: url, trashed: trashed)
             return .done(updated)
+        case .commit(let record):
+            return await undoCommit(entry, record: record)
         case .batch(let operations):
             // 倒着撤：后搬的先搬回去。中途撤不成就停在那里报错，已经撤掉的那几个不再能重做（这一步整个作废）
             var reverted: [UndoableOperation] = []
@@ -221,6 +235,8 @@ extension ProjectSession {
             var updated = entry
             updated.kind = .createFile(url: url, trashed: nil)
             return .done(updated)
+        case .commit(let record):
+            return await redoCommit(entry, record: record)
         case .batch(let operations):
             var applied: [UndoableOperation] = []
             for operation in operations {
@@ -232,6 +248,138 @@ extension ProjectSession {
             var updated = entry
             updated.kind = .batch(applied)
             return .done(updated)
+        }
+    }
+
+    // MARK: - 提交（IDEA 的 Undo Commit）
+
+    /// 提交成功了（`CommitController.onCommitted`）：记一步撤销，状态栏给一条带「撤销」的提示。
+    /// 「提交并推送」的不给按钮——推送成了就撤不了，推送失败的话 ⌘Z / 编辑 → 撤销 仍能撤。
+    func didCommit(_ record: GitCommitRecord) {
+        let operation = recordUndo(record.isAmend ? "修改提交" : "提交", .commit(record))
+        let text = "\(record.isAmend ? "已修改提交" : "已提交") \(record.shortHash)「\(record.subject)」"
+        if record.pushRequested {
+            notify(text + "，正在推送")
+        } else {
+            notify(text, action: BannerAction(title: "撤销") { [weak self] in
+                self?.dismissBanner()
+                self?.undo(expecting: operation.id)
+            })
+        }
+    }
+
+    /// 正在提交 / 推送 / 同步 / 切分支 / 回滚时不动 HEAD。只对提交这一类有意义（文件操作不受这些影响）。
+    private func gitBusyProblem(for entry: UndoableOperation) -> GitCommitUndoProblem? {
+        guard case .commit(let record) = entry.kind else { return nil }
+        if record.pushRequested, commit?.isPushing == true { return .pushing }
+        return isGitBusy ? .busy : nil
+    }
+
+    private var isGitBusy: Bool {
+        commit?.isCommitting == true || commit?.isPushing == true || isSyncingRemote || isSwitchingBranch || isRollingBack
+    }
+
+    /// 撤销 / 重做之前问 git 此刻的样子。`forRedo` 时多问一次索引的树，撤销时多问一次推送过没有。
+    private func commitUndoState(_ record: GitCommitRecord, git: GitClient, repositoryRoot: URL, forRedo: Bool) async throws -> GitCommitUndo.State {
+        let head = try await git.headCommit(repositoryRoot: repositoryRoot)
+        let branch = try await git.symbolicBranch(repositoryRoot: repositoryRoot)
+        let operation = await git.operationInProgress(repositoryRoot: repositoryRoot)
+        var state = GitCommitUndo.State(head: head, branch: branch, operation: operation)
+        if forRedo {
+            state.indexTree = await git.indexTree(repositoryRoot: repositoryRoot)
+        } else if head == record.head {
+            state.isOnRemote = try await git.isCommitOnRemote(record.head, repositoryRoot: repositoryRoot)
+        }
+        state.wasPushed = commit?.pushedHeads.contains(record.head) == true
+        state.isPushing = commit?.isPushing == true
+        state.isBusy = commit?.isCommitting == true || isSyncingRemote || isSwitchingBranch || isRollingBack
+        return state
+    }
+
+    /// 撤销提交：核对 → `reset --soft` → 记下此刻索引的树（重做前比对）→ 信息填回输入框、切到「提交」工具窗口。
+    private func undoCommit(_ entry: UndoableOperation, record: GitCommitRecord) async -> UndoOutcome {
+        guard let git, let repositoryRoot = project.repositoryRoot, commit != nil else { return .failed("没有 git 仓库") }
+        do {
+            let state = try await commitUndoState(record, git: git, repositoryRoot: repositoryRoot, forRedo: false)
+            if let problem = GitCommitUndo.undoProblem(record, state: state) { return .failed(problem.message) }
+            try await git.undoCommit(record, repositoryRoot: repositoryRoot)
+        } catch {
+            Log.warn("git", "撤销提交 \(record.head) 失败：\(error)")
+            return .failed(error.userFacingDescription)
+        }
+        Log.info("git", "已撤销提交 \(record.head)（退回 \(record.previousHead ?? "还没有提交")）")
+        var updated = record
+        updated.indexTreeAfterUndo = await git.indexTree(repositoryRoot: repositoryRoot)
+        commit?.restoreMessage(record.message)
+        didMoveHead()
+        var done = entry
+        done.kind = .commit(updated)
+        return .done(done)
+    }
+
+    private func redoCommit(_ entry: UndoableOperation, record: GitCommitRecord) async -> UndoOutcome {
+        guard let git, let repositoryRoot = project.repositoryRoot, commit != nil else { return .failed("没有 git 仓库") }
+        do {
+            let state = try await commitUndoState(record, git: git, repositoryRoot: repositoryRoot, forRedo: true)
+            if let problem = GitCommitUndo.redoProblem(record, state: state) { return .failed(problem.message) }
+            try await git.redoCommit(record, repositoryRoot: repositoryRoot)
+        } catch {
+            Log.warn("git", "重做提交 \(record.head) 失败：\(error)")
+            return .failed(error.userFacingDescription)
+        }
+        Log.info("git", "已重做提交 \(record.head)")
+        commit?.clearMessage(ifEqualTo: record.message)
+        didMoveHead(showChanges: false)
+        return .done(entry)
+    }
+
+    /// HEAD 挪过之后：整体刷新（变更列表里那些文件回来 / 消失）、重拉历史；撤销的话切到「提交」工具窗口
+    /// （隐藏着也亮出来）让用户看见改动回来了。重做不切：改动又进了提交，变更列表里没什么可看的。
+    private func didMoveHead(showChanges: Bool = true) {
+        refreshAll()
+        history?.reloadIfLoaded()
+        if showChanges { onRequestToolWindow?(.commit) }
+    }
+
+    /// 提交历史右键「撤销提交」能不能给：当前分支上的 HEAD，有且只有一个父提交。
+    func canUndoCommitFromHistory(_ commit: GitCommit) -> Bool {
+        hasGit && GitCommitUndo.historyProblem(for: commit, head: gitSnapshot.branch.headOID, branch: gitSnapshot.branch) == nil
+    }
+
+    /// 提交历史右键「撤销提交」（IDEA 的 Undo Commit）：不是本会话提交的也能撤，退回第一个父提交。
+    /// 直接执行、不进撤销栈（IDEA 也是）；核对与撤销栈里的那种一样，推送过的不撤。
+    func undoCommitFromHistory(_ target: GitCommit) {
+        guard let git, let repositoryRoot = project.repositoryRoot, commit != nil, !isUndoing else { return }
+        if let problem = GitCommitUndo.historyProblem(for: target, head: gitSnapshot.branch.headOID, branch: gitSnapshot.branch) ?? (isGitBusy ? .busy : nil) {
+            showError("不能撤销提交 \(target.shortHash)：\(problem.message)")
+            return
+        }
+        isUndoing = true
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.isUndoing = false }
+            do {
+                let branch = try await git.symbolicBranch(repositoryRoot: repositoryRoot)
+                let record = GitCommitUndo.record(for: target, branch: branch)
+                let state = try await self.commitUndoState(record, git: git, repositoryRoot: repositoryRoot, forRedo: false)
+                if let problem = GitCommitUndo.undoProblem(record, state: state) {
+                    self.showError("不能撤销提交 \(target.shortHash)：\(problem.message)")
+                    return
+                }
+                try await git.undoCommit(record, repositoryRoot: repositoryRoot)
+                Log.info("git", "已从提交历史撤销提交 \(target.hash)")
+                // 撤销栈里记着的同一个提交已经撤掉了，留着它 ⌘Z 只会报「HEAD 已经不是这次提交了」
+                self.undoHistory.removeAll { operation in
+                    if case .commit(let recorded) = operation.kind { return recorded.head == target.hash }
+                    return false
+                }
+                self.commit?.restoreMessage(record.message)
+                self.didMoveHead()
+                self.notify("已撤销提交 \(target.shortHash)「\(target.subject)」，改动回到了变更列表")
+            } catch {
+                Log.warn("git", "从提交历史撤销提交 \(target.hash) 失败：\(error)")
+                self.showError("不能撤销提交 \(target.shortHash)：\(error.userFacingDescription)")
+            }
         }
     }
 

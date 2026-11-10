@@ -13,16 +13,23 @@ public struct PlainTextEditor: NSViewRepresentable {
     @Binding var isFocused: Bool
     let placeholder: String
     let heightRange: ClosedRange<CGFloat>
+    /// 每变一次，文本视图还是第一响应者的话就交出焦点（提交成功后：⌘Z 该去撤提交，不该留在已经清空的输入框里）。
+    let releaseFocusRequests: Int
+
+    /// 这个响应者是不是提交信息框（`PlainTextEditor`）的文本视图。撤销分发据此决定输入框空了时 ⌘Z 能不能去撤提交。
+    public static func isEditorTextView(_ responder: NSResponder) -> Bool { responder is PlaceholderTextView }
 
     /// 文字离边框的距离。
     public static let inset = NSSize(width: 8, height: 7)
     static let font = NSFont.systemFont(ofSize: 13)
 
-    public init(text: Binding<String>, placeholder: String, isFocused: Binding<Bool>, heightRange: ClosedRange<CGFloat> = 64...120) {
+    public init(text: Binding<String>, placeholder: String, isFocused: Binding<Bool>, heightRange: ClosedRange<CGFloat> = 64...120,
+                releaseFocusRequests: Int = 0) {
         _text = text
         _isFocused = isFocused
         self.placeholder = placeholder
         self.heightRange = heightRange
+        self.releaseFocusRequests = releaseFocusRequests
     }
 
     public func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
@@ -33,6 +40,7 @@ public struct PlainTextEditor: NSViewRepresentable {
             textView.delegate = context.coordinator
             textView.placeholder = placeholder
             textView.string = text
+            context.coordinator.releaseFocusRequests = releaseFocusRequests
             textView.onFocusChange = { [coordinator = context.coordinator] focused in
                 // 焦点变化来自 AppKit 的响应链，不在 SwiftUI 的更新回合里；挪到下一轮再写状态最稳妥
                 DispatchQueue.main.async { coordinator.parent.isFocused = focused }
@@ -65,10 +73,16 @@ public struct PlainTextEditor: NSViewRepresentable {
         context.coordinator.parent = self
         guard let textView = scrollView.documentView as? PlaceholderTextView else { return }
         textView.placeholder = placeholder
-        // 外面把文字改了（比如提交完清空）才写回去；用户正在敲的时候两边本来就一样，别打断输入法
+        // 外面把文字改了（比如提交完清空）才写回去；用户正在敲的时候两边本来就一样，别打断输入法。
+        // 撤销栈跟着清掉：里面记的是旧文字上的编辑，换了文字再撤只会撕坏它（提交完再 ⌘Z 也不该把刚提交的信息一个字一个字敲回来）
         if textView.string != text {
             textView.string = text
             textView.needsDisplay = true
+            context.coordinator.undoManager.removeAllActions()
+        }
+        if context.coordinator.releaseFocusRequests != releaseFocusRequests {
+            context.coordinator.releaseFocusRequests = releaseFocusRequests
+            if let window = textView.window, window.firstResponder === textView { window.makeFirstResponder(nil) }
         }
     }
 
@@ -129,10 +143,15 @@ public struct PlainTextEditor: NSViewRepresentable {
 
     public final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: PlainTextEditor
+        var releaseFocusRequests = 0
+        /// 文本框自己的撤销栈（默认用的是窗口共用的那个，清不得）。
+        let undoManager = UndoManager()
 
         init(parent: PlainTextEditor) {
             self.parent = parent
         }
+
+        public func undoManager(for view: NSTextView) -> UndoManager? { undoManager }
 
         public func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }

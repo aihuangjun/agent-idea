@@ -39,6 +39,13 @@ final class CommitController: ObservableObject {
     /// 仓库被改了（提交、回滚、删文件之后）。参数是受影响的变更，会话据此关掉对应的 diff 标签。
     var onRepositoryChanged: (@MainActor ([GitChange]) -> Void)?
     var onRolledBack: (@MainActor ([GitChange]) -> Void)?
+    /// 提交成功了（含 amend、提交并推送）：会话据此记一步撤销、在状态栏给一条带「撤销」的提示。
+    /// 提交前的 HEAD 没取到（git 出错）时不调——没有它就撤不回去。
+    var onCommitted: (@MainActor (GitCommitRecord) -> Void)?
+    /// 本会话推送成功过的 HEAD。撤销提交前核对：推送到不更新远程跟踪分支的地方时 `branch -r --contains` 查不出来。
+    private(set) var pushedHeads: Set<String> = []
+    /// 提交成功的次数。提交信息框据此清掉自己的撤销栈、交出焦点（⌘Z 才落到「撤销提交」上）。
+    @Published private(set) var completedCommits = 0
 
     init(git: GitClient, repositoryRoot: URL) {
         self.git = git
@@ -180,6 +187,9 @@ final class CommitController: ObservableObject {
             do {
                 var pushedBefore = false
                 if amend, push { pushedBefore = (try? await git.isHeadOnRemote(repositoryRoot: repositoryRoot)) ?? true }
+                // 撤销提交要退回的地方：提交**之前**的 HEAD（amend 时就是被修改的那个旧提交）与所在分支
+                let previousHead: String?? = try? await git.headCommit(repositoryRoot: repositoryRoot)
+                let branch = try? await git.symbolicBranch(repositoryRoot: repositoryRoot)
                 let result = try await git.commit(paths: paths, message: trimmed, amend: amend, repositoryRoot: repositoryRoot)
                 if amend {
                     // 改完就退出 amend（IDEA 一样）；输入框清空，勾之前写的那段也不要了——它已经不对应任何改动
@@ -189,10 +199,15 @@ final class CommitController: ObservableObject {
                 }
                 message = ""
                 isCommitting = false
+                completedCommits += 1
                 let verb = amend ? "已修改提交" : "已提交"
                 let files = result.fileCount == 0 ? "只改了提交信息" : "\(result.fileCount) 个文件"
                 Log.info("git", "\(amend ? "修改提交" : "提交") \(result.shortHash)：\(files)")
                 onRepositoryChanged?(changes)
+                if let previousHead, !result.hash.isEmpty, previousHead != result.hash {
+                    onCommitted?(GitCommitRecord(head: result.hash, previousHead: previousHead, branch: branch ?? nil, message: trimmed,
+                                                 isAmend: amend, pushRequested: push && !pushedBefore))
+                }
                 if push, pushedBefore {
                     status = .failure("\(verb) \(result.shortHash)（\(files)）。修改前的提交已经推送过，需要强制推送才能更新远端，没有自动推送")
                 } else {
@@ -215,7 +230,9 @@ final class CommitController: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             do {
+                let head = try? await git.headCommit(repositoryRoot: repositoryRoot)
                 let output = try await git.push(repositoryRoot: repositoryRoot, hasUpstream: hasUpstream)
+                if let head = head ?? nil { pushedHeads.insert(head) }
                 isPushing = false
                 let summary = output.split(separator: "\n").last.map(String.init) ?? ""
                 status = .success(summary.isEmpty ? "已推送" : "已推送：\(summary)")
@@ -227,6 +244,18 @@ final class CommitController: ObservableObject {
             }
             onRepositoryChanged?([])
         }
+    }
+
+    /// 撤销提交之后把那次的信息填回输入框——只在输入框空着、也没勾「修改上一次提交」时（勾着时 HEAD 一变 amend 会自己重新预填，两边会打架）。
+    func restoreMessage(_ text: String) {
+        guard !isAmending, message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        message = text
+    }
+
+    /// 重做提交之后：输入框里还是撤销时填回去的那段，就清掉（它已经又提交进去了）。
+    func clearMessage(ifEqualTo text: String) {
+        guard !isAmending, message == text else { return }
+        message = ""
     }
 
     // MARK: - 回滚与删除

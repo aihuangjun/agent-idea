@@ -74,7 +74,12 @@ private struct HistoryBody: View {
         } else {
             GeometryReader { geometry in
                 VStack(spacing: 0) {
-                    CommitList(history: history)
+                    // 普通历史里最上面那个（当前分支的 HEAD）才给「撤销提交」；文件历史、比较模式里最上面的不一定是 HEAD
+                    CommitList(history: history, undoCommit: { index, commit in
+                        guard index == 0, history.pathFilter == nil, history.comparedBranch == nil,
+                              session.canUndoCommitFromHistory(commit) else { return nil }
+                        return { session.undoCommitFromHistory(commit) }
+                    })
                     if let detail = history.detail {
                         HistoryDetails(session: session, history: history, detail: detail)
                             .frame(height: max(160, geometry.size.height * 0.45))
@@ -151,6 +156,8 @@ private struct PathHistoryBanner: View {
 
 private struct CommitList: View {
     @ObservedObject var history: HistoryController
+    /// 这一行能撤销提交的话给出动作（IDEA 的 Undo Commit），否则 nil。
+    let undoCommit: (Int, GitCommit) -> (() -> Void)?
     @FocusState private var isFocused: Bool
     @State private var scrollOnSelection = false
 
@@ -162,7 +169,8 @@ private struct CommitList: View {
                         CommitRow(commit: commit, isSelected: history.selection.contains(commit.id), isFocused: isFocused,
                                   press: { press(commit, modifiers: $0) },
                                   // 文件历史里最上面那个不一定是 HEAD（只是最近一次动过它的），「到 HEAD」说不通，不给
-                                  compareToHead: index == 0 || history.pathFilter != nil ? nil : { history.selectThroughHead(from: commit) })
+                                  compareToHead: index == 0 || history.pathFilter != nil ? nil : { history.selectThroughHead(from: commit) },
+                                  undoCommit: undoCommit(index, commit))
                         .id(commit.id)
                     }
                     if history.hasMore {
@@ -223,6 +231,8 @@ private struct CommitRow: View {
     let press: (NSEvent.ModifierFlags) -> Void
     /// 最上面那个（HEAD）自己没有「到 HEAD」可比，是 nil。
     let compareToHead: (() -> Void)?
+    /// 当前分支的 HEAD 才有（`git reset --soft HEAD~1`，改动回到变更列表）。
+    let undoCommit: (() -> Void)?
     @State private var isHovering = false
 
     var body: some View {
@@ -259,6 +269,10 @@ private struct CommitRow: View {
             Button("复制提交 hash") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(commit.hash, forType: .string)
+            }
+            if let undoCommit {
+                Divider()
+                Button("撤销提交（改动回到变更列表）") { undoCommit() }
             }
         }
         .help(commit.subject)

@@ -271,13 +271,16 @@ public struct GitClient: Sendable {
 
     /// 提交结果。
     public struct CommitResult: Equatable, Sendable {
-        public let shortHash: String
+        /// 新提交的完整 hash（撤销提交要拿它核对 HEAD）。
+        public let hash: String
         public let fileCount: Int
 
-        public init(shortHash: String, fileCount: Int) {
-            self.shortHash = shortHash
+        public init(hash: String, fileCount: Int) {
+            self.hash = hash
             self.fileCount = fileCount
         }
+
+        public var shortHash: String { String(hash.prefix(7)) }
     }
 
     /// 把选中的路径暂存并提交。
@@ -304,9 +307,9 @@ public struct GitClient: Sendable {
             _ = try await run(["rm", "--cached", "--ignore-unmatch", "--quiet", "--"] + missing, in: repositoryRoot)
         }
         _ = try await run(Self.commitArguments(paths: unique, message: message, amend: amend), in: repositoryRoot)
-        let hash = try await run(["rev-parse", "--short", "HEAD"], in: repositoryRoot).text
+        let hash = try await run(["rev-parse", "HEAD"], in: repositoryRoot).text
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        return CommitResult(shortHash: hash, fileCount: unique.count)
+        return CommitResult(hash: hash, fileCount: unique.count)
     }
 
     /// `git commit` 的参数。`amend` 且没有路径时不带 `--`：只改信息。
@@ -611,5 +614,58 @@ public struct GitClient: Sendable {
     /// 让当前分支跟踪一个远程分支（`git branch --set-upstream-to`）。只改配置，不动工作区与提交。
     public func setUpstream(_ upstream: String, repositoryRoot: URL) async throws {
         _ = try await run(["branch", "--set-upstream-to=" + upstream], in: repositoryRoot)
+    }
+
+    // MARK: - 撤销提交（IDEA 的 Undo Commit，规则见 `GitCommitUndo`）
+
+    /// 此刻 HEAD 的完整 hash；还没有提交时为 nil。别的失败（不是仓库、git 坏了）照样抛。
+    public func headCommit(repositoryRoot: URL) async throws -> String? {
+        let output = try await run(["rev-parse", "--verify", "-q", "HEAD"], in: repositoryRoot, acceptable: [0, 1])
+        let hash = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return output.status == 0 && !hash.isEmpty ? hash : nil
+    }
+
+    /// 此刻所在的分支名；游离 HEAD 时为 nil（`symbolic-ref -q` 退出码 1）。还没有提交的分支也有名字。
+    public func symbolicBranch(repositoryRoot: URL) async throws -> String? {
+        let output = try await run(["symbolic-ref", "-q", "--short", "HEAD"], in: repositoryRoot, acceptable: [0, 1])
+        let name = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return output.status == 0 && !name.isEmpty ? name : nil
+    }
+
+    /// 这个提交在不在某个远程跟踪分支上（`branch -r --contains`）。只看本地已知的远程引用，不联网。
+    public func isCommitOnRemote(_ hash: String, repositoryRoot: URL) async throws -> Bool {
+        let output = try await run(["branch", "-r", "--contains", hash], in: repositoryRoot)
+        return !output.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// 仓库是不是正停在一次 rebase / merge / cherry-pick / revert 中途。路径问 git 要（worktree 下拼不对）。
+    public func operationInProgress(repositoryRoot: URL) async -> GitOperationInProgress? {
+        for operation in GitOperationInProgress.allCases {
+            for marker in operation.markers {
+                guard let output = try? await run(["rev-parse", "--git-path", marker], in: repositoryRoot) else { continue }
+                let path = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !path.isEmpty else { continue }
+                let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : repositoryRoot.appendingPathComponent(path)
+                if FileManager.default.fileExists(atPath: url.path) { return operation }
+            }
+        }
+        return nil
+    }
+
+    /// 此刻索引的树（`write-tree`）。有未合并的条目时写不出来，返回 nil。
+    public func indexTree(repositoryRoot: URL) async -> String? {
+        guard let output = try? await run(["write-tree"], in: repositoryRoot) else { return nil }
+        let tree = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return tree.isEmpty ? nil : tree
+    }
+
+    /// 撤销一次提交：`reset --soft <提交前的 HEAD>`（首个提交是删掉分支引用）。工作区与索引都不动。
+    public func undoCommit(_ record: GitCommitRecord, repositoryRoot: URL) async throws {
+        _ = try await run(GitCommitUndo.undoArguments(record), in: repositoryRoot)
+    }
+
+    /// 重做撤销掉的提交：`reset --soft <这次提交>`。
+    public func redoCommit(_ record: GitCommitRecord, repositoryRoot: URL) async throws {
+        _ = try await run(GitCommitUndo.redoArguments(record), in: repositoryRoot)
     }
 }

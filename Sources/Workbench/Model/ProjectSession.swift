@@ -81,7 +81,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     private var pendingDocumentReloads: [String: UUID] = [:]
     /// 后退 / 前进的历史，元素是标签 id。
     @Published private(set) var navigation = NavigationHistory<String>()
-    /// 文件操作的撤销 / 重做栈（重命名、移动、删除、回滚）。编辑器里的撤销是 CodeMirror 自己的，见 `UndoDispatcher`。
+    /// 文件操作的撤销 / 重做栈（重命名、移动、删除、回滚、提交）。编辑器里的撤销是 CodeMirror 自己的，见 `UndoDispatcher`。
     @Published var undoHistory = UndoHistory<UndoableOperation>()
     /// 一次撤销 / 重做正在跑（搬文件、git 都是异步的），跑完之前再按 ⌘Z 不响应。
     var isUndoing = false
@@ -205,6 +205,7 @@ final class ProjectSession: ObservableObject, Identifiable {
                     }
                     self.refreshAll()
                 }
+                controller.onCommitted = { [weak self] record in self?.didCommit(record) }
                 self.commit = controller
                 let history = HistoryController(git: git, repositoryRoot: repositoryRoot)
                 history.onRepositoryChanged = { [weak self] in self?.refreshAll() }

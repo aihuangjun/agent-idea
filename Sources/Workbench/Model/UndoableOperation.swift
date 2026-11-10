@@ -1,7 +1,7 @@
 import Core
 import Foundation
 
-/// 一次能撤销的文件操作（IDEA 的 Undo 里除编辑之外的那些）：重命名 / 移动、删除、回滚、添加到 git。
+/// 一次能撤销的文件操作（IDEA 的 Undo 里除编辑之外的那些）：重命名 / 移动、删除、回滚、添加到 git、提交。
 /// 编辑器里的撤销是 CodeMirror 自己的，不在这里；焦点在哪决定 ⌘Z 撤哪一种（见 `UndoDispatcher`）。
 struct UndoableOperation: Identifiable {
     enum Kind {
@@ -19,6 +19,9 @@ struct UndoableOperation: Identifiable {
         case createFolder(url: URL)
         /// 新建文件的撤销进废纸篓，重做搬回来，保留创建之后写入的内容。
         case createFile(url: URL, trashed: URL?)
+        /// 提交了一次（含 amend、提交并推送）。撤销是 `reset --soft <提交前的 HEAD>`：改动回到暂存区、信息填回输入框；
+        /// 重做是 `reset --soft <这次提交>`。核对规则在 Core 的 `GitCommitUndo`。
+        case commit(GitCommitRecord)
         /// 一步里做了好几件（多选之后一起拖走、一起删）：撤销按倒序逐个撤，重做按正序逐个做。
         case batch([UndoableOperation])
     }
