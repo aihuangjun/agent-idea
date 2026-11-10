@@ -100,6 +100,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 当前正文里前面 / 后面还有没有变更可跳（页面报上来的，见 `setChangePosition`）。
     @Published private(set) var changePosition = ContentRenderer.ChangePosition()
     @Published private(set) var diffStatistics: [String: DiffLineCounts] = [:]
+    /// 正文里此刻是哪一种 CodeMirror 编辑器（`renderActiveTab` 按送出去的内容算）：「代码」菜单据此灰掉不适用的项。
+    @Published private(set) var activeEditor: EditorKind?
     private var pendingDiffReveal: (tabID: String, edge: DiffEdge)?
     private var isSteppingDiff = false
     @Published var isFindShown = false
@@ -1447,10 +1449,11 @@ final class ProjectSession: ObservableObject, Identifiable {
     func renderActiveTab() {
         guard isActive else { return }
         guard var tab = activeTab else {
+            setActiveEditor(nil)
             renderer.render(.message("", ""))
             return
         }
-        guard let content = contents[tab.id], content != .loading else { return }
+        guard let content = contents[tab.id], content != .loading else { setActiveEditor(nil); return }
         let lineReveal = pendingLineReveal.flatMap { $0.tabID == tab.id ? $0.position : nil }
         let revealLength = lineReveal == nil ? 0 : pendingLineReveal?.length ?? 0
         if lineReveal != nil, needsSourceView(tab, content), let index = tabs.firstIndex(where: { $0.id == tab.id }) {
@@ -1482,11 +1485,29 @@ final class ProjectSession: ObservableObject, Identifiable {
         let edge = pendingDiffReveal.flatMap { $0.tabID == tab.id ? $0.edge : nil }
         // 要跳到行的时候不再定位第一处差异：两个落点会打架
         let diffEdge = lineReveal != nil ? nil : edge ?? (tab.isDiff && !tab.hasDiffPosition ? .first : nil)
+        setActiveEditor(rendered.editorKind)
         renderer.render(RenderPayload(rendered, scrollTop: tab.scrollTop, wrap: preferences.wordWrap,
                                       revealChange: diffEdge, revealLine: lineReveal, revealLength: revealLength, diffReading: preferences.diffReading,
                                       diffViewState: tab.diffViewState, foldState: tab.foldState))
         if edge != nil { pendingDiffReveal = nil }
         if lineReveal != nil { pendingLineReveal = nil }
+    }
+
+    private func setActiveEditor(_ kind: EditorKind?) {
+        if activeEditor != kind { activeEditor = kind }
+    }
+
+    // MARK: - 编辑器命令（「代码」菜单）
+
+    /// 这条编辑器命令现在能不能用：当前会话、正文里有对应的编辑器（折叠只有普通编辑器有）。
+    func canPerform(_ command: EditorCommand) -> Bool {
+        isActive && command.isAvailable(in: activeEditor)
+    }
+
+    /// 从菜单执行编辑器里的折叠 / 多光标命令（与编辑器里的快捷键同一个函数）。焦点在编辑器里时快捷键由页面处理，不会走到这里。
+    func perform(_ command: EditorCommand) {
+        guard canPerform(command) else { return }
+        renderer.perform(command)
     }
 
     /// 状态栏右侧那几格。可编辑的 diff 显示的是它编辑的那个文档的（行数、编码、语言）。

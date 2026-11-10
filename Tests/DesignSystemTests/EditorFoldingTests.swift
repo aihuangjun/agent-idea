@@ -271,3 +271,52 @@ public class Counter {
     """)
     #expect(mouse == "2|1:11|rectangle|false", "\(mouse)")
 }
+
+/// 「代码」菜单的入口（`ContentRenderer.perform` → `window.ide.editorCommand`）跑的与快捷键是同一个函数；
+/// 不适用的视图回 false（菜单项本来就灰着，这里核对页面也不会误动）。快捷键在编辑器里被页面接下（defaultPrevented），
+/// WebKit 就不再交给菜单——同一个键不会页面一次、菜单一次（离屏只能核对到这一步，菜单分发本身要实机看）。
+@Test @MainActor func menuEditorCommandsRunTheSameFunctionsAsTheKeys() async throws {
+    let page = EditorPage()
+    func perform(_ command: EditorCommand) async -> Bool {
+        await withCheckedContinuation { continuation in page.renderer.perform(command) { continuation.resume(returning: $0) } }
+    }
+    await page.render(code("/p/Counter.java", "java", sample))
+    #expect(await page.wait(for: "document.querySelector('.CodeMirror[data-syntax=\"tree-sitter\"]')"))
+
+    #expect(await perform(.foldAll))
+    #expect(await page.string("__folds()") == "2-14,5-7,9-13")
+    #expect(await perform(.unfoldAll))
+    #expect(await page.string("__folds() || 'none'") == "none")
+    _ = await page.evaluate("__cm().setCursor({line: 10, ch: 8}); true")
+    #expect(await perform(.fold))
+    #expect(await page.string("__folds()") == "9-13", "与 ⌘- 一样折起包住光标的 run")
+    _ = await page.evaluate("__cm().setCursor({line: 9, ch: 2}); true")
+    #expect(await perform(.unfold))
+    #expect(await page.string("__folds() || 'none'") == "none")
+
+    _ = await page.evaluate("__cm().setCursor({line: 3, ch: 17}); true")
+    for _ in 0..<3 { #expect(await perform(.selectNextOccurrence)) }
+    #expect(await page.string("__cm().getSelections().join(',')") == "count,count,count")
+    #expect(await perform(.unselectOccurrence))
+    #expect(await page.string("String(__cm().listSelections().length)") == "2")
+    #expect(await perform(.singleSelection))
+    #expect(await page.string("String(__cm().listSelections().length)") == "1")
+    #expect(await page.string("String(__cm().hasFocus())") == "true", "从菜单点完接着打字要打进编辑器")
+
+    // 编辑器里按键：页面接下并 preventDefault（⌃G、⇧⌃G、⇧⌘-、⇧⌘=、⌘-、⌘=）
+    let handled = await page.string("[[71, {ctrlKey: true}], [71, {ctrlKey: true, shiftKey: true}], [189, {metaKey: true, shiftKey: true}], [187, {metaKey: true, shiftKey: true}], [189, {metaKey: true}], [187, {metaKey: true}]].map(([code, mods]) => __key(code, mods)).join(',')")
+    #expect(handled == "true,true,true,true,true,true", "\(handled)")
+    #expect(await page.string("window.ide.editorCommand('nope')") == "0", "不认识的名字不动")
+
+    // 只读的大文件：没有编辑器，全都回 false
+    await page.render(RenderPayload(.code(path: "/p/Counter.java", text: sample, language: "java", editable: false)))
+    for command in EditorCommand.allCases { #expect(await perform(command) == false, "\(command)") }
+
+    // 全文 diff：没有代码折叠，多光标有（只读的版本对比也能选）
+    await page.render(RenderPayload(.diff(path: "Counter.java", language: "java", diff: UnifiedDiffParser.parse(""), mode: .unified, emptyReason: nil,
+                                          edit: DiffEdit(oldText: sample, newText: sample + "\n// tail\n", filePath: "/p/Counter.java", readOnly: true))))
+    #expect(await perform(.foldAll) == false)
+    _ = await page.evaluate("__cm().setCursor({line: 3, ch: 17}); true")
+    #expect(await perform(.selectNextOccurrence))
+    #expect(await page.string("__cm().getSelection()") == "count")
+}

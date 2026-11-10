@@ -23,6 +23,9 @@
  * history 是 CodeMirror getHistory() 的 JSON 文本，下次渲染同一份内容时随 payload 送回来（setHistory），切走再切回 ⌘Z 照样能撤。
  * window.ide.undo() / redo() 是编辑器里的撤销 / 重做，回有没有编辑器接下这一步（只读视图回 false，宿主去撤文件操作）；
  * 焦点在编辑器里时 ⌘Z / ⇧⌘Z 由 CodeMirror 自己处理，不会传到应用菜单。
+ * window.ide.editorCommand(name) 是菜单栏「代码」菜单的入口（名字见 Core/EditorCommand：fold / unfold / foldAll / unfoldAll /
+ *   selectNextOccurrence / unselectOccurrence / singleSelection），聚焦编辑器后跑与 extraKeys 同一个函数；回有没有编辑器接下
+ *   （折叠只有普通编辑器有，diff 里回 false）。extraKeys 里每加一个键都要在那里有一项（DesignSystemTests 核对）。
  * 基线是异步取的，到了就 window.ide.setBase({ path, base })，编辑器在行号右侧画「改过（蓝）/ 新增（绿）」的标记（IDEA 的 gutter）。
  * window.ide.setTheme("light" | "dark") 切浅色 / 深色：只换根元素的 class，颜色都在 style.css 的变量里。
  * window.ide.revealLine({line, ch}) 跳到行（从 0 数，夹到首尾）：编辑器放光标、只读代码视图与只读 diff 表格选中那一行，都滚到正中；
@@ -563,6 +566,28 @@
         "Shift-Cmd-=": "unfoldAll",
       },
     };
+  }
+
+  /* 菜单栏「代码」菜单里的编辑器命令（window.ide.editorCommand）：名字是 Core/EditorCommand 的 rawValue，
+   * 跑的与 extraKeys 是同一批函数。折叠只给普通编辑器（有 foldGutter 的），多光标所有编辑器都有（含只读的 diff）。 */
+  const EDITOR_COMMANDS = {
+    fold: { folding: true, run: collapseAtCursor },
+    unfold: { folding: true, run: expandAtCursor },
+    foldAll: { folding: true, run: cm => cm.execCommand("foldAll") },
+    unfoldAll: { folding: true, run: cm => cm.execCommand("unfoldAll") },
+    selectNextOccurrence: { run: selectNextOccurrence },
+    unselectOccurrence: { run: unselectOccurrence },
+    singleSelection: { run: cm => cm.execCommand("singleSelection") },
+  };
+
+  function runEditorCommand(name) {
+    const command = Object.prototype.hasOwnProperty.call(EDITOR_COMMANDS, name) ? EDITOR_COMMANDS[name] : null;
+    // 并排 diff 里最后点的是左边（旧版本）就作用在左边，与复制引用同一个判断
+    const cm = sideDiff && referencePane === "old" ? sideDiff.leftOriginal() : editor;
+    if (!command || !cm || (command.folding && !cm.state.foldGutter)) return false;
+    cm.focus();
+    command.run(cm);
+    return true;
   }
 
   /* 改动停手 300ms 后：把全文发给宿主、重算标记；onChange 给分栏预览 / diff 装饰用（它们自己再去抖）。 */
@@ -1645,6 +1670,10 @@
       if (!editor || editor.getOption("readOnly")) return false;
       editor.redo();
       return true;
+    },
+    /* 菜单里的折叠 / 多光标命令；这种视图没有对应的编辑器回 false。 */
+    editorCommand(name) {
+      return runEditorCommand(name);
     },
     /* 基线（HEAD 里的内容）异步到了：是当前文件就重画标记 / 重算 diff。 */
     setBase(message) {

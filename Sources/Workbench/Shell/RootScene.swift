@@ -196,6 +196,29 @@ public struct AgentIDEARootScene: Scene {
                 Button("Markdown：预览 / 源码 / 分栏") { workbench.active?.cycleMarkdownView() }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
             }
+            // 编辑器里的专有键位（render.js 的 extraKeys）都在这里有一项，新用户翻菜单就能发现（Core/EditorCommand 是清单）。
+            // 焦点在编辑器里时快捷键由页面处理（CodeMirror 处理了就 preventDefault，WebKit 不再交给菜单，F7 同理），
+            // 不会页面一次、菜单一次；焦点在别处或用鼠标点菜单时才走这里，经 window.ide.editorCommand 调进页面。
+            CommandMenu("代码") {
+                // ⌘- / ⌘= 在「视图」里是缩小 / 放大，同一个键不能挂两个菜单项：焦点在编辑器里时是折叠，只写在标题里
+                editorCommandButton("折叠代码块（编辑器中 ⌘-）", .fold)
+                editorCommandButton("展开代码块（编辑器中 ⌘=）", .unfold)
+                editorCommandButton("全部折叠", .foldAll)
+                    .keyboardShortcut("-", modifiers: [.command, .shift])
+                editorCommandButton("全部展开", .unfoldAll)
+                    .keyboardShortcut("=", modifiers: [.command, .shift])
+                Divider()
+                editorCommandButton("选中下一处相同文字（多光标）", .selectNextOccurrence)
+                    .keyboardShortcut("g", modifiers: .control)
+                editorCommandButton("取消最后选中的一处", .unselectOccurrence)
+                    .keyboardShortcut("g", modifiers: [.control, .shift])
+                // Esc 不能挂成菜单的键：查找框、对话框都要用它关
+                editorCommandButton("回到单个光标（Esc）", .singleSelection)
+                Divider()
+                // 鼠标操作没有菜单动作可做，照「当前版本」那一行的做法写成灰色的说明，至少翻菜单时看得见
+                Button("⌥⇧点击：添加 / 移除光标") {}.disabled(true)
+                Button("⌥拖动：列选择（矩形选区）") {}.disabled(true)
+            }
             // 键位照 IDEA 的 macOS 方案：⌃⇧R 运行当前文件、⌃R 重新运行、⌘F2 停止
             CommandMenu("运行") {
                 Button(workbench.active?.runnableActiveFile.map { "运行 '\($0.lastPathComponent)'" } ?? "运行当前文件") {
@@ -231,6 +254,12 @@ public struct AgentIDEARootScene: Scene {
                     .disabled(!(workbench.active?.hasGit ?? false))
             }
         }
+    }
+
+    /// 「代码」菜单的一项：当前正文里没有对应的编辑器（只读视图、预览、diff 里的折叠）就灰掉。
+    private func editorCommandButton(_ title: String, _ command: EditorCommand) -> some View {
+        Button(title) { workbench.active?.perform(command) }
+            .disabled(!(workbench.active?.canPerform(command) ?? false))
     }
 
     private static func revealLogs() {

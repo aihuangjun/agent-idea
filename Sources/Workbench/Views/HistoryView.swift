@@ -40,7 +40,7 @@ private struct HistoryBody: View {
                 // 看的是 hasRemoteUpstream 而不是 canSyncWithRemote：后者在同步进行中是 false，
                 // 按它画的话同步那几秒按钮会变成另一个图标 + 另一套说明（按钮此时只该灰着）
                 IconButton(session.hasRemoteUpstream ? ToolWindowIcon.syncWithRemote : ToolWindowIcon.refresh,
-                           help: session.hasRemoteUpstream ? "与远程同步并刷新：git fetch + rebase" : "刷新（当前分支没有跟踪远程分支，只重列本地提交）",
+                           help: session.hasRemoteUpstream ? "与远程同步并刷新：git fetch + rebase（⌘T）" : "刷新（当前分支没有跟踪远程分支，只重列本地提交）",
                            size: 22) {
                     if session.hasRemoteUpstream { session.syncWithRemote() } else { history.refresh() }
                 }

@@ -312,7 +312,7 @@ private struct ChangeRow: View {
             let rollbackable = targets.filter { $0.kind != .untracked }.count
             let deletable = targets.filter(commit.canDelete).count
             if rollbackable > 0 { Button("回滚 \(rollbackable) 个文件（Revert）") { onRollback(targets) } }
-            if deletable > 0 { Button("删除 \(deletable) 个文件…") { onDelete(targets) } }
+            if deletable > 0 { Button("删除 \(deletable) 个文件…（⌫）") { onDelete(targets) } }
         } else {
             // 分隔线跟着这一组走：已删除的变更这一组整个没有，菜单第一项就不该是一条线
             if change.kind != .deleted, let url = session.url(for: change) {
@@ -327,7 +327,8 @@ private struct ChangeRow: View {
                 Button("重命名…") { onRename(node) }
             }
             if commit.canDelete(change) {
-                Button("删除…") { onDelete([change]) }
+                // ⌫ 由列表的 onKeyPress 处理，这里只把键写进标题（理由见目录树的右键菜单）
+                Button("删除…（⌫）") { onDelete([change]) }
             }
         }
     }

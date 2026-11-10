@@ -649,9 +649,11 @@ private struct TreeContextMenu: View {
             Button("显示历史") { session.showHistory(of: node.url, isDirectory: node.isDirectory) }
             Divider()
         }
-        // 常用的放上面；「用默认应用打开」只给文件（目录交给访达就够了）
-        Button("重命名…") { requestRename(node) }
-        Button("删除…") { requestDelete(node) }
+        // 常用的放上面；「用默认应用打开」只给文件（目录交给访达就够了）。
+        // 快捷键写在标题里而不是挂 .keyboardShortcut：键由树的 onKeyPress 处理，右键菜单里的 SwiftUI 快捷键
+        // 是只显示还是会注册成窗口级的键没有保证（⌫ 一旦成了窗口级，输入框里删字也会去删文件）
+        Button("重命名…（⇧F6）") { requestRename(node) }
+        Button("删除…（⌫）") { requestDelete(node) }
         Divider()
         // 相对项目根的路径，粘给 Agent 用（IDEA 的 Copy Reference；目录树里没有行号）
         Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个引用" : "复制引用") { copyReferences() }
