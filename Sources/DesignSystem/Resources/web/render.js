@@ -9,7 +9,7 @@
  *              foldState?: 折叠现场的 JSON（折起的区间 + 全文哈希，页面自己产生、自己校验，宿主原样存取） }
  *   markdown { path, markdown, docDir, view: "preview" | "source" | "split", editable, cursor?, base?, history?, foldState? }
  *   image    { path, url, sizeText }
- *   html     { path, text, docDir }（宿主用独立 WebView 预览，HTML 脚本没有编辑桥）
+ *   html     { path, text, docDir }（宿主用独立 WebView 预览，docDir 是站点根目录与读取范围，HTML 脚本没有编辑桥）
  *   diff     { path, language, mode: "side" | "unified", rows, binary, empty, added, removed, emptyReason }
  *            或全文的 { path, language, mode, edit: { oldText, newText, baseIdentity, filePath, cursor?, history?, readOnly },
  *              diffViewState?: 阅读现场的 JSON（逻辑行、偏移、展开区间、基线标识），

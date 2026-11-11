@@ -1710,6 +1710,11 @@ final class ProjectSession: ObservableObject, Identifiable {
         tree.invalidateAll()
         recomputeRows()
         reloadOpenFilesIfChanged(force: true)
+        // 草稿不从磁盘重读，但 HTML 预览仍需重新加载样式、脚本、图片等资源。
+        if let tab = activeTab, let url = tab.fileURL, tab.htmlView == .preview,
+           FileCategory.isHTML(named: url.lastPathComponent), draftStore.isModified(tab.id) {
+            rerenderActiveTab()
+        }
         refreshGit()
     }
 

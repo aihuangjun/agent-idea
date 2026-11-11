@@ -84,7 +84,8 @@ public struct RenderPayload: Equatable, Sendable {
         case code(path: String, text: String, language: String?, editable: Bool = false, cursor: EditorCursor? = nil, base: String? = nil, history: String? = nil)
         case markdown(path: String, markdown: String, documentDirectory: URL, view: MarkdownView, editable: Bool = false, cursor: EditorCursor? = nil, base: String? = nil, history: String? = nil)
         case image(path: String, url: URL, sizeText: String)
-        /// 独立 WebView 中的 HTML 预览，与持有编辑桥的 shell 隔离；相对资源按原文件解析，读取范围由 documentDirectory 限定。
+        /// 独立 WebView 中的 HTML 预览，与持有编辑桥的 shell 隔离；documentDirectory 是站点根目录（通常是项目目录），
+        /// 相对资源按原文件位置解析，/ 开头的资源相对站点根目录，读取范围也限定在该目录内。
         case html(path: String, text: String, documentDirectory: URL)
         /// `edit` 非空时携带两侧全文与 Core 比较结果，支持上下文展开；readOnly 决定右侧能否编辑。
         /// 没有全文的二进制 / 大文件退回静态补丁。

@@ -39,15 +39,45 @@ import TestSupport
         try "secret".write(to: outside, atomically: true, encoding: .utf8)
         try FileManager.default.createSymbolicLink(at: project.appendingPathComponent("escape.js"), withDestinationURL: outside)
         let file = nested.appendingPathComponent("中文 page.html")
-        let resource = HTMLPreviewDocument.resourceURL(for: file)
+        let resource = try #require(HTMLPreviewDocument.resourceURL(for: file, within: project))
+        #expect(resource.path == "/web/中文 page.html")
+        #expect(!resource.absoluteString.contains(project.path))
         #expect(HTMLPreviewDocument.fileURL(for: resource, within: project)?.path == file.resolvingSymlinksInPath().path)
         #expect(HTMLPreviewDocument.resourceDirectory(for: file, in: project) == project)
         #expect(HTMLPreviewDocument.resourceDirectory(for: outside, in: project) == directory)
-        #expect(HTMLPreviewDocument.fileURL(for: HTMLPreviewDocument.resourceURL(for: outside), within: project) == nil)
-        #expect(HTMLPreviewDocument.fileURL(for: HTMLPreviewDocument.resourceURL(for: project.appendingPathComponent("../outside.js")), within: project) == nil)
-        #expect(HTMLPreviewDocument.fileURL(for: HTMLPreviewDocument.resourceURL(for: project.appendingPathComponent("escape.js")), within: project) == nil)
+        #expect(HTMLPreviewDocument.resourceURL(for: outside, within: project) == nil)
+        #expect(HTMLPreviewDocument.resourceURL(for: project.appendingPathComponent("../outside.js"), within: project) == nil)
+        #expect(HTMLPreviewDocument.fileURL(for: URL(string: "agentidea-html://preview/escape.js")!, within: project) == nil)
+        #expect(HTMLPreviewDocument.fileURL(for: URL(string: "agentidea-html://preview/%2e%2e/outside.js")!, within: project) == nil)
         #expect(HTMLPreviewDocument.fileURL(for: outside, within: project) == nil)
         #expect(HTMLPreviewDocument.fileURL(for: URL(string: "agentidea-html://other" + resource.path)!, within: project) == nil)
+    }
+}
+
+@Test func htmlPreviewUsesProjectRootAndDirectoryIndexes() async throws {
+    try await withTemporaryDirectory { project in
+        let pages = project.appendingPathComponent("pages", isDirectory: true)
+        try FileManager.default.createDirectory(at: pages, withIntermediateDirectories: true)
+        let page = pages.appendingPathComponent("中文 #?.html")
+        try "page".write(to: page, atomically: true, encoding: .utf8)
+        let resource = try #require(HTMLPreviewDocument.resourceURL(for: page, within: project))
+        let rootAsset = try #require(URL(string: "/assets/style.css?v=2#color", relativeTo: resource)?.absoluteURL)
+        let relativeAsset = try #require(URL(string: "../assets/style.css", relativeTo: resource)?.absoluteURL)
+        let expected = project.appendingPathComponent("assets/style.css").resolvingSymlinksInPath()
+        #expect(HTMLPreviewDocument.fileURL(for: resource, within: project) == page.resolvingSymlinksInPath())
+        #expect(HTMLPreviewDocument.fileURL(for: rootAsset, within: project) == expected)
+        #expect(HTMLPreviewDocument.fileURL(for: relativeAsset, within: project) == expected)
+        let folder = try #require(URL(string: "/pages/", relativeTo: resource)?.absoluteURL)
+        #expect(HTMLPreviewDocument.fileURL(for: folder, within: project) == pages.appendingPathComponent("index.html").resolvingSymlinksInPath())
+        for address in ["agentidea-html://other/a", "agentidea-html://user@preview/a", "agentidea-html://preview:80/a", "file:///etc/passwd"] {
+            #expect(HTMLPreviewDocument.fileURL(for: URL(string: address)!, within: project) == nil)
+        }
+        // 目录的默认首页也必须校验符号链接，不能绕过读取范围。
+        let outside = project.deletingLastPathComponent().appendingPathComponent("outside-\(UUID().uuidString).html")
+        try "secret".write(to: outside, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        try FileManager.default.createSymbolicLink(at: pages.appendingPathComponent("index.html"), withDestinationURL: outside)
+        #expect(HTMLPreviewDocument.fileURL(for: folder, within: project) == nil)
     }
 }
 

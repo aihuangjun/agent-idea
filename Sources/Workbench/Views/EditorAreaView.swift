@@ -267,6 +267,11 @@ private struct EditorHeader: View {
             .controlSize(.small)
             .frame(width: 160)
         } else if let url = tab.fileURL, FileCategory.isHTML(named: url.lastPathComponent) {
+            if tab.htmlView == .preview {
+                IconButton(ToolWindowIcon.refresh, help: "刷新预览（⌘R）：重新加载页面与本地资源", size: 22) { session.refreshAll() }
+            } else {
+                wordWrapControl
+            }
             Picker("HTML 显示方式", selection: Binding(get: { tab.htmlView }, set: { session.setHTMLView($0) })) {
                 ForEach(HTMLView.allCases, id: \.self) { Text($0.label).tag($0) }
             }

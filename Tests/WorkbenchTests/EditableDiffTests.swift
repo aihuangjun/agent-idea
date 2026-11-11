@@ -129,6 +129,51 @@ private func makeSession(in directory: URL, active: Bool = true, renderer: Conte
     }
 }
 
+@Test @MainActor func refreshingHTMLReloadsResourcesWhilePreservingTheDraftAndSourceEdits() async throws {
+    try await withTemporaryDirectory { directory in
+        let file = directory.appendingPathComponent("page.htm")
+        let style = directory.appendingPathComponent("style.css")
+        try "<h1>disk</h1>".write(to: file, atomically: true, encoding: .utf8)
+        try "h1 { color: rgb(12, 34, 56); }".write(to: style, atomically: true, encoding: .utf8)
+        let renderer = ContentRenderer()
+        let (session, _) = makeSession(in: directory, active: false, renderer: renderer)
+        defer { session.tearDown() }
+        session.openFile(file, pinned: true)
+        let draft = "<link rel='stylesheet' href='/style.css'><h1>draft</h1>"
+        session.applyEdit(path: file.path, text: draft)
+        var htmlRenders = 0, sourceRendered = false
+        renderer.onRendered = { kind, _ in
+            if kind == "html" { htmlRenders += 1 }
+            if kind == "code" { sourceRendered = true }
+        }
+        session.setActive(true)
+        await waitUntil { htmlRenders > 0 }
+        #expect(htmlRenders > 0)
+        try "h1 { color: rgb(65, 43, 21); }".write(to: style, atomically: true, encoding: .utf8)
+        let beforeRefresh = htmlRenders
+        session.refreshAll()
+        await waitUntil { htmlRenders > beforeRefresh }
+        #expect(htmlRenders > beforeRefresh)
+        let result = try await renderer.displayedWebView.evaluateJavaScript("[document.querySelector('h1').textContent, getComputedStyle(document.querySelector('h1')).color].join('|')") as? String
+        #expect(result == "draft|rgb(65, 43, 21)")
+        #expect(try String(contentsOf: file, encoding: .utf8) == "<h1>disk</h1>")
+        #expect(session.drafts[EditorTab.id(forFile: file)] == draft)
+
+        session.setHTMLView(.source)
+        await waitUntil { sourceRendered }
+        #expect(sourceRendered)
+        let newDraft = "<h1>latest editor text</h1>"
+        _ = try await renderer.webView.callAsyncJavaScript("document.querySelector('.CodeMirror').CodeMirror.setValue(text)", arguments: ["text": newDraft], in: nil, in: .page)
+        let beforeSwitch = htmlRenders
+        // 不等 edited 消息的去抖：切视图必须先向编辑器收取最新文字。
+        session.setHTMLView(.preview)
+        await waitUntil { htmlRenders > beforeSwitch }
+        #expect(htmlRenders > beforeSwitch)
+        #expect(try await renderer.displayedWebView.evaluateJavaScript("document.querySelector('h1').textContent") as? String == "latest editor text")
+        #expect(session.drafts[EditorTab.id(forFile: file)] == newDraft)
+    }
+}
+
 @Test @MainActor func rollbackKeepsDraftInUndoAndDoesNotSaveOldEditorOverRestoredFile() async throws {
     try await withTemporaryDirectory { directory in
         let file = directory.appendingPathComponent("m.txt")

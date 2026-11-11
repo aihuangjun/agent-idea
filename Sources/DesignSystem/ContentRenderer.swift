@@ -98,6 +98,7 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     /// HTML 不装 message handler，页面脚本无法向编辑器发送 edited / openPath 等消息。
     fileprivate var htmlWebView: CursorRestoringWebView?
     private var showingHTML = false
+    private var htmlNavigation: WKNavigation?
     private let htmlPreviewHandler = HTMLPreviewHandler()
     /// 渲染页按需取 tree-sitter 的 WASM 与查询（file:// 页面 fetch 不到本地文件）。
     private let webAssetHandler: WebAssetHandler
@@ -286,11 +287,16 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         if case .diff(_, _, _, _, _, let edit?) = payload.content {
             completedDiffReview = DiffReviewInput(path: edit.filePath, oldText: edit.oldText, newText: edit.newText, options: payload.diffReading)
         } else { completedDiffReview = nil }
+        let wasShowingHTML = showingHTML
         showingHTML = payload.kindName == "html"
         webView.isHidden = showingHTML
         htmlWebView?.isHidden = !showingHTML
         lastPayload = payload
         if case .html(let path, let text, let directory) = payload.content {
+            guard let documentURL = HTMLPreviewDocument.resourceURL(for: URL(fileURLWithPath: path), within: directory) else {
+                render(.message("HTML 预览失败", "文件不在当前项目目录内。请切换到源码查看。"))
+                return
+            }
             if htmlWebView == nil {
                 let configuration = WKWebViewConfiguration()
                 configuration.websiteDataStore = .nonPersistent()
@@ -301,18 +307,30 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
                 preview.onFindInPath = { [weak self] in self?.onFindInPath?() }
                 preview.autoresizingMask = [.width, .height]
                 preview.pageZoom = zoom
+                preview.unregisterDraggedTypes()
                 webView.superview?.addSubview(preview)
                 htmlWebView = preview
             }
             htmlWebView?.isHidden = false
-            let documentURL = HTMLPreviewDocument.resourceURL(for: URL(fileURLWithPath: path))
+            htmlNavigation = nil
+            htmlWebView?.stopLoading()
             htmlPreviewHandler.documentURL = documentURL
             htmlPreviewHandler.resourceDirectory = directory
             htmlPreviewHandler.document = Data(HTMLPreviewDocument.resolvingResources(in: text, relativeTo: documentURL).utf8)
-            htmlWebView?.load(URLRequest(url: documentURL, cachePolicy: .reloadIgnoringLocalCacheData))
+            htmlNavigation = htmlWebView?.load(URLRequest(url: documentURL, cachePolicy: .reloadIgnoringLocalCacheData))
             return
         }
-        htmlWebView?.stopLoading()
+        htmlNavigation = nil
+        if wasShowingHTML {
+            htmlWebView?.stopLoading()
+            // stopLoading 只停网络加载，已运行的游戏循环、定时器和 WebGL 资源仍在。
+            // 切到源码 / 其它正文时卸载文档，保留轻量的 WebView 外壳供下次预览复用。
+            // 连续重画非 HTML 正文时不能再 stopLoading，否则会取消尚未完成的卸载。
+            htmlWebView?.loadHTMLString("", baseURL: nil)
+            htmlPreviewHandler.document = Data()
+            htmlPreviewHandler.documentURL = nil
+            htmlPreviewHandler.resourceDirectory = nil
+        }
         guard isReady else {
             pendingPayload = payload
             return
@@ -530,13 +548,28 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
 
     public func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if webView === htmlWebView {
-            if showingHTML, let payload = lastPayload {
+            if showingHTML, navigation === htmlNavigation, let payload = lastPayload {
                 htmlWebView?.evaluateJavaScript("window.scrollTo(0, \(payload.scrollTop))")
                 onRendered?("html", 0)
             }
             return
         }
         markReadyAndFlush()
+    }
+
+    public func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        htmlPreviewFailed(webView, navigation: navigation, error: error)
+    }
+
+    public func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        htmlPreviewFailed(webView, navigation: navigation, error: error)
+    }
+
+    private func htmlPreviewFailed(_ webView: WKWebView, navigation: WKNavigation?, error: Error) {
+        guard webView === htmlWebView, showingHTML, navigation === htmlNavigation,
+              (error as NSError).code != NSURLErrorCancelled else { return }
+        Log.warn("web", "HTML 预览失败：\(error.localizedDescription)")
+        render(.message("HTML 预览失败", "点击「刷新预览」重试，或切换到源码查看。\n\(error.localizedDescription)"))
     }
 
     /// 只允许加载我们自己的 shell 页面。正文里的链接一旦真的导航出去，`window.ide` 就没了。
@@ -546,17 +579,23 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
         if webView === htmlWebView {
+            guard showingHTML else {
+                decisionHandler(navigationAction.request.url?.absoluteString == "about:blank" ? .allow : .cancel)
+                return
+            }
             if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
                 decisionHandler(.cancel)
-                if let fragment = url.fragment, case .html(let path, _, _)? = lastPayload?.content,
-                   url.scheme == HTMLPreviewDocument.resourceScheme, url.path == path {
+                if let fragment = url.fragment, url.scheme == HTMLPreviewDocument.resourceScheme,
+                   url.host == htmlPreviewHandler.documentURL?.host, url.path == htmlPreviewHandler.documentURL?.path {
                     webView.callAsyncJavaScript("document.getElementById(fragment)?.scrollIntoView()", arguments: ["fragment": fragment], in: nil, in: .page) { _ in }
-                } else if url.isFileURL || url.scheme == HTMLPreviewDocument.resourceScheme { onOpenPath?(url.path) }
+                } else if let directory = htmlPreviewHandler.resourceDirectory,
+                          let file = HTMLPreviewDocument.fileURL(for: url, within: directory) { onOpenPath?(file.path) }
                 else if ["https", "http"].contains(url.scheme ?? "") { onOpenExternal?(url) }
             } else {
                 // 正文里的脚本可以运行，但不能把预览悄悄导航到别的主页面。
                 let url = navigationAction.request.url
-                let isPreview = url?.scheme == HTMLPreviewDocument.resourceScheme && url?.path == htmlPreviewHandler.documentURL?.path
+                let isPreview = url?.scheme == HTMLPreviewDocument.resourceScheme && url?.host == htmlPreviewHandler.documentURL?.host
+                    && url?.path == htmlPreviewHandler.documentURL?.path
                 // 不允许子框架绕过资源协议加载任意 file:// 文档。
                 let isLocalFile = url?.isFileURL == true
                 decisionHandler(!isLocalFile && (navigationAction.targetFrame?.isMainFrame == false || isPreview) ? .allow : .cancel)

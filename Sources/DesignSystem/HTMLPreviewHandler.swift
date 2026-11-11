@@ -29,7 +29,9 @@ final class HTMLPreviewHandler: NSObject, WKURLSchemeHandler {
                 let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: [
                     "Content-Type": mime + (isDocument ? "; charset=utf-8" : ""),
                     "Content-Length": String(data.count),
-                    "Cache-Control": "no-store"
+                    "Cache-Control": "no-store",
+                    // 自定义协议的 origin 是 null；模块脚本与 fetch 仍要经过 CORS 校验。
+                    "Access-Control-Allow-Origin": "*"
                 ])!
                 urlSchemeTask.didReceive(response)
                 urlSchemeTask.didReceive(data)
