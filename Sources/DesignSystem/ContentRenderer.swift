@@ -23,6 +23,7 @@ final class CursorRestoringWebView: WKWebView {
     var onFind: (() -> Void)?
     var onFindInPath: (() -> Void)?
     var contextActions: (() -> [ContentRenderer.ContextAction])?
+    var sourceActions: ((CGPoint) -> [ContentRenderer.ContextAction])?
 
     /// 每个进程只把 WebKit 原始的右键菜单记一次日志（`ContextMenuPruning.describe`）。
     private static var loggedOriginalMenu = false
@@ -35,7 +36,11 @@ final class CursorRestoringWebView: WKWebView {
         }
         // WebKit 给可编辑文字的那一套（拼写、替换、字体、语音、段落方向……）在代码编辑器里没用，只留白名单
         ContextMenuPruning.prune(menu)
-        let actions = contextActions?() ?? []
+        var actions = contextActions?() ?? []
+        let point = convert(event.locationInWindow, from: nil)
+        let viewport = CGPoint(x: (point.x - bounds.minX) / pageZoom,
+                               y: (isFlipped ? point.y - bounds.minY : bounds.maxY - point.y) / pageZoom)
+        actions.insert(contentsOf: sourceActions?(viewport) ?? [], at: 0)
         guard !actions.isEmpty else { return }
         if !menu.items.isEmpty { menu.insertItem(.separator(), at: 0) }
         for action in actions.reversed() {
@@ -95,6 +100,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         }
     }
     public var contextActions: (() -> [ContextAction])?
+    public var onGoToDefinition: ((_ sourcePath: String, _ point: CGPoint?) -> Void)?
+    public var onJavaImplementations: ((_ sourcePath: String, _ point: CGPoint) -> Void)?
     /// HTML 不装 message handler，页面脚本无法向编辑器发送 edited / openPath 等消息。
     fileprivate var htmlWebView: CursorRestoringWebView?
     private var showingHTML = false
@@ -255,6 +262,14 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         (webView as? CursorRestoringWebView)?.onFind = { [weak self] in self?.onFind?() }
         (webView as? CursorRestoringWebView)?.onFindInPath = { [weak self] in self?.onFindInPath?() }
         (webView as? CursorRestoringWebView)?.contextActions = { [weak self] in self?.contextActions?() ?? [] }
+        (webView as? CursorRestoringWebView)?.sourceActions = { [weak self] point in
+            guard let self, let path = definitionPath else { return [] }
+            var actions = [ContextAction(title: "跳转到定义（F3）") { [weak self] in self?.onGoToDefinition?(path, point) }]
+            if URL(fileURLWithPath: path).pathExtension.lowercased() == "java", onJavaImplementations != nil {
+                actions.append(ContextAction(title: "查看实现类") { [weak self] in self?.onJavaImplementations?(path, point) })
+            }
+            return actions
+        }
         // 正文区不接文件拖放：拖进来的目录该由窗口那一层当「打开项目」处理，WebKit 接了会当成导航。
         webView.unregisterDraggedTypes()
         loadShell()
@@ -457,6 +472,105 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
             let text = value as? String
             completion(text?.isEmpty == false ? text : nil)
         }
+    }
+
+    // MARK: - 定义导航
+
+    private var definitionPath: String? {
+        let path: String
+        switch lastPayload?.content {
+        case .code(let source, _, _, _, _, _, _): path = source
+        case .diff(_, _, _, _, _, let edit?) where !edit.readOnly: path = edit.filePath
+        default: return nil
+        }
+        return DefinitionSearch.extensions(for: URL(fileURLWithPath: path)).isEmpty ? nil : path
+    }
+
+    public struct DefinitionReference: Codable, Sendable {
+        public struct Position: Codable, Sendable {
+            public let line: Int
+            public let ch: Int
+        }
+        struct Module: Codable, Sendable {
+            let path: String
+            let language: String
+            let sourcePath: String
+        }
+        public let name: String
+        public let local: [Position]
+        public let sameFileCandidates: [Position]?
+        public let uncertain: Bool?
+        let owner: String?
+        let member: Bool
+        let arity: Int?
+        let kind: String?
+        let namespace: String?
+        let imported: String?
+        let fromModule: Module?
+
+        public var preferredFileStem: String {
+            if let fromModule, ["javascript", "typescript", "tsx"].contains(fromModule.language) {
+                return ((fromModule.path as NSString).lastPathComponent as NSString).deletingPathExtension
+            }
+            return owner ?? name
+        }
+    }
+
+    public struct DefinitionHit: Decodable, Sendable {
+        public let path: String
+        public let line: Int
+        public let ch: Int
+        public let preferred: Bool
+    }
+
+    public func definitionReference(path: String, point: CGPoint?) async throws -> DefinitionReference? {
+        try await editorReference("definitionReference", path: path, point: point)
+    }
+
+    public func javaTypeReference(path: String, point: CGPoint?) async throws -> JavaTypeReference? {
+        try await editorReference("javaTypeReference", path: path, point: point)
+    }
+
+    private func editorReference<T: Decodable>(_ method: String, path: String, point: CGPoint?) async throws -> T? {
+        guard isReady, path == definitionPath else { return nil }
+        let request = renderRequest
+        var arguments: [String: Any] = ["path": path, "point": NSNull()]
+        if let point { arguments["point"] = ["x": point.x, "y": point.y] }
+        let value = try await webView.callAsyncJavaScript(
+            "return JSON.stringify(await window.ide.\(method)(path, point))",
+            arguments: arguments, in: nil, contentWorld: .page
+        )
+        guard renderRequest == request, let json = value as? String else { return nil }
+        return try JSONDecoder().decode(T?.self, from: Data(json.utf8))
+    }
+
+    public func findDefinitions(_ reference: DefinitionReference, in sources: [DefinitionSearch.Source]) async throws -> [DefinitionHit] {
+        guard !sources.isEmpty else { return [] }
+        let encoder = JSONEncoder()
+        let value = try await webView.callAsyncJavaScript(
+            "return JSON.stringify(await window.ide.findDefinitions(JSON.parse(reference), JSON.parse(sources)))",
+            arguments: [
+                "reference": String(decoding: try encoder.encode(reference), as: UTF8.self),
+                "sources": String(decoding: try encoder.encode(sources), as: UTF8.self),
+            ], in: nil, contentWorld: .page
+        )
+        guard let json = value as? String else { return [] }
+        return try JSONDecoder().decode([DefinitionHit].self, from: Data(json.utf8))
+    }
+
+    public func sourceOutlines(in sources: [DefinitionSearch.Source]) async throws -> [SourceOutline] {
+        guard !sources.isEmpty else { return [] }
+        // 搜索框可以在工作台启动、正文还在载入时打开。等 shell 就绪后只传本批源码。
+        let deadline = ContinuousClock.now + .seconds(10)
+        while !isReady && ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(30)) }
+        guard isReady else { throw CocoaError(.fileReadUnknown) }
+        let json = String(decoding: try JSONEncoder().encode(sources), as: UTF8.self)
+        let value = try await webView.callAsyncJavaScript(
+            "return JSON.stringify(await window.ide.sourceOutlines(JSON.parse(sources)))",
+            arguments: ["sources": json], in: nil, contentWorld: .page
+        )
+        guard let result = value as? String else { throw CocoaError(.fileReadCorruptFile) }
+        return try JSONDecoder().decode([SourceOutline].self, from: Data(result.utf8))
     }
 
     /// 编辑器里的撤销 / 重做（CodeMirror 自己的历史）。回调告诉调用方页面里有没有编辑器接下这一步：
@@ -673,6 +787,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
             }
         case "find":
             onFind?()
+        case "definition":
+            if let path = body["path"] as? String, path == definitionPath { onGoToDefinition?(path, nil) }
         default:
             break
         }

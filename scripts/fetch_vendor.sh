@@ -53,8 +53,12 @@ fetch "https://cdn.jsdelivr.net/npm/web-tree-sitter@$TS_RUNTIME/web-tree-sitter.
 } > "$WEB/$TS/web-tree-sitter.js"
 rm "$WEB/$TS/web-tree-sitter.cjs"
 # 「npm 包@版本:wasm 名」。TypeScript 一个包出两个语法（.ts 与 .tsx）。
-for grammar in java@0.23.5:java cpp@0.23.4:cpp python@0.25.0:python go@0.25.0:go javascript@0.23.1:javascript typescript@0.23.2:typescript typescript@0.23.2:tsx json@0.24.8:json; do
+for grammar in java@0.23.5:java cpp@0.23.4:cpp python@0.25.0:python go@0.25.0:go javascript@0.23.1:javascript typescript@0.23.2:typescript typescript@0.23.2:tsx json@0.24.8:json swift@0.7.3:swift; do
   package="${grammar%%:*}"
+  if [[ "${grammar##*:}" == swift ]]; then
+    fetch "https://github.com/alex-pinkus/tree-sitter-swift/releases/download/${package#*@}/tree-sitter-swift.wasm" "tree-sitter/tree-sitter-swift.wasm"
+    continue
+  fi
   fetch "https://cdn.jsdelivr.net/npm/tree-sitter-$package/tree-sitter-${grammar##*:}.wasm" "tree-sitter/tree-sitter-${grammar##*:}.wasm"
 done
 # 「npm 包@版本:查询文件」。C++ 的查询要叠在 C 上、TypeScript 叠在 JavaScript 上，版本取各自语法包依赖的那一版。

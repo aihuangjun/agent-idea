@@ -33,14 +33,15 @@
    * grammar → vendor/tree-sitter/tree-sitter-<grammar>.wasm；highlights → vendor/tree-sitter/queries/<x>.scm（按顺序叠）；
    * own → syntax/<x>.scm（自写，叠在官方后面）；locals → syntax/<x>-locals.scm（自写的作用域查询，按顺序拼起来）。 */
   const LANGUAGES = [
-    { id: "java", languages: ["java"], extensions: [], grammar: "java", highlights: ["java/highlights"], own: ["java"], locals: ["java"] },
+    { id: "java", languages: ["java"], extensions: ["java"], grammar: "java", highlights: ["java/highlights"], own: ["java"], locals: ["java"] },
     { id: "cpp", languages: ["cpp", "c"], extensions: ["h", "hpp", "hh", "hxx", "c", "cc", "cpp", "cxx", "ino"], grammar: "cpp", highlights: ["c/highlights", "cpp/highlights"], own: ["cpp"], locals: ["cpp"] },
-    { id: "python", languages: ["python"], extensions: [], grammar: "python", highlights: ["python/highlights"], own: ["python"], locals: ["python"] },
-    { id: "go", languages: ["go"], extensions: [], grammar: "go", highlights: ["go/highlights"], own: ["go"], locals: ["go"] },
+    { id: "python", languages: ["python"], extensions: ["py", "pyi", "pyw"], grammar: "python", highlights: ["python/highlights"], own: ["python"], locals: ["python"] },
+    { id: "go", languages: ["go"], extensions: ["go"], grammar: "go", highlights: ["go/highlights"], own: ["go"], locals: ["go"] },
     { id: "javascript", languages: ["javascript"], extensions: ["js", "mjs", "cjs", "jsx"], grammar: "javascript", highlights: ["javascript/highlights", "javascript/highlights-jsx", "javascript/highlights-params"], own: ["ecmascript", "jsx"], locals: ["ecmascript", "javascript"] },
     { id: "typescript", languages: ["typescript"], extensions: ["ts", "mts", "cts"], grammar: "typescript", highlights: ["javascript/highlights", "typescript/highlights"], own: ["ecmascript", "typescript"], locals: ["ecmascript", "typescript"] },
     { id: "tsx", languages: [], extensions: ["tsx"], grammar: "tsx", highlights: ["javascript/highlights", "javascript/highlights-jsx", "typescript/highlights"], own: ["ecmascript", "typescript", "jsx"], locals: ["ecmascript", "typescript"] },
     { id: "json", languages: ["json"], extensions: [], grammar: "json", highlights: ["json/highlights"], own: ["json"], locals: [] },
+    { id: "swift", languages: ["swift"], extensions: ["swift"], grammar: "swift", highlights: [], own: [], locals: ["swift"] },
   ];
 
   /* 捕获名 → token 类（cm-ts-<类>）。按最长前缀查：function.declaration 先于 function。 */
@@ -299,7 +300,7 @@
   /* 只读视图：整份文本着色成每行一段 HTML（行数与 text.split("\n") 去掉末尾空行后一致）。没就绪 / 超限回 null。 */
   function highlightLines(language, path, text) {
     const spec = specFor(language, path);
-    if (!spec || text.length > SIZE_LIMIT) return null;
+    if (!spec || !spec.highlights.length || text.length > SIZE_LIMIT) return null;
     const entry = loaded.get(spec.id);
     const rt = entry && entry.value;
     if (!rt) return null;
@@ -487,7 +488,7 @@
   /* 给编辑器装上 tree-sitter 着色。语法包已就绪就同步装（首屏就是新颜色），否则先用 CodeMirror 的 mode，加载完再换。 */
   function attach(cm, language, path) {
     const spec = specFor(language, path);
-    if (!spec || !cm) return;
+    if (!spec || !spec.highlights.length || !cm) return;
     const install = (rt) => {
       if (!rt || !cm.getWrapperElement().isConnected || cm.state.treeSitter) return;
       if (cm.getValue().length > SIZE_LIMIT) return;
@@ -510,10 +511,19 @@
   /* 只读视图要不要等着换上 tree-sitter：有对应的语法、没超限、还没加载完。回 Promise<是否就绪>。 */
   function whenReady(language, path, text) {
     const spec = specFor(language, path);
-    if (!spec || text.length > SIZE_LIMIT) return null;
+    if (!spec || !spec.highlights.length || text.length > SIZE_LIMIT) return null;
     const entry = loaded.get(spec.id);
     if (entry && (entry.value || entry.failed)) return null;
     return load(spec).then((rt) => !!rt);
+  }
+
+  // 导航复用当前编辑器的语法树。其它文件的临时树用完就释放，避免挤掉最近的编辑器缓存。
+  function withTree(rt, text, cm, visit) {
+    const syntax = cm && cm.state.treeSitter;
+    if (syntax && syntax.tree && syntax.rt === rt && cm.getValue() === text) return visit(syntax.tree);
+    const tree = parse(rt, text, null);
+    if (!tree) return null;
+    try { return visit(tree); } finally { tree.delete(); }
   }
 
   global.Syntax = {
@@ -525,6 +535,7 @@
     attach,
     releaseAll,
     whenReady,
+    withTree,
     /* 测试用：让之后的加载全部失败（核对退路），或换资源地址。已加载的语言一并清掉。 */
     resetForTesting(options) {
       simulateFailure = !!(options && options.fail);

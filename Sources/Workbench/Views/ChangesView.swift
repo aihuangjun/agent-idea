@@ -59,13 +59,17 @@ struct ChangesView: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if !session.changeGroups.tracked.isEmpty {
-                        GroupHeader(title: "变更", changes: session.changeGroups.tracked, commit: commit, isCollapsed: $trackedCollapsed)
+                        let changes = session.changeGroups.tracked
+                        GroupHeader(title: "变更", changes: changes, commit: commit, isCollapsed: $trackedCollapsed)
+                            .contextMenu { bulkMenu(changes, commit: commit, rollbackTitle: "回滚所有变更") }
                         if !trackedCollapsed {
                             treeRows(tracked, selected: selected, collapsed: $trackedDirectories, commit: commit)
                         }
                     }
                     if !session.changeGroups.untracked.isEmpty {
-                        GroupHeader(title: "未跟踪文件", changes: session.changeGroups.untracked, commit: commit, isCollapsed: $untrackedCollapsed)
+                        let changes = session.changeGroups.untracked
+                        GroupHeader(title: "未跟踪文件", changes: changes, commit: commit, isCollapsed: $untrackedCollapsed)
+                            .contextMenu { bulkMenu(changes, commit: commit) }
                         if !untrackedCollapsed {
                             treeRows(untracked, selected: selected, collapsed: $untrackedDirectories, commit: commit)
                         }
@@ -128,7 +132,19 @@ struct ChangesView: View {
                 ChangeDirectoryRow(row: item, commit: commit, isCollapsed: collapsed.wrappedValue.contains(item.path)) {
                     if !collapsed.wrappedValue.insert(item.path).inserted { collapsed.wrappedValue.remove(item.path) }
                 }
+                .contextMenu { bulkMenu(item.changes, commit: commit) }
             }
+        }
+    }
+
+    @ViewBuilder private func bulkMenu(_ changes: [GitChange], commit: CommitController, rollbackTitle: String? = nil) -> some View {
+        let rollbackable = changes.filter { $0.kind != .untracked }
+        if !rollbackable.isEmpty {
+            Button(rollbackTitle ?? "回滚 \(rollbackable.count) 个文件") { session.rollback(rollbackable) }
+        }
+        let deletable = changes.filter(commit.canDelete).count
+        if deletable > 0 {
+            Button("删除 \(deletable) 个文件…") { requestDelete(changes, commit: commit) }
         }
     }
 
@@ -219,6 +235,7 @@ private struct ChangeDirectoryRow: View {
         }
         .padding(.trailing, 10)
         .frame(height: Theme.treeRowHeight)
+        .contentShape(Rectangle())
         .help(row.path)
     }
 }
@@ -255,6 +272,7 @@ private struct GroupHeader: View {
         }
         .padding(.horizontal, 10)
         .frame(height: Theme.treeRowHeight)
+        .contentShape(Rectangle())
     }
 }
 

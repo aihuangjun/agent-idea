@@ -1,4 +1,5 @@
 import AppKit
+import Core
 import DesignSystem
 import ObjectiveC
 import SwiftUI
@@ -8,23 +9,48 @@ import SwiftUI
 ///
 /// SwiftUI 的 `Window` 场景没有直接改 NSWindow 的入口，只能挂一个空 NSView 进去，等它被放进窗口时动手。
 struct WindowConfigurator: NSViewRepresentable {
+    var onDoubleShift: () -> Void = {}
+
     func makeNSView(context: Context) -> NSView {
         let view = ConfiguringView()
+        view.onDoubleShift = onDoubleShift
         view.setContentHuggingPriority(.defaultLow, for: .horizontal)
         return view
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? ConfiguringView)?.onDoubleShift = onDoubleShift
+    }
 
     private final class ConfiguringView: NSView {
+        var onDoubleShift: () -> Void = {}
+        private var shift = DoubleShiftDetector()
+        private var monitor: Any?
+
+        deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
+            shift.reset()
             guard let window else { return }
             window.titlebarAppearsTransparent = true
             window.titlebarSeparatorStyle = .none
             window.backgroundColor = NSColor(Theme.panel)
             window.isMovableByWindowBackground = false
             FirstMouse.enableGlobally()
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
+                self?.detectDoubleShift(event)
+                return event
+            }
+        }
+
+        private func detectDoubleShift(_ event: NSEvent) {
+            let modifiers = event.modifierFlags.intersection([.shift, .control, .command, .option, .function])
+            guard let window, window.isKeyWindow, window.attachedSheet == nil,
+                  event.type == .flagsChanged, event.keyCode == 56 || event.keyCode == 60,
+                  modifiers.isEmpty || modifiers == .shift else { shift.reset(); return }
+            if shift.shift(isDown: modifiers == .shift, at: event.timestamp) { onDoubleShift() }
         }
     }
 }

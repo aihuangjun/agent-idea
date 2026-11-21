@@ -226,6 +226,8 @@ public struct AgentIDEARootScene: Scene {
     /// 导航（IDEA 的 Navigate）：找文件、跳到行、定位、后退前进、变更之间、标签与项目之间。
     @CommandsBuilder private var navigateCommands: some Commands {
         CommandMenu("导航") {
+            Button("全局搜索…（⇧⇧）") { workbench.active?.showProjectSearch() }
+                .disabled(workbench.active == nil)
             Button("查找文件…") {
                 workbench.toolWindow = .project
                 workbench.active?.search.activate()
@@ -240,6 +242,9 @@ public struct AgentIDEARootScene: Scene {
             Button("跳到行…") { workbench.active?.showGoToLine() }
                 .keyboardShortcut("l", modifiers: .command)
                 .disabled(!(workbench.active?.canGoToLine ?? false))
+            Button("跳转到定义") { workbench.active?.goToDefinition() }
+                .keyboardShortcut(.f3, modifiers: [])
+                .disabled(workbench.active?.definitionSource == nil)
             Button("在项目视图中定位当前文件") { workbench.active?.revealActiveTab() }
                 .keyboardShortcut("l", modifiers: [.command, .option])
                 .disabled(workbench.active?.activeTab == nil)

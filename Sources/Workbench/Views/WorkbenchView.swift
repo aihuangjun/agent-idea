@@ -24,7 +24,7 @@ struct WorkbenchView: View {
         }
         .background(Theme.editorBackground)
         .foregroundStyle(Theme.text)
-        .background(WindowConfigurator().frame(width: 0, height: 0))
+        .background(WindowConfigurator { workbench.active?.showProjectSearch() }.frame(width: 0, height: 0))
         .overlay {
             if isDropTargeted {
                 RoundedRectangle(cornerRadius: 8)
@@ -88,6 +88,7 @@ private struct ProjectContent: View {
         }
         // ⌘E 最近的文件：浮在整个项目主体上，没有标签时也能用
         .overlay(alignment: .top) { RecentFilesPopup(session: session, recent: session.recentFiles) }
+        .overlay(alignment: .top) { ProjectSearchPopup(session: session, search: session.projectSearch) }
         StatusBarView(session: session)
     }
 }

@@ -13,6 +13,7 @@ public struct FocusedTextField: NSViewRepresentable {
     private let placeholder: String
     private let focusRequests: Int
     private let initialSelection: Range<String.Index>?
+    private let onTab: ((Bool) -> Void)?
     private let onKey: (Key) -> Bool
     private let onFocusChange: (Bool) -> Void
 
@@ -23,10 +24,19 @@ public struct FocusedTextField: NSViewRepresentable {
         text: Binding<String>, placeholder: String = "", focusRequests: Int = 0, initialSelection: Range<String.Index>? = nil,
         onKey: @escaping (Key) -> Bool = { _ in false }, onFocusChange: @escaping (Bool) -> Void = { _ in }
     ) {
+        self.init(text: text, placeholder: placeholder, focusRequests: focusRequests, initialSelection: initialSelection,
+                  onTab: nil, onKey: onKey, onFocusChange: onFocusChange)
+    }
+
+    public init(
+        text: Binding<String>, placeholder: String = "", focusRequests: Int = 0, initialSelection: Range<String.Index>? = nil,
+        onTab: ((Bool) -> Void)?, onKey: @escaping (Key) -> Bool, onFocusChange: @escaping (Bool) -> Void = { _ in }
+    ) {
         _text = text
         self.placeholder = placeholder
         self.focusRequests = focusRequests
         self.initialSelection = initialSelection
+        self.onTab = onTab
         self.onKey = onKey
         self.onFocusChange = onFocusChange
     }
@@ -114,6 +124,11 @@ public struct FocusedTextField: NSViewRepresentable {
         }
 
         public func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            if let onTab = parent.onTab,
+               selector == #selector(NSResponder.insertTab(_:)) || selector == #selector(NSResponder.insertBacktab(_:)) {
+                onTab(selector == #selector(NSResponder.insertBacktab(_:)))
+                return true
+            }
             let key: Key
             switch selector {
             case #selector(NSResponder.moveUp(_:)): key = .up

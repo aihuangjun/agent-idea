@@ -121,6 +121,8 @@ final class WorkbenchModel: ObservableObject {
         self.renderer.onShellReloaded = { [weak self] in self?.active?.renderActiveTab() }
         self.renderer.onFind = { [weak self] in self?.active?.showFind() }
         self.renderer.onFindInPath = { [weak self] in self?.active?.showFindInPath() }
+        self.renderer.onGoToDefinition = { [weak self] path, point in self?.active?.goToDefinition(path: path, point: point) }
+        self.renderer.onJavaImplementations = { [weak self] path, point in self?.active?.showJavaImplementations(path: path, point: point) }
         // 正文右键菜单里我们自己的项：复制路径和行号（IDEA 编辑器右键的 Copy Reference）、工作区 diff 的回滚
         self.renderer.contextActions = { [weak self] in
             guard let session = self?.active, let tab = session.activeTab else { return [] }

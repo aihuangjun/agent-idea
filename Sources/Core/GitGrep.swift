@@ -1,6 +1,20 @@
 import Foundation
 
 extension GitClient {
+    /// 定义导航只需要候选文件名。-l 让 git 在每个文件的第一处匹配后停下。
+    func pathsContaining(symbol: String, extensions: Set<String>, in directory: URL) async throws -> [String]? {
+        let arguments = [
+            "-c", "grep.fullName=false", "-c", "grep.fallbackToNoIndex=false",
+            "grep", "-l", "-z", "--untracked", "-I", "-F", "--no-color", "-e", symbol, "--",
+        ] + extensions.sorted().map { ":(glob,icase)**/*.\($0)" }
+        let output = try await runner.run(executable: executable, arguments: arguments, currentDirectory: directory, environment: Self.environment)
+        switch output.status {
+        case 0: return output.standardOutput.split(separator: 0).map { String(decoding: $0, as: UTF8.self) }
+        case 1: return []
+        default: return nil
+        }
+    }
+
     /// 全项目文本搜索的 `git grep`，在 `directory`（项目根）里跑：结果只落在项目里，路径直接是相对项目根的。
     ///
     /// - 退出码 1 是「一处都没找到」，不是错误。

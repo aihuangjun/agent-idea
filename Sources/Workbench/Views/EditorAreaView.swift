@@ -28,6 +28,9 @@ struct EditorAreaView: View {
             }
         }
         .background(Theme.editorBackground)
+        .sheet(item: $session.definitionChoices) { choices in
+            DefinitionPicker(session: session, choices: choices)
+        }
     }
 }
 
@@ -56,11 +59,13 @@ private struct EmptyEditorView: View {
                 shortcut("双击文件打开", "")
                 shortcut("项目 / 提交 / 提交历史 / 查找", "⌘1 / ⌘0 / ⌘9 / ⌘3")
                 shortcut("隐藏工具窗口", "⇧Esc")
+                shortcut("全局搜索", "⇧⇧")
                 shortcut("查找文件", "⇧⌘F")
                 shortcut("最近的文件", "⌘E")
                 shortcut("文件内查找", "⌘F / ⌃F")
                 shortcut("在项目中查找", "⌃⇧F")
                 shortcut("跳到行", "⌘L")
+                shortcut("跳转到定义", "F3")
                 shortcut("在项目视图中定位当前文件", "⌥⌘L")
                 shortcut("复制路径和行号", "⌥⇧⌘C")
                 shortcut("后退 / 前进", "⌥← / ⌥→")

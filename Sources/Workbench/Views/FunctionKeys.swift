@@ -5,6 +5,7 @@ import SwiftUI
 /// （NSMenuItem 的 keyEquivalent、KeyPress.key 用的都是这个字符）。
 extension KeyEquivalent {
     static let f2 = KeyEquivalent(Character(Unicode.Scalar(UInt32(NSF2FunctionKey))!))
+    static let f3 = KeyEquivalent(Character(Unicode.Scalar(UInt32(NSF3FunctionKey))!))
     static let f6 = KeyEquivalent(Character(Unicode.Scalar(UInt32(NSF6FunctionKey))!))
     static let f7 = KeyEquivalent(Character(Unicode.Scalar(UInt32(NSF7FunctionKey))!))
 }

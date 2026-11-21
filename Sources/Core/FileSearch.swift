@@ -10,8 +10,12 @@ public struct FileSearchEntry: Equatable, Hashable, Sendable {
     public let lowercasedPath: [Character]
 
     public init(path: String) {
+        self.init(path: path, name: (path as NSString).lastPathComponent)
+    }
+
+    init(path: String, name: String) {
         self.path = path
-        self.name = (path as NSString).lastPathComponent
+        self.name = name
         self.lowercasedName = Array(name.lowercased())
         self.lowercasedPath = Array(path.lowercased())
     }

@@ -58,6 +58,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     var hasGit: Bool { commit != nil }
     /// 项目视图里的文件搜索。
     let search: FileSearchController
+    let projectSearch: ProjectSearchController
     /// 「查找」工具窗口：全项目文本搜索（⌃⇧F）。
     let textSearch: TextSearchController
     /// 最近的文件（⌘E）：打开过的文件，关掉的也算。
@@ -66,7 +67,9 @@ final class ProjectSession: ObservableObject, Identifiable {
     // MARK: - 编辑区
 
     @Published private(set) var tabs: [EditorTab] = []
-    @Published private(set) var activeTabID: String?
+    @Published private(set) var activeTabID: String? {
+        didSet { if oldValue != activeTabID { cancelDefinitionNavigation() } }
+    }
     @Published private(set) var contents: [String: TabContent] = [:]
     /// 改了还没保存的文本，按标签 id（规则见 `DraftStore`）。
     @Published private(set) var draftStore = DraftStore()
@@ -130,7 +133,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     var onRequestToolWindow: (@MainActor (ToolWindow) -> Void)?
 
     let git: GitClient?
-    private let renderer: ContentRenderer
+    let renderer: ContentRenderer
     let fileManager = FileManager.default
     /// 目录树的展开状态记在这里（按项目根目录分键），下次打开同一个项目原样展开。
     private let defaults: UserDefaults
@@ -142,6 +145,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     private(set) var isActive = false
     private var watcher: ChangeWatcher?
     private var gitTask: Task<Void, Never>?
+    var definitionTask: Task<Void, Never>?
+    @Published var definitionChoices: DefinitionChoices?
     /// 正在按历史后退/前进：这次切换不再记进历史。
     private var isNavigating = false
 
@@ -166,9 +171,18 @@ final class ProjectSession: ObservableObject, Identifiable {
         self.project = project
         self.id = project.root.path
         self.search = FileSearchController(root: project.root)
+        self.projectSearch = ProjectSearchController(root: project.root, renderer: renderer)
         self.recentFiles = RecentFilesController(root: project.root, defaults: defaults)
         // git 先给上：仓库根还没解析出来时就搜也走 git grep；git 说不在仓库里，控制器自己退回逐个读文件
         self.textSearch = TextSearchController(root: project.root, git: git)
+        projectSearch.inputs = { [weak self] in
+            guard let self else { return .init(drafts: [:], isExcluded: { _, _ in false }) }
+            let excluded = self.search.isExcluded
+            let noRepository = self.project.repositoryRoot == nil
+            return .init(drafts: self.draftsByPath, isExcluded: { path, directory in
+                excluded(path, directory) || (noRepository && directory && TextSearchScanner.skipsDirectory(path))
+            })
+        }
         Log.info("project", "打开 \(project.root.path)")
 
         loadChildren(of: project.root.path)
@@ -182,6 +196,7 @@ final class ProjectSession: ObservableObject, Identifiable {
             guard let self else { return }
             self.project.repositoryRoot = repositoryRoot
             if let repositoryRoot = self.project.repositoryRoot {
+                self.projectSearch.invalidate()
                 let controller = CommitController(git: git, repositoryRoot: repositoryRoot)
                 controller.onRolledBack = { [weak self] changes in
                     guard let self else { return }
@@ -216,6 +231,8 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     /// 项目被关掉：没保存的写回去，停监听、停任务。
     func tearDown() {
+        cancelDefinitionNavigation()
+        projectSearch.suspend()
         saveAll()
         gitTask?.cancel()
         history?.cancel()
@@ -227,7 +244,11 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     /// 成为 / 不再是当前项目。成为当前时把活动标签画出来。
     func setActive(_ active: Bool) {
-        if !active, isActive { rememberScrollOfActiveTab() }
+        if !active, isActive {
+            cancelDefinitionNavigation()
+            projectSearch.suspend()
+            rememberScrollOfActiveTab()
+        }
         isActive = active
         if active { renderActiveTab() }
     }
@@ -736,6 +757,7 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     /// ⌘E：弹出最近的文件。已经开着就把焦点拿回输入框。
     func showRecentFiles() {
+        projectSearch.close()
         recentFiles.show(current: activeTab?.fileURL)
     }
 
@@ -1191,9 +1213,11 @@ final class ProjectSession: ObservableObject, Identifiable {
         let id = EditorTab.id(forFile: URL(fileURLWithPath: path))
         let users = tabs.filter { documentID(for: $0) == id }
         guard !users.isEmpty, DraftStore.isEditable(contents[id]), let saved = contents[id]?.text else { return }
+        let previous = draftStore[id]
         if draftStore.apply(text: text, to: id, saved: saved) {
             for tab in users { pin(tab.id) }
         }
+        if previous != draftStore[id] { projectSearch.invalidate() }
     }
 
     /// 编辑器停手时连同文字送来的撤销历史（`edited` 消息带的）：记到当前标签上。
@@ -1557,7 +1581,10 @@ final class ProjectSession: ObservableObject, Identifiable {
             search.isExcluded = { path, isDirectory in
                 index.isIgnored(prefix.isEmpty ? path : prefix + "/" + path, isDirectory: isDirectory)
             }
-            if ignoredChanged { search.markStale() }
+            if ignoredChanged {
+                search.markStale()
+                projectSearch.invalidate()
+            }
         }
 
         // 开着的 diff 标签：变更已经不在了的关掉（比如被提交了），其余重新算
@@ -1707,6 +1734,7 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     /// 手动刷新（⌘R）：目录树整个重列 + 重读开着的文件 + git。
     func refreshAll() {
+        projectSearch.invalidate()
         tree.invalidateAll()
         recomputeRows()
         reloadOpenFilesIfChanged(force: true)
@@ -1735,6 +1763,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         reloadOpenFilesIfChanged()
         refreshGit()
         search.applyChanges(paths)
+        projectSearch.invalidate()
     }
 
     /// 开着的文件在磁盘上变了就重读；当前显示的那个重渲染但保持滚动位置——Agent 正在改的文件用户多半正盯着看。

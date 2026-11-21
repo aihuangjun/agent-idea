@@ -28,6 +28,10 @@
  * window.ide.revealLine({line, ch}) 跳到行（从 0 数，夹到首尾）：编辑器放光标、只读代码视图与只读 diff 表格选中那一行，都滚到正中；
  *   diff 一律按新版本那一侧（并排的右边）。回 true / false（这种视图没有行）。参数同 payload 的 revealLine，可带 length 选中命中。
  * window.ide.selectedText() → 编辑器的选区或只读视图的 DOM 选区文字，没有选区回 ""（在项目中查找拿它预填）。
+ * window.ide.definitionReference(path, point?) → 当前选区、光标或右键位置的标识符、语法上下文及同文件定义（UTF-16）。
+ * window.ide.findDefinitions(reference, sources) → 其它项目文件内的声明位置。
+ * window.ide.javaTypeReference(path, point?) → Java 类型的限定名及当前文件的包与导入。
+ * window.ide.sourceOutlines(sources) → 项目搜索的符号与 Java 继承声明。
  * window.ide.reference() → { from: {line, ch}, to: {line, ch} } 或 null：选区 / 光标在新版本里的位置（从 0 数，复制引用用），
  *   并排 diff 里选的是左边（旧版本）就按差异换算到右边；Markdown 预览、图片这些没有行号的视图回 null。
  * window.ide.navigateChange("next" | "previous") 跳到下一处 / 上一处变更（IDEA 的 F7 / ⇧F7）：编辑器里按光标找、把那一行滚到正中；
@@ -1250,6 +1254,13 @@
     post({type: "diffNavigate", direction: event.key === "ArrowDown" ? "next" : "previous", path: current.path});
   }, true);
 
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "F3" || event.defaultPrevented || event.isComposing ||
+        event.metaKey || event.ctrlKey || event.altKey || event.shiftKey || !definitionDocument()) return;
+    event.preventDefault();
+    if (!event.repeat) post({ type: "definition", path: current.edit?.filePath || current.path });
+  });
+
   // F7 / ⇧F7 在 diff 里同样交给宿主，才能在文件边界继续跳；普通编辑器仍在页内跳。
   document.addEventListener("keydown", (event) => {
     if (event.key !== "F7" || event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -1480,6 +1491,50 @@
     return { from: from || to, to: to || from };
   }
 
+  function definitionDocument(point) {
+    if (!current) return false;
+    if (current.kind === "code") return !current.reformatted;
+    return current.kind === "diff" && editor && current.edit && !current.edit.readOnly && (point || referencePane !== "old");
+  }
+
+  function definitionSelection(point) {
+    if (!point) return selectionReference();
+    if (editor) {
+      const element = document.elementFromPoint(point.x, point.y);
+      if (!element?.closest(".CodeMirror-code") || !editor.getWrapperElement().contains(element)) return null;
+      const position = editor.coordsChar({ left: point.x, top: point.y }, "window");
+      const from = editor.getCursor("from"), to = editor.getCursor("to");
+      if (from.line === position.line && to.line === position.line && from.ch <= position.ch && position.ch < to.ch) return { from, to };
+      return position.outside ? null : { from: position, to: position };
+    }
+    // 只读正文有选区时保留被右键点中的选区，否则定位点击下方的字符。
+    const element = document.elementFromPoint(point.x, point.y);
+    if (!element?.closest(".code-view .line") || element.closest(".ln")) return null;
+    const range = document.caretRangeFromPoint(point.x, point.y);
+    if (!range) return null;
+    const selection = window.getSelection();
+    if (selection && selection.rangeCount && selection.getRangeAt(0).isPointInRange(range.startContainer, range.startOffset)) {
+      return selectionReference();
+    }
+    const position = staticPosition(range.startContainer, range.startOffset);
+    return position ? { from: position, to: position } : null;
+  }
+
+  async function symbolReference(path, point, read) {
+    if (!definitionDocument(point) || path !== (current.edit?.filePath || current.path)) return null;
+    const payload = current, cm = editor;
+    const selection = definitionSelection(point);
+    if (!selection || selection.from.line !== selection.to.line) return null;
+    const text = cm ? cm.getValue() : (payload.text || "").replace(/\r\n?/g, "\n");
+    if (text.length > 2 * 1024 * 1024) return null;
+    const lines = cm ? null : text.split("\n");
+    const offset = cm ? cm.indexFromPos(selection.from)
+      : lines.slice(0, selection.from.line).reduce((sum, line) => sum + line.length + 1, 0) + selection.from.ch;
+    const reference = await read(payload.language, path, text, offset,
+      offset + selection.to.ch - selection.from.ch, cm);
+    return current === payload && (!cm || cm.getValue() === text) ? reference : null;
+  }
+
   /* ---------- 入口 ---------- */
 
   window.ide = {
@@ -1597,6 +1652,18 @@
     /* 选区 / 光标在新版本里的位置（复制引用）；拿不到回 null。 */
     reference() {
       return selectionReference();
+    },
+    definitionReference(path, point) {
+      return symbolReference(path, point, window.Definitions.lookup);
+    },
+    javaTypeReference(path, point) {
+      return symbolReference(path, point, window.Definitions.javaTypeReference);
+    },
+    sourceOutlines(sources) {
+      return window.Definitions.sourceOutlines(sources);
+    },
+    findDefinitions(reference, sources) {
+      return window.Definitions.findInSources(reference, sources);
     },
     /* 上一处 / 下一处变更；回 { index, total }，没有可跳的回 null。 */
     navigateChange(direction) {
