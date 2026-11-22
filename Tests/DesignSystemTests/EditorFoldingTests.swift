@@ -95,6 +95,26 @@ public class Counter {
 }
 """
 
+@Test @MainActor func gitBlameGutterUsesSafeTextAndClearsAfterEdit() async throws {
+    let page = EditorPage()
+    let path = "/p/Counter.java"
+    var clicked: Int?
+    page.renderer.onBlameCommit = { _, line in clicked = line }
+    await page.render(RenderPayload(.code(path: path, text: sample, language: "java", editable: true), blame: [
+        .init(line: 1, label: "Alice", detail: "Alice · <b>Initial commit</b>", committed: true),
+        .init(line: 3, label: "未提交", detail: "尚未提交的改动", committed: false),
+    ]))
+    #expect(await page.string("document.querySelector('button.git-blame-mark').title") == "Alice · <b>Initial commit</b>")
+    #expect(await page.string("document.querySelector('span.git-blame-mark').textContent") == "未提交")
+    _ = await page.evaluate("document.querySelector('button.git-blame-mark').click()")
+    let deadline = Date().addingTimeInterval(10)
+    while clicked == nil && Date() < deadline { try await Task.sleep(nanoseconds: 20_000_000) }
+    #expect(clicked == 1)
+    _ = await page.evaluate("__cm().replaceRange('x', {line:0,ch:0})")
+    #expect(await page.wait(for: "!document.querySelector('.git-blame-mark')"))
+    #expect(await page.wait(for: "!!document.querySelector('.CodeMirror-linenumbers')"))
+}
+
 @Test @MainActor func sourceEditorCommandsAndReplacementInRealWebView() async throws {
     let page = EditorPage()
     let path = "/p/Counter.java"

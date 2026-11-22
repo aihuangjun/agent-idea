@@ -584,6 +584,12 @@ private struct TreeContextMenu: View {
         Divider()
         if !node.isDirectory {
             Button("打开") { session.openFile(node.url, pinned: true) }
+            if copyTargets.count == 2, copyTargets.allSatisfy({ !$0.isDirectory }) {
+                let files = copyTargets.map(\.url)
+                Button("比较文件") { session.compareFiles(files[0], files[1]) }
+            } else if copyTargets.count == 1 {
+                Button("与其他文件比较…") { Desktop.chooseFileToCompare(with: node.url, in: session) }
+            }
             if let change = session.change(for: node.url) {
                 Button("显示 diff") { session.openDiff(change, pinned: true) }
             }

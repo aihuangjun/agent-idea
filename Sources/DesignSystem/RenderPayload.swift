@@ -59,16 +59,18 @@ public struct DiffEdit: Equatable, Sendable {
     public var newText: String
     /// 工作区文件的绝对路径：编辑器发 edited 消息、基线更新时都靠它对上文档。
     public var filePath: String
+    public var displayPath: String?
     public var cursor: EditorCursor?
     /// 编辑器的撤销历史（CodeMirror `getHistory()` 的 JSON 文本），切标签时带走再带回来，⌘Z 才能撤到切走之前。
     public var history: String?
     /// 历史版本及已删除文件也使用全文视图，但不产生 edited 消息。
     public var readOnly: Bool
 
-    public init(oldText: String, newText: String, filePath: String, cursor: EditorCursor? = nil, history: String? = nil, readOnly: Bool = false) {
+    public init(oldText: String, newText: String, filePath: String, cursor: EditorCursor? = nil, history: String? = nil, readOnly: Bool = false, displayPath: String? = nil) {
         self.oldText = oldText
         self.newText = newText
         self.filePath = filePath
+        self.displayPath = displayPath
         self.cursor = cursor
         self.history = history
         self.readOnly = readOnly
@@ -78,6 +80,20 @@ public struct DiffEdit: Equatable, Sendable {
 /// 送进 render.js 的内容。**这就是 Swift 侧的渲染契约**：键名只在这里出现一次，
 /// 与 render.js 顶部注释一一对应；改一边必须改另一边（`DesignSystemTests` 会真渲染一遍核对）。
 public struct RenderPayload: Equatable, Sendable {
+    public struct BlameMark: Equatable, Sendable, Encodable {
+        public let line: Int
+        public let label: String
+        public let detail: String
+        public let committed: Bool
+
+        public init(line: Int, label: String, detail: String, committed: Bool) {
+            self.line = line
+            self.label = label
+            self.detail = detail
+            self.committed = committed
+        }
+    }
+
     public enum Content: Equatable, Sendable {
         /// `editable` 为真时用编辑器（CodeMirror）画，否则是只读的静态视图。`base` 是这个文件在 HEAD 里的内容，
         /// 编辑器据此在行号旁画「改过 / 新增」的标记；nil 表示没有基线（未跟踪、没有 git）。
@@ -113,9 +129,11 @@ public struct RenderPayload: Equatable, Sendable {
     /// 普通编辑器（代码、Markdown 源码 / 分栏）的折叠现场（JSON：折起的区间 + 全文哈希），页面自己产生、自己校验，
     /// 宿主只原样存取；文本变了页面会整份丢弃。只随 code / markdown 送。
     public var foldState: String?
+    public var blame: [BlameMark]?
 
     public init(_ content: Content, scrollTop: Double = 0, wrap: Bool = false, revealChange: DiffEdge? = nil, revealLine: EditorCursor? = nil,
-                revealLength: Int = 0, diffReading: DiffReadingOptions = DiffReadingOptions(), diffViewState: String? = nil, foldState: String? = nil) {
+                revealLength: Int = 0, diffReading: DiffReadingOptions = DiffReadingOptions(), diffViewState: String? = nil,
+                foldState: String? = nil, blame: [BlameMark]? = nil) {
         self.content = content
         self.scrollTop = scrollTop
         self.wrap = wrap
@@ -125,6 +143,7 @@ public struct RenderPayload: Equatable, Sendable {
         self.diffReading = diffReading
         self.diffViewState = diffViewState
         self.foldState = foldState
+        self.blame = blame
     }
 
     public static func message(_ title: String, _ detail: String) -> RenderPayload {
@@ -165,7 +184,7 @@ extension RenderPayload: Encodable {
     private enum Key: String, CodingKey {
         case kind, scrollTop, wrap, revealChange, revealLine, path, text, language, editable, cursor, base, history, markdown, docDir, view, url, sizeText
         case mode, rows, binary, empty, added, removed, emptyReason, title, detail, edit, oldText, newText, filePath
-        case diffReading, analysis, readOnly, diffViewState, baseIdentity, foldState
+        case diffReading, analysis, readOnly, diffViewState, baseIdentity, foldState, blame, displayPath
     }
 
     /// `revealLine` 的值：`{line, ch, length?}`。
@@ -176,6 +195,7 @@ extension RenderPayload: Encodable {
         try container.encode(scrollTop, forKey: .scrollTop)
         try container.encode(wrap, forKey: .wrap)
         try container.encodeIfPresent(revealChange, forKey: .revealChange)
+        try container.encodeIfPresent(blame, forKey: .blame)
         if let revealLine {
             var reveal = container.nestedContainer(keyedBy: RevealKey.self, forKey: .revealLine)
             try reveal.encode(revealLine.line, forKey: .line)
@@ -229,6 +249,7 @@ extension RenderPayload: Encodable {
                 try editContainer.encode(String(edit.oldText.hashValue), forKey: .baseIdentity)
                 try editContainer.encode(edit.newText, forKey: .newText)
                 try editContainer.encode(edit.filePath, forKey: .filePath)
+                try editContainer.encodeIfPresent(edit.displayPath, forKey: .displayPath)
                 try editContainer.encodeIfPresent(edit.cursor, forKey: .cursor)
                 try editContainer.encodeIfPresent(edit.history, forKey: .history)
                 try editContainer.encode(edit.readOnly, forKey: .readOnly)

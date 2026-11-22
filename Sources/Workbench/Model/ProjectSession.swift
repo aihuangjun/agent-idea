@@ -70,6 +70,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         didSet {
             if oldValue != activeTabID {
                 cancelDefinitionNavigation()
+                cancelBlameRequest()
                 fileReplace = nil
             }
         }
@@ -138,6 +139,7 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     /// 需要壳切到某个工具窗口（定位文件时切到项目树）。
     var onRequestToolWindow: (@MainActor (ToolWindow) -> Void)?
+    var onSearchAction: (@MainActor (String) -> Void)?
 
     let git: GitClient?
     let renderer: ContentRenderer
@@ -158,6 +160,9 @@ final class ProjectSession: ObservableObject, Identifiable {
     @Published var javaHierarchy: JavaHierarchyRequest?
     @Published var javaRename: JavaRenameRequest?
     @Published var isAnalyzingJava = false
+    @Published var fileBlame: FileBlame?
+    var blameTask: Task<Void, Never>?
+    var blameRequest: UUID?
     /// 正在按历史后退/前进：这次切换不再记进历史。
     private var isNavigating = false
 
@@ -240,6 +245,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 项目被关掉：没保存的写回去，停监听、停任务。
     func tearDown() {
         cancelDefinitionNavigation()
+        cancelBlameRequest()
         projectSearch.suspend()
         saveAll()
         gitTask?.cancel()
@@ -253,6 +259,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     func setActive(_ active: Bool) {
         if !active, isActive {
             cancelDefinitionNavigation()
+            cancelBlameRequest()
             projectSearch.suspend()
             rememberScrollOfActiveTab()
         }
@@ -676,10 +683,12 @@ final class ProjectSession: ObservableObject, Identifiable {
     }
 
     /// 某次历史提交里一个文件的 diff。
-    func openCommitDiff(_ change: GitChange, in commit: GitCommit, pinned: Bool = false) {
+    func openCommitDiff(_ change: GitChange, in commit: GitCommit, pinned: Bool = false, at location: SourceLocation? = nil) {
         let tab = EditorTab(kind: .commitDiff(commit, change), isPreview: !pinned)
+        if let location { pendingLineReveal = (tab.id, Self.editorPosition(location), 0) }
         show(tab)
         if contents[tab.id] == nil { loadDiff(for: tab) }
+        if let location, pendingLineReveal?.tabID == tab.id, activeTabID == tab.id { goToLine(location) }
     }
 
     /// 一段提交合起来（历史多选、与分支比较）里一个文件的 diff。
@@ -695,6 +704,12 @@ final class ProjectSession: ObservableObject, Identifiable {
         case .commit(let commit): openCommitDiff(change, in: commit, pinned: pinned)
         case .range(let range): openRangeDiff(change, in: range, pinned: pinned)
         }
+    }
+
+    func openComparison(_ comparison: ComparisonTab, content: TabContent) {
+        let tab = EditorTab(kind: .comparison(comparison), isPreview: false)
+        show(tab)
+        store(content, for: tab.id)
     }
 
     /// 把标签放进标签栏并激活。已经开着的直接切过去；预览标签只保留一个。**这是标签进栏的唯一入口。**
@@ -907,6 +922,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     }
 
     private var diffNavigationChanges: [GitChange] {
+        if activeTab?.comparison != nil { return [] }
         if let key = activeTab?.historyFilesKey { return history?.files(forKey: key) ?? [] }
         return (changeGroups.trackedTree.rows + changeGroups.untrackedTree.rows).compactMap(\.change)
     }
@@ -1278,7 +1294,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         case .diff(let change):
             guard change.kind != .deleted, let url = url(for: change) else { return nil }
             return EditorTab.id(forFile: url.resolvingSymlinksInPath().standardizedFileURL)
-        case .commitDiff, .rangeDiff: return nil
+        case .commitDiff, .rangeDiff, .comparison: return nil
         }
     }
 
@@ -1576,11 +1592,13 @@ final class ProjectSession: ObservableObject, Identifiable {
             rendered = .html(path: path, text: text, documentDirectory: directory)
         }
         let edge = pendingDiffReveal.flatMap { $0.tabID == tab.id ? $0.edge : nil }
+        let blame = blameMarks(for: tab, text: documentID.flatMap { draftStore[$0] } ?? content.text)
+        if let fileBlame, fileBlame.path == tab.fileURL?.path, blame == nil { clearBlame(path: fileBlame.path) }
         // 要跳到行的时候不再定位第一处差异：两个落点会打架
         let diffEdge = lineReveal != nil ? nil : edge ?? (tab.isDiff && !tab.hasDiffPosition ? .first : nil)
         renderer.render(RenderPayload(rendered, scrollTop: tab.scrollTop, wrap: preferences.wordWrap,
                                       revealChange: diffEdge, revealLine: lineReveal, revealLength: revealLength, diffReading: preferences.diffReading,
-                                      diffViewState: tab.diffViewState, foldState: tab.foldState))
+                                      diffViewState: tab.diffViewState, foldState: tab.foldState, blame: blame))
         if edge != nil { pendingDiffReveal = nil }
         if lineReveal != nil { pendingLineReveal = nil }
     }
@@ -1665,6 +1683,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         history?.refreshIfLoaded()
         // HEAD 变了，编辑器的变更标记 / 可编辑 diff 的基线也要换
         if headChanged {
+            if fileBlame != nil || blameTask != nil { clearBlame() }
             baseTextsHead = snapshot.branch.headOID
             for documentID in Set(tabs.compactMap(documentID(for:))) { fetchBaseText(documentID: documentID) }
         }

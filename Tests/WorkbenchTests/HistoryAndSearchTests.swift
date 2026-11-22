@@ -56,6 +56,32 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
     }
 }
 
+@Test @MainActor func actionSearchResolvesShortcutsAndExecutesInCurrentProject() throws {
+    try withTemporaryDirectory { root in
+        let file = root.appendingPathComponent("A.swift")
+        try "let text = 1\n".write(to: file, atomically: true, encoding: .utf8)
+        let workbench = WorkbenchModel(git: nil, defaults: UserDefaults(suiteName: "agentidea-actions-\(UUID())")!,
+            recentFile: root.appendingPathComponent("recent.json"))
+        workbench.openProject(root)
+        let session = try #require(workbench.active)
+        session.showProjectSearch(actions: true)
+        session.projectSearch.query = "跳到行"
+        let unavailable = try #require(session.projectSearch.selected)
+        #expect(unavailable.action?.shortcut == "⌘L" && unavailable.action?.enabled == false)
+        session.openProjectSearchResult(unavailable)
+        #expect(session.projectSearch.isShown && !session.isGoToLineShown)
+        session.closeProjectSearch()
+        session.openFile(file, pinned: true)
+        session.showProjectSearch(actions: true)
+        session.projectSearch.query = "⌘L"
+        let hit = try #require(session.projectSearch.selected)
+        #expect(hit.action?.id == WorkbenchAction.goToLine.rawValue && hit.action?.enabled == true)
+        session.openProjectSearchResult(hit)
+        #expect(session.isGoToLineShown && !session.projectSearch.isShown)
+        #expect(session.tabs.count == 1)
+    }
+}
+
 @Test @MainActor func historyLoadsPagesSelectsAndOpensCommitDiff() async throws {
     try await withTemporaryDirectory { directory in
         let head = Locked("c2c2c2c2c2c2c2c2")

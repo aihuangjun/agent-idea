@@ -13,6 +13,7 @@ struct EditorAreaView: View {
             if !session.tabs.isEmpty {
                 TabBar(session: session)
                 EditorHeader(session: session)
+                if let comparison = session.activeTab?.comparison { ComparisonSourcesBar(comparison: comparison) }
                 if session.isFindShown { FileFindBar(session: session) }
                 if let replace = session.fileReplace { FileReplaceBar(session: session, replace: replace) }
                 if session.isGoToLineShown { GoToLineBar(session: session) }
@@ -84,6 +85,7 @@ private struct EmptyEditorView: View {
                 shortcut("项目 / 提交 / 提交历史 / 查找", "⌘1 / ⌘0 / ⌘9 / ⌘3")
                 shortcut("隐藏工具窗口", "⇧Esc")
                 shortcut("全局搜索", "⇧⇧")
+                shortcut("查找操作", "⇧⌘A")
                 shortcut("侧栏搜索", "⇧⌘F")
                 shortcut("最近的文件", "⌘E")
                 shortcut("文件内查找", "⌘F / ⌃F")
@@ -161,7 +163,7 @@ private struct TabItem: View {
                 .lineLimit(1)
             if tab.isDiff {
                 // 工作区 diff 标「diff」，历史提交的标它的短 hash，一段区间标「老…新」/「对比 分支」，一眼分得清看的是哪一份
-                Text(tab.commitDiff?.commit.shortHash ?? tab.rangeDiff?.range.badge ?? "diff")
+                Text(tab.commitDiff?.commit.shortHash ?? tab.rangeDiff?.range.badge ?? (tab.comparison == nil ? "diff" : "对比"))
                     .font(.system(size: 9, weight: .semibold, design: tab.historyRevisions == nil ? .default : .monospaced))
                     .lineLimit(1)
                     .foregroundStyle(Theme.vcsModified)
@@ -201,19 +203,25 @@ private struct TabItem: View {
                 Button(action.title, action: action.perform)
                 Divider()
             }
-            Button("复制路径和行号") {
-                session.reference(of: tab.id) { text in
-                    Desktop.copyToClipboard(text)
-                    session.notify("已复制 \(text)")
+            if session.referenceURL(for: tab) != nil {
+                Button("复制路径和行号") {
+                    session.reference(of: tab.id) { text in
+                        Desktop.copyToClipboard(text)
+                        session.notify("已复制 \(text)")
+                    }
                 }
+                Divider()
             }
-            Divider()
             Button("关闭") { session.closeTab(tab.id) }
             Button("关闭其他") { session.closeOtherTabs(tab.id) }
             Button("关闭全部") { session.closeAllTabs() }
             Divider()
             if tab.isPreview { Button("固定标签") { session.pin(tab.id) } }
             if let url = tab.fileURL ?? tab.diffChange.flatMap({ session.url(for: $0) }) {
+                if tab.fileURL != nil {
+                    Button("与其他文件比较…") { Desktop.chooseFileToCompare(with: url, in: session) }
+                    Button("与剪贴板比较") { Desktop.compareWithClipboard(url, in: session) }
+                }
                 if session.canShowHistory(of: url) {
                     Button("显示历史") { session.showHistory(of: url, isDirectory: false) }
                 }
@@ -245,7 +253,8 @@ private struct EditorHeader: View {
             }
             .padding(.leading, -4)
             if let tab = session.activeTab {
-                Breadcrumb(session: session, tab: tab)
+                if tab.comparison != nil { Text("文件比较").font(Theme.smallFont).foregroundStyle(Theme.secondaryText) }
+                else { Breadcrumb(session: session, tab: tab) }
                 if session.isModified(tab), session.isDiskNewer(tab) {
                     Label("磁盘上的文件已被改动，保存会覆盖它", systemImage: "exclamationmark.triangle.fill")
                         .font(Theme.smallFont).foregroundStyle(Theme.warning).lineLimit(1)
@@ -275,7 +284,9 @@ private struct EditorHeader: View {
         if tab.isDiff {
             DiffReviewControls(preferences: preferences, progress: session.diffReviewProgress, supported: session.supportsDiffReading)
             if session.supportsDiffReading { wordWrapControl }
-            IconButton(ToolWindowIcon.refresh, help: "从磁盘重新加载（⌘R）", size: 22) { session.refreshAll() }
+            if tab.comparison == nil {
+                IconButton(ToolWindowIcon.refresh, help: "从磁盘重新加载（⌘R）", size: 22) { session.refreshAll() }
+            }
             Picker("", selection: $preferences.diffMode) {
                 ForEach(DiffViewMode.allCases, id: \.self) { Text($0.label).tag($0) }
             }
@@ -327,6 +338,32 @@ private struct EditorHeader: View {
             .toggleStyle(.checkbox).controlSize(.small).font(Theme.smallFont)
             .fixedSize()
             .help("自动折行显示长行；关闭后可拖动底部横向滚动条查看完整内容")
+    }
+}
+
+private struct ComparisonSourcesBar: View {
+    let comparison: ComparisonTab
+
+    var body: some View {
+        HStack(spacing: 0) {
+            source("左侧", comparison.left)
+            Rectangle().fill(Theme.border).frame(width: 1)
+            source("右侧", comparison.right)
+        }
+        .frame(height: 25)
+        .background(Theme.panel)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
+    }
+
+    private func source(_ side: String, _ title: String) -> some View {
+        HStack(spacing: 6) {
+            Text(side).foregroundStyle(Theme.mutedText)
+            Text(title).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
+        }
+        .font(Theme.smallFont)
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .toolTip(title)
     }
 }
 

@@ -90,6 +90,8 @@ public struct AgentIDEARootScene: Scene {
                 Divider()
                 Button("分支…") { workbench.active?.showBranches() }
                     .disabled(!(workbench.active?.hasGit ?? false))
+                Button(workbench.active?.blameActionTitle ?? "显示 Git 行归属") { workbench.active?.toggleBlame() }
+                    .disabled(workbench.active?.blameFile == nil)
             }
         }
     }
@@ -115,6 +117,8 @@ public struct AgentIDEARootScene: Scene {
             Button("从磁盘重新加载") { workbench.active?.refreshAll() }
                 .keyboardShortcut("r", modifiers: .command)
                 .disabled(workbench.active == nil)
+            Button("比较文件…") { WorkbenchAction.compareFiles.perform(in: workbench) }
+                .disabled(!WorkbenchAction.compareFiles.searchEntry(in: workbench).enabled)
             Divider()
             Button("关闭标签") { workbench.active?.closeActiveTab() }
                 .keyboardShortcut("w", modifiers: .command)
@@ -151,7 +155,7 @@ public struct AgentIDEARootScene: Scene {
                 }
             }
             .keyboardShortcut("c", modifiers: [.command, .option, .shift])
-            .disabled(workbench.active?.activeTab == nil)
+            .disabled(!WorkbenchAction.copyReference.searchEntry(in: workbench).enabled)
             Divider()
             Menu("查找") {
                 // Ctrl+F 是同一个功能的第二个键位，不另占菜单项：焦点在哪儿都由 CursorRestoringWebView.performKeyEquivalent
@@ -244,6 +248,9 @@ public struct AgentIDEARootScene: Scene {
     @CommandsBuilder private var navigateCommands: some Commands {
         CommandMenu("导航") {
             Button("全局搜索…（⇧⇧）") { workbench.active?.showProjectSearch() }
+                .disabled(workbench.active == nil)
+            Button("查找操作…") { workbench.active?.showProjectSearch(actions: true) }
+                .keyboardShortcut("a", modifiers: [.command, .shift])
                 .disabled(workbench.active == nil)
             Button("侧栏搜索…") {
                 workbench.toolWindow = .project

@@ -9,8 +9,9 @@ struct DiffReviewControls: View {
     let supported: Bool
 
     var body: some View {
+        let changeLabel = "变更 \(progress.changeIndex)/\(progress.changeCount)"
         HStack(spacing: 6) {
-            Text("文件 \(progress.fileIndex)/\(progress.fileCount) · 变更 \(progress.changeIndex)/\(progress.changeCount)")
+            Text(progress.fileIndex > 0 ? "文件 \(progress.fileIndex)/\(progress.fileCount) · \(changeLabel)" : changeLabel)
                 .font(.system(size: 11).monospacedDigit())
                 .foregroundStyle(Theme.mutedText)
                 .fixedSize()

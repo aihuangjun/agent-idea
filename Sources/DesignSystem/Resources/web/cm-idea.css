@@ -10,6 +10,14 @@
 .cm-s-idea .CodeMirror-cursor { border-left: 1.5px solid var(--syn-cursor); }
 /* 行号右侧的变更标记（IDEA 的 gutter）：改过蓝、新增绿，颜色与目录树的 VCS 色一致 */
 .cm-s-idea .cm-changes { width: 6px; }
+.cm-s-idea .cm-git-blame { width: 12em; }
+.cm-s-idea .git-blame-mark {
+  display: block; width: 12em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  margin: 0; padding: 0 7px; border: 0; background: none; color: inherit;
+  text-align: left; font: inherit; opacity: 0.74; box-sizing: border-box;
+}
+.cm-s-idea button.git-blame-mark { cursor: pointer; }
+.cm-s-idea button.git-blame-mark:hover { opacity: 1; text-decoration: underline; }
 .cm-s-idea .cm-change-mark { width: 3px; height: 1.6em; margin-left: 1px; border-radius: 1px; }
 .cm-s-idea .cm-change-mark.modified { background: var(--link); }
 .cm-s-idea .cm-change-mark.added { background: var(--add-fg); }

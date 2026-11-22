@@ -11,7 +11,7 @@
  *   image    { path, url, sizeText }
  *   html     { path, text, docDir }（宿主用独立 WebView 预览，docDir 是站点根目录与读取范围，HTML 脚本没有编辑桥）
  *   diff     { path, language, mode: "side" | "unified", rows, binary, empty, added, removed, emptyReason }
- *            或全文的 { path, language, mode, edit: { oldText, newText, baseIdentity, filePath, cursor?, history?, readOnly },
+ *            或全文的 { path, language, mode, edit: { oldText, newText, baseIdentity, filePath, displayPath?, cursor?, history?, readOnly },
  *              diffViewState?: 阅读现场的 JSON（逻辑行、偏移、展开区间、基线标识），
  *              diffReading: {collapseUnchanged, contextLines, whitespace: "none" | "trailing" | "all"},
  *              analysis: Core/DiffReviewAnalysis（changes、unchanged、folds、行数统计） }。
@@ -24,6 +24,7 @@
  * window.ide.undo() / redo() 是编辑器里的撤销 / 重做，回有没有编辑器接下这一步（只读视图回 false，宿主去撤文件操作）；
  * 焦点在编辑器里时 ⌘Z / ⇧⌘Z 由 CodeMirror 自己处理，不会传到应用菜单。
  * 基线是异步取的，到了就 window.ide.setBase({ path, base })，编辑器在行号右侧画「改过（蓝）/ 新增（绿）」的标记（IDEA 的 gutter）。
+ * blame?: [{line, label, detail, committed}]，line 从 1 数。window.ide.setBlame(path, marks) 更新当前归属栏（null 隐藏），点击标记发 blameCommit。
  * window.ide.setTheme("light" | "dark") 切浅色 / 深色：只换根元素的 class，颜色都在 style.css 的变量里。
  * window.ide.revealLine({line, ch}) 跳到行（从 0 数，夹到首尾）：编辑器放光标、只读代码视图与只读 diff 表格选中那一行，都滚到正中；
  *   diff 一律按新版本那一侧（并排的右边）。回 true / false（这种视图没有行）。参数同 payload 的 revealLine，可带 length 选中命中。
@@ -180,6 +181,7 @@
   /* ---------- 相对 HEAD 的行变更标记 ---------- */
 
   const CHANGE_GUTTER = "cm-changes";
+  const BLAME_GUTTER = "cm-git-blame";
   const DIFF_LINE_LIMIT = 20000;   // 掐掉头尾相同的部分之后还剩这么多行就不算了
   const DIFF_EDIT_LIMIT = 3000;    // Myers 的 D 超过这个数（改动太大）也不算了
 
@@ -500,6 +502,7 @@
       if (path && change?.from) post({ type: "editLocation", path, cursor: change.from });
     });
     editor.on("change", () => {
+      if (current.blame) setBlame(editedPath(), null);
       changeLinesCache = null;
       if (editTimer) clearTimeout(editTimer);
       editTimer = setTimeout(() => { editTimer = null; postEdited(); updateChangeMarkers(); reportChangePosition(); }, EDIT_DEBOUNCE);
@@ -519,7 +522,39 @@
     if (payload.cursor) editor.setCursor(payload.cursor);
     restoreHistory(payload.history);
     updateChangeMarkers();
+    if (payload.blame) setBlame(payload.path, payload.blame);
     return editor;
+  }
+
+  /* blame?: [{line, label, detail, committed}]，line 从 1 数。只给普通源码编辑器加归属栏。 */
+  function setBlame(path, marks) {
+    if (!editor || !current || (current.kind !== "code" && current.kind !== "markdown") || path !== editedPath()) return;
+    current.blame = marks;
+    const gutter = editor.getOption("gutters").filter(name => name !== BLAME_GUTTER);
+    editor.operation(() => {
+      editor.clearGutter(BLAME_GUTTER);
+      editor.setOption("gutters", marks ? [BLAME_GUTTER, ...gutter] : gutter);
+      for (const mark of marks || []) {
+        if (mark.line < 1 || mark.line > editor.lineCount()) continue;
+        const node = document.createElement(mark.committed ? "button" : "span");
+        node.className = "git-blame-mark";
+        node.textContent = mark.label;
+        node.title = mark.detail;
+        if (mark.committed) {
+          node.type = "button";
+          node.setAttribute("aria-label", mark.detail);
+          // CodeMirror handles mousedown on gutters before the button can receive focus.
+          node.addEventListener("mousedown", (event) => {
+            if (event.button === 0 && !event.ctrlKey) event.stopPropagation();
+          });
+          node.addEventListener("click", (event) => {
+            event.stopPropagation();
+            post({ type: "blameCommit", path, line: mark.line });
+          });
+        }
+        editor.setGutterMarker(mark.line - 1, BLAME_GUTTER, node);
+      }
+    });
   }
 
   /* tree-sitter 着色（syntax.js）：语法包已就绪就同步装上，没就绪先用 CodeMirror 的 mode，加载完再换上。 */
@@ -588,7 +623,7 @@
 
   function diffSummaryHTML(payload, added, removed) {
     const hint = payload.edit.readOnly ? "版本对比 · 只读" : "基线是 HEAD，右边 / 下边可以直接改";
-    return `<div class="diff-summary"><span class="path">${escapeHTML(payload.path || "")}</span><span class="add">+${added}</span><span class="del">−${removed}</span><span class="hint">${hint}</span></div>`;
+    return `<div class="diff-summary"><span class="path">${escapeHTML(payload.edit.displayPath || payload.path || "")}</span><span class="add">+${added}</span><span class="del">−${removed}</span><span class="hint">${hint}</span></div>`;
   }
 
   function updateDiffSummary() {
@@ -1643,6 +1678,7 @@
   /* ---------- 入口 ---------- */
 
   window.ide = {
+    setBlame,
     find(options) { return findInEditors(options); },
     clearFind,
     focusEditor() {

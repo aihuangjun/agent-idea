@@ -8,6 +8,7 @@ import Foundation
 /// 结果按文件分组；选中是「哪个文件的哪一行」，↑ ↓ 只在没折叠的文件里走。
 @MainActor
 final class TextSearchController: ObservableObject {
+    enum Grouping: CaseIterable { case directories, files }
     /// 最多收这么多处匹配，再多就提示「只显示前 N 处」。
     nonisolated static let resultLimit = 1000
 
@@ -27,6 +28,10 @@ final class TextSearchController: ObservableObject {
     @Published private(set) var error: String?
     @Published private(set) var selected: Hit?
     @Published private(set) var collapsedFiles: Set<String> = []
+    @Published private(set) var collapsedDirectories: Set<String> = []
+    @Published var grouping: Grouping = .directories {
+        didSet { if grouping != oldValue { ensureVisibleSelection() } }
+    }
     /// 每次「把焦点给输入框」加一（⌃⇧F 在窗口已经开着时也要回到输入框）。
     @Published private(set) var focusRequests = 0
 
@@ -90,7 +95,11 @@ final class TextSearchController: ObservableObject {
     }
 
     func pinCurrent() {
-        guard !isSearching, let result, let completedQuery, let completedScope else { return }
+        guard let result = replacementResult, !result.files.isEmpty, let completedQuery, let completedScope else { return }
+        if let existing = pinnedResults.first(where: { $0.query == completedQuery && $0.scope == completedScope && $0.result == result }) {
+            selectPin(existing.id)
+            return
+        }
         let pin = PinnedResult(query: completedQuery, scope: completedScope, result: result)
         pinnedResults.append(pin)
         selectPin(pin.id)
@@ -99,8 +108,12 @@ final class TextSearchController: ObservableObject {
     func selectPin(_ id: UUID?) {
         guard id != visiblePin else { return }
         visiblePin = id
-        collapsedFiles = []
-        selected = allHits.first
+        resetExpansion()
+    }
+
+    func resumeSearch() {
+        selectPin(nil)
+        focusRequests += 1
     }
 
     func closePin(_ id: UUID) {
@@ -124,14 +137,42 @@ final class TextSearchController: ObservableObject {
 
     /// 全部结果，按列表顺序。
     private var allHits: [Hit] {
-        (displayedResult?.files ?? []).flatMap { file in file.lines.map { Hit(path: file.path, line: $0.line) } }
+        guard let result = displayedResult else { return [] }
+        let files = grouping == .directories ? result.directories.flatMap(\.files) : result.files
+        return files.flatMap { file in file.lines.map { Hit(path: file.path, line: $0.line) } }
+    }
+
+    private func isVisible(_ hit: Hit) -> Bool {
+        !collapsedFiles.contains(hit.path) && (grouping == .files || !collapsedDirectories.contains(directory(of: hit)))
+    }
+
+    private func directory(of hit: Hit) -> String {
+        hit.path.lastIndex(of: "/").map { String(hit.path[..<$0]) } ?? ""
+    }
+
+    private func reveal(_ hit: Hit) {
+        collapsedFiles.remove(hit.path)
+        if grouping == .directories { collapsedDirectories.remove(directory(of: hit)) }
+        selected = hit
+    }
+
+    func selectForOpening() -> Hit? {
+        if let selected, isVisible(selected) { return selected }
+        let hits = allHits
+        guard let hit = hits.first(where: isVisible) ?? hits.first else { return nil }
+        reveal(hit)
+        return hit
     }
 
     /// ↑ ↓：在没折叠的文件里走；还没选中时 ↓ 选第一处、↑ 选最后一处。到头不动。
     func moveSelection(by offset: Int) {
         let hits = allHits
-        let visible = hits.filter { !collapsedFiles.contains($0.path) }
-        guard !visible.isEmpty, offset != 0 else { return }
+        let visible = hits.filter(isVisible)
+        guard !hits.isEmpty, offset != 0 else { return }
+        if visible.isEmpty {
+            if let hit = offset > 0 ? hits.first : hits.last { reveal(hit) }
+            return
+        }
         guard let selected, let index = hits.firstIndex(of: selected) else {
             self.selected = offset > 0 ? visible.first : visible.last
             return
@@ -142,7 +183,7 @@ final class TextSearchController: ObservableObject {
         while remaining > 0 {
             cursor += step
             guard hits.indices.contains(cursor) else { break }
-            if collapsedFiles.contains(hits[cursor].path) { continue }
+            if !isVisible(hits[cursor]) { continue }
             landed = hits[cursor]
             remaining -= 1
         }
@@ -151,10 +192,40 @@ final class TextSearchController: ObservableObject {
 
     func toggleCollapsed(_ path: String) {
         if !collapsedFiles.insert(path).inserted { collapsedFiles.remove(path) }
+        ensureVisibleSelection()
     }
 
-    func collapseAll() { collapsedFiles = Set(displayedResult?.files.map(\.path) ?? []) }
-    func expandAll() { collapsedFiles = [] }
+    func toggleDirectory(_ path: String) {
+        if !collapsedDirectories.insert(path).inserted { collapsedDirectories.remove(path) }
+        ensureVisibleSelection()
+    }
+
+    var hasCollapsedGroups: Bool { !collapsedFiles.isEmpty || (grouping == .directories && !collapsedDirectories.isEmpty) }
+
+    func collapseAll() {
+        collapsedFiles = Set(displayedResult?.files.map(\.path) ?? [])
+        if grouping == .directories { collapsedDirectories = Set(displayedResult?.directories.map(\.path) ?? []) }
+        selected = nil
+    }
+
+    func expandAll() {
+        collapsedFiles = []
+        collapsedDirectories = []
+        ensureVisibleSelection()
+    }
+
+    private func ensureVisibleSelection() {
+        if let selected, isVisible(selected), line(for: selected) != nil { return }
+        selected = allHits.first(where: isVisible)
+    }
+
+    private func resetExpansion() {
+        let result = displayedResult
+        collapsedFiles = result?.shouldCollapseFilesInitially == true ? Set(result?.files.map(\.path) ?? []) : []
+        collapsedDirectories = (result?.directories.count ?? 0) > 5 ? Set(result?.directories.map(\.path) ?? []) : []
+        selected = nil
+        ensureVisibleSelection()
+    }
 
     // MARK: - 搜索
 
@@ -166,7 +237,7 @@ final class TextSearchController: ObservableObject {
         guard !query.isEmpty else {
             result = nil
             error = nil
-            selected = nil
+            if visiblePin == nil { selected = nil }
             isSearching = false
             return
         }
@@ -177,7 +248,7 @@ final class TextSearchController: ObservableObject {
         } catch {
             self.error = error.localizedDescription
             result = nil
-            selected = nil
+            if visiblePin == nil { selected = nil }
             isSearching = false
             return
         }
@@ -192,16 +263,17 @@ final class TextSearchController: ObservableObject {
             do {
                 let found = try await self.search(query, matcher: matcher, scope: scope)
                 guard !Task.isCancelled else { return }
+                let newSearch = self.completedQuery != query || self.completedScope != scope || self.result == nil
                 self.completedQuery = query
                 self.completedScope = scope
-                self.apply(found)
+                self.apply(found, reset: newSearch)
             } catch is CancellationError {
                 // 被下一次顶掉：不是失败，转圈由最新那次关
             } catch {
                 guard !Task.isCancelled else { return }
                 self.error = error.localizedDescription
                 self.result = nil
-                self.selected = nil
+                if self.visiblePin == nil { self.selected = nil }
                 self.isSearching = false
             }
         }
@@ -242,15 +314,15 @@ final class TextSearchController: ObservableObject {
         return result
     }
 
-    private func apply(_ found: TextSearchResult) {
+    private func apply(_ found: TextSearchResult, reset: Bool) {
         result = found
         error = nil
         isSearching = false
         guard visiblePin == nil else { return }
+        if reset { resetExpansion(); return }
         let paths = Set(found.files.map(\.path))
         collapsedFiles = collapsedFiles.intersection(paths)
-        // 选中的那一处还在就留着（刷新之后接着往下看），否则选第一处：回车就能打开
-        if let selected, line(for: selected) != nil { return }
-        selected = found.files.first.flatMap { file in file.lines.first.map { Hit(path: file.path, line: $0.line) } }
+        collapsedDirectories.formIntersection(found.directories.map(\.path))
+        ensureVisibleSelection()
     }
 }

@@ -2,6 +2,17 @@ import Core
 import DesignSystem
 import Foundation
 
+struct ComparisonTab: Equatable {
+    let id = UUID()
+    let left: String
+    let right: String
+    let title: String
+    /// 用文件扩展名选择着色模式，并为渲染器提供不与文件或 Git diff 冲突的路径标识。
+    let languageFilename: String
+
+    var renderPath: String { "comparison/\(id.uuidString)/\(languageFilename)" }
+}
+
 /// 编辑区的一个标签。文件标签可以编辑（未保存的文本放在 `ProjectSession.drafts`，不在这里）；diff 标签只读。
 struct EditorTab: Identifiable, Equatable {
     enum Kind: Equatable {
@@ -12,6 +23,7 @@ struct EditorTab: Identifiable, Equatable {
         case commitDiff(GitCommit, GitChange)
         /// 一段提交合起来（历史多选、与分支比较）里一个文件的变更。
         case rangeDiff(GitCommitRange, GitChange)
+        case comparison(ComparisonTab)
     }
 
     let id: String
@@ -52,6 +64,7 @@ struct EditorTab: Identifiable, Equatable {
         case .diff(let change): id = Self.id(forDiff: change)
         case .commitDiff(let commit, let change): id = Self.id(forCommit: commit, change: change)
         case .rangeDiff(let range, let change): id = Self.id(forRange: range, change: change)
+        case .comparison(let comparison): id = "comparison:" + comparison.id.uuidString
         }
     }
 
@@ -71,6 +84,7 @@ struct EditorTab: Identifiable, Equatable {
         switch kind {
         case .file(let url): return url.lastPathComponent
         case .diff(let change), .commitDiff(_, let change), .rangeDiff(_, let change): return change.fileName
+        case .comparison(let comparison): return comparison.title
         }
     }
 
@@ -102,7 +116,7 @@ struct EditorTab: Identifiable, Equatable {
         switch kind {
         case .commitDiff(let commit, _): return (commit.diffBase, commit.hash)
         case .rangeDiff(let range, _): return (range.base, range.target)
-        case .file, .diff: return nil
+        case .file, .diff, .comparison: return nil
         }
     }
 
@@ -111,19 +125,24 @@ struct EditorTab: Identifiable, Equatable {
         switch kind {
         case .commitDiff(let commit, _): return commit.id
         case .rangeDiff(let range, _): return range.id
-        case .file, .diff: return nil
+        case .file, .diff, .comparison: return nil
         }
     }
 
     /// 任一种 diff 标签对应的变更（面包屑、定位文件、渲染路径用）。
     var diffChange: GitChange? {
         switch kind {
-        case .file: return nil
+        case .file, .comparison: return nil
         case .diff(let change), .commitDiff(_, let change), .rangeDiff(_, let change): return change
         }
     }
 
-    var isDiff: Bool { diffChange != nil }
+    var comparison: ComparisonTab? {
+        if case .comparison(let comparison) = kind { return comparison }
+        return nil
+    }
+
+    var isDiff: Bool { diffChange != nil || comparison != nil }
 }
 
 /// 一个标签里装的内容，加载完成后放进 `ProjectSession.contents`。

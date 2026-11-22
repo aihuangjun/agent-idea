@@ -51,12 +51,12 @@ extension ProjectSession {
         }
     }
 
-    func showProjectSearch() {
+    func showProjectSearch(actions: Bool = false) {
         recentFiles.close()
         let recent = recentFiles.store.candidates(excluding: nil).map(\.path)
             .filter { fileManager.fileExists(atPath: project.root.appendingPathComponent($0).path) }
-        projectSearch.show(.popup, recent: recent)
-        Task { [weak self] in await self?.collectDraftForProjectSearch() }
+        projectSearch.show(.popup, recent: recent, initialScope: actions ? .actions : nil)
+        if !actions { Task { [weak self] in await self?.collectDraftForProjectSearch() } }
     }
 
     func showSidebarSearch() {
@@ -71,6 +71,12 @@ extension ProjectSession {
     }
 
     func openProjectSearchResult(_ result: ProjectSearch.Result) {
+        if let action = result.action {
+            guard action.enabled else { return }
+            closeProjectSearch()
+            onSearchAction?(action.id)
+            return
+        }
         let fromSidebar = projectSearch.presentation == .sidebar
         projectSearch.close()
         let url = project.root.appendingPathComponent(result.path)

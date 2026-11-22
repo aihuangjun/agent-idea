@@ -125,6 +125,7 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     /// 编辑器里的文字变了（停手 300ms 后发一次）：文件路径与整份文本。
     public var onEdited: ((String, String) -> Void)?
     public var onEditLocation: ((String, EditorCursor) -> Void)?
+    public var onBlameCommit: ((String, Int) -> Void)?
     /// 同一条 edited 消息里带的撤销历史（CodeMirror `getHistory()` 的 JSON 文本）：路径、整份文本、历史。在 `onEdited` 之后调。
     /// 宿主据此随时手握与最新草稿对得上的历史，退出时同步存盘不必再问页面（来不及问）。太大的历史页面不带。
     public var onEditorHistory: ((String, String, String) -> Void)?
@@ -483,6 +484,17 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         }
     }
 
+    public func updateBlame(path: String, marks: [RenderPayload.BlameMark]?) {
+        guard !showingHTML, isReady, let json = try? JSONEncoder().encode(marks) else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await webView.callAsyncJavaScript("window.ide.setBlame(path, JSON.parse(marks)); return true;",
+                    arguments: ["path": path, "marks": String(decoding: json, as: UTF8.self)], in: nil, contentWorld: .page)
+            } catch { Log.warn("web", "Git 行归属更新失败：\(error)") }
+        }
+    }
+
     public struct EditableSnapshot: Decodable {
         public let text: String
         public let start: Int
@@ -828,6 +840,8 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
             if let path = body["path"] as? String, let cursor = Self.cursor(from: body["cursor"]) {
                 onEditLocation?(path, cursor)
             }
+        case "blameCommit":
+            if let path = body["path"] as? String, let line = body["line"] as? Int, line > 0 { onBlameCommit?(path, line) }
         case "diffReview":
             if let path = body["path"] as? String, let text = body["text"] as? String {
                 let base = body["base"] as? String

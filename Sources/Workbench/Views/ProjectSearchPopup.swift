@@ -30,7 +30,7 @@ struct ProjectSearchPopup: View {
                     .accessibilityAddTraits(search.scope == scope ? .isSelected : [])
                 }
                 Spacer()
-                if search.isIndexing {
+                if search.scope != .actions, search.isIndexing {
                     ProgressView().controlSize(.mini)
                     Text("正在索引").font(Theme.smallFont).foregroundStyle(Theme.mutedText)
                 }
@@ -59,11 +59,11 @@ struct ProjectSearchPopup: View {
             resultsList
             Rectangle().fill(Theme.border).frame(height: 1)
             HStack {
-                if search.incomplete, search.scope != .files {
+                if search.incomplete, search.scope != .files, search.scope != .actions {
                     Text("部分源码未能加入索引")
                 }
                 Spacer()
-                Text("Tab 切换 · ↵ 打开 · Esc 关闭")
+                Text(search.scope == .actions ? "Tab 切换 · ↵ 执行 · Esc 关闭" : "Tab 切换 · ↵ 打开 · Esc 关闭")
             }
             .font(Theme.smallFont).foregroundStyle(Theme.mutedText)
             .padding(.horizontal, 10).padding(.vertical, 6)
@@ -78,7 +78,7 @@ struct ProjectSearchPopup: View {
     @ViewBuilder private var resultsList: some View {
         if search.results.isEmpty {
             let emptyQuery = search.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            Text(emptyQuery ? "输入名称开始搜索" : search.isIndexing ? "正在查找…" : "没有匹配的结果")
+            Text(emptyQuery ? "输入名称开始搜索" : (search.scope != .actions && search.isIndexing) ? "正在查找…" : "没有匹配的结果")
                 .font(Theme.uiFont).foregroundStyle(Theme.mutedText)
                 .frame(maxWidth: .infinity).frame(height: 54)
         } else {
@@ -122,6 +122,7 @@ struct SearchResultRow: View {
     }
 
     private var icon: FileIcon.Descriptor {
+        if result.action != nil { return .init(systemName: "command", color: Theme.accent) }
         switch result.symbol?.kind {
         case .type: return .init(systemName: "square.stack.3d.up", color: Theme.accent)
         case .interface: return .init(systemName: "point.3.connected.trianglepath.dotted", color: Theme.accent)
@@ -132,7 +133,7 @@ struct SearchResultRow: View {
     }
 
     var body: some View {
-        let detail = result.symbol.map { symbol in
+        let detail = result.action.map { $0.enabled ? $0.location : "\($0.location) · 当前不可用" } ?? result.symbol.map { symbol in
             let source = "\(result.displayPath):\(symbol.line + 1)"
             let owner = String(symbol.qualifiedName.dropLast(symbol.name.count)).dropLast()
             return owner.isEmpty ? source : "\(owner) · \(source)"
@@ -144,6 +145,9 @@ struct SearchResultRow: View {
                 Text(detail).font(Theme.smallFont).foregroundStyle(Theme.secondaryText).lineLimit(1).truncationMode(.middle)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            if let shortcut = result.action?.shortcut {
+                Text(shortcut).font(Theme.smallFont.monospaced()).foregroundStyle(Theme.secondaryText)
+            }
         }
         .padding(.horizontal, 10).frame(height: Self.height)
         .background(selected ? Theme.selection : hovering ? Theme.hover.opacity(0.5) : .clear)
@@ -152,6 +156,7 @@ struct SearchResultRow: View {
         .onPress { _ in select() } release: { clicked in if clicked { open() } }
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityAction { open() }
+        .opacity(result.action?.enabled == false ? 0.56 : 1)
         .help(detail)
     }
 }
@@ -170,6 +175,7 @@ private extension ProjectSearch.Scope {
         case .types: return "类"
         case .files: return "文件"
         case .symbols: return "函数和变量"
+        case .actions: return "操作"
         }
     }
 
@@ -179,6 +185,7 @@ private extension ProjectSearch.Scope {
         case .types: return "搜索类名或接口名"
         case .files: return "搜索文件名或路径"
         case .symbols: return "搜索方法名、函数名或变量名"
+        case .actions: return "搜索操作名称或快捷键"
         }
     }
 }

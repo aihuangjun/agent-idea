@@ -39,6 +39,7 @@ final class ProjectSearchController: ObservableObject {
     private var indexTask: Task<Void, Never>?
     private var queryTask: Task<Void, Never>?
     var inputs: (() -> Inputs)?
+    var actions: (() -> [ActionSearch.Entry])?
 
     init(root: URL, renderer: ContentRenderer) {
         self.root = root
@@ -49,16 +50,19 @@ final class ProjectSearchController: ObservableObject {
     var location: SourceLocation? { FileReference.parseQuery(query, projectRoot: root.path).location }
     var selected: ProjectSearch.Result? { results.indices.contains(selectedIndex) ? results[selectedIndex] : nil }
 
-    func show(_ presentation: Presentation, recent: [String] = []) {
+    func show(_ presentation: Presentation, recent: [String] = [], initialScope: ProjectSearch.Scope? = nil) {
         self.recent = recent
         if self.presentation != presentation {
-            scope = .all
+            scope = initialScope ?? .all
             query = ""
             self.presentation = presentation
             refreshResults(reset: true)
+        } else if let initialScope {
+            if scope != initialScope { query = "" }
+            scope = initialScope
         }
         focusRequests += 1
-        startIndexIfNeeded()
+        if scope != .actions { startIndexIfNeeded() }
     }
 
     func close() {
@@ -86,7 +90,7 @@ final class ProjectSearchController: ObservableObject {
 
     func invalidate() {
         revision += 1
-        if isShown { debouncer.call { [weak self] in self?.startIndexIfNeeded() } }
+        if isShown, scope != .actions { debouncer.call { [weak self] in self?.startIndexIfNeeded() } }
     }
 
     func suspend() {
@@ -118,7 +122,7 @@ final class ProjectSearchController: ObservableObject {
             guard !Task.isCancelled else { return }
             indexTask = nil
             isIndexing = false
-            if isShown, indexedRevision != self.revision { startIndexIfNeeded() }
+            if isShown, scope != .actions, indexedRevision != self.revision { startIndexIfNeeded() }
         }
     }
 
@@ -188,6 +192,12 @@ final class ProjectSearchController: ObservableObject {
             selectedIndex = 0
         }
         let query = self.query, scope = self.scope
+        if scope == .actions {
+            results = ActionSearch.matching(query, in: actions?() ?? []).map { .init(action: $0) }
+            selectedIndex = min(selectedIndex, max(0, results.count - 1))
+            return
+        }
+        if presentation == .popup { startIndexIfNeeded() }
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             results = scope == .all || scope == .files ? recent.prefix(20).map { ProjectSearch.Result(path: $0) } : []
             selectedIndex = 0

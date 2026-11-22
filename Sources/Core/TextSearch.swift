@@ -252,6 +252,26 @@ public struct TextSearchResult: Equatable, Sendable {
     }
 
     public var lineCount: Int { files.reduce(0) { $0 + $1.lines.count } }
+
+    public var directories: [TextSearchDirectory] {
+        var order: [String] = []
+        var groups: [String: [TextSearchFile]] = [:]
+        for file in files {
+            let directory = file.directory
+            if groups[directory] == nil { order.append(directory) }
+            groups[directory, default: []].append(file)
+        }
+        return order.map { TextSearchDirectory(path: $0, files: groups[$0] ?? []) }
+    }
+
+    public var shouldCollapseFilesInitially: Bool { matchCount >= 80 || files.count >= 12 }
+}
+
+public struct TextSearchDirectory: Equatable, Sendable, Identifiable {
+    public let path: String
+    public let files: [TextSearchFile]
+    public var id: String { path }
+    public var matchCount: Int { files.reduce(0) { $0 + $1.matchCount } }
 }
 
 /// 边收边分组、到上限就停。git 的输出与逐个读文件的退路共用。

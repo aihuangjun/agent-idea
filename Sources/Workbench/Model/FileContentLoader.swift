@@ -99,7 +99,7 @@ enum FileContentLoader {
 extension TabContent {
     /// 这份内容在 WebView 里怎么画。`draft` 是还没保存的文本（有就画它）；`editable` 决定用编辑器还是只读视图。
     func renderContent(for tab: EditorTab, diffMode: DiffViewMode, draft: String? = nil, editable: Bool = false, base: String? = nil) -> RenderPayload.Content {
-        let path = tab.fileURL?.path ?? tab.diffChange?.path ?? ""
+        let path = tab.fileURL?.path ?? tab.diffChange?.path ?? tab.comparison?.renderPath ?? ""
         switch self {
         case .loading:
             return .message(title: "", detail: "")
@@ -126,7 +126,8 @@ extension TabContent {
         case .textDiff(let old, let new, let language):
             return .diff(path: path, language: language.highlightID,
                          diff: FileDiff(oldPath: nil, newPath: path, isBinary: false, hunks: []), mode: diffMode, emptyReason: nil,
-                         edit: DiffEdit(oldText: old, newText: new, filePath: path, cursor: tab.cursor, readOnly: true))
+                         edit: DiffEdit(oldText: old, newText: new, filePath: path, cursor: tab.cursor, readOnly: true,
+                                        displayPath: tab.comparison?.right))
         case .editableDiff:
             // 要文档内容才画得出来，由 ProjectSession.renderActiveTab 走 editableDiff(change:document:…)
             return .message(title: "", detail: "")

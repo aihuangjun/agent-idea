@@ -26,18 +26,17 @@ struct FindInPathView: View {
                 }
                 IconButton(ToolWindowIcon.refresh, help: "重新搜索：磁盘上的文件又变了（Agent 改过）之后", size: 22) { search.refresh() }
                     .disabled(search.text.isEmpty || search.visiblePin != nil)
-                IconButton("pin", help: "固定本组查找结果", size: 22) { search.pinCurrent() }
-                    .disabled(search.result == nil || search.isSearching || search.visiblePin != nil)
                 IconButton("arrow.left.arrow.right", help: "在项目中替换", size: 22) { session.showProjectReplace() }
                     .disabled(search.replacementResult?.files.isEmpty != false)
                 IconButton(ToolWindowIcon.expandAll, help: "全部展开", size: 22) { search.expandAll() }
-                    .disabled(search.collapsedFiles.isEmpty)
+                    .disabled(!search.hasCollapsedGroups)
                 IconButton(ToolWindowIcon.collapseAll, help: "全部折叠", size: 22) { search.collapseAll() }
                     .disabled(search.displayedResult?.files.isEmpty ?? true)
             }
             if !search.pinnedResults.isEmpty { resultTabs }
             if search.visiblePin == nil { queryBar }
             statusLine
+            if search.displayedResult?.files.isEmpty == false { resultControls }
             results
         }
         .background(Theme.panel)
@@ -48,13 +47,14 @@ struct FindInPathView: View {
     private var resultTabs: some View {
         ScrollView(.horizontal) {
             HStack(spacing: 10) {
-                Button("新查找") { search.selectPin(nil) }.buttonStyle(.plain)
+                Button(search.visiblePin == nil ? "当前查找" : "继续查找") { search.resumeSearch() }.buttonStyle(.plain)
                     .foregroundStyle(search.visiblePin == nil ? Theme.accent : Theme.text)
                 ForEach(search.pinnedResults) { pin in
                     HStack(spacing: 4) {
                         Button(pin.query.text) { search.selectPin(pin.id) }.buttonStyle(.plain).lineLimit(1)
                             .foregroundStyle(search.visiblePin == pin.id ? Theme.accent : Theme.text)
                             .toolTip(scopeTitle(pin.scope) + " · " + pin.query.text)
+                            .accessibilityAddTraits(search.visiblePin == pin.id ? .isSelected : [])
                         IconButton("xmark", help: "关闭这组结果", size: 16) { search.closePin(pin.id) }
                     }
                 }
@@ -93,18 +93,27 @@ struct FindInPathView: View {
             .background(RoundedRectangle(cornerRadius: 5).fill(Theme.editorBackground))
             .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(isFieldFocused ? Theme.accent : Theme.border, lineWidth: 1))
             HStack(spacing: 6) {
-                Image(systemName: "line.3.horizontal.decrease").font(.system(size: 10)).foregroundStyle(Theme.mutedText)
-                    .toolTip("文件掩码：逗号分隔，! 开头是排除；不带 / 的按文件名匹配，带 / 的按相对路径（支持 **）")
-                TextField("", text: $search.fileMask, prompt: Text("文件掩码，如 *.swift, !*Tests.swift").foregroundColor(Theme.mutedText))
+                Menu("文件筛选") {
+                    Button("所有文件") { search.fileMask = "" }
+                    Button("Java（*.java）") { search.fileMask = "*.java" }
+                    Button("Swift（*.swift）") { search.fileMask = "*.swift" }
+                    Button("Markdown（*.md）") { search.fileMask = "*.md" }
+                    Button("网页（*.html, *.css, *.js）") { search.fileMask = "*.html, *.css, *.js" }
+                }
+                .menuStyle(.borderlessButton).fixedSize().font(Theme.smallFont)
+                .toolTip("选择常见文件类型，或在右边输入文件名或路径规则")
+                TextField("文件名或路径规则", text: $search.fileMask,
+                          prompt: Text("例如 *.java").foregroundColor(Theme.mutedText))
                     .textFieldStyle(.plain)
                     .font(Theme.smallFont)
                     .foregroundStyle(Theme.text)
+                    .toolTip("留空搜索所有文件。*.java 只搜 Java，src/** 只搜 src 目录，! 开头的规则用于排除。多条规则用逗号分隔")
                 if !search.fileMask.isEmpty {
                     Button { search.fileMask = "" } label: {
                         Image(systemName: "xmark.circle.fill").font(.system(size: 10)).foregroundStyle(Theme.mutedText)
                     }
                     .buttonStyle(.plain)
-                    .toolTip("清除掩码")
+                    .toolTip("清除文件筛选")
                 }
             }
             .padding(.horizontal, 8)
@@ -127,6 +136,29 @@ struct FindInPathView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
+    }
+
+    private var resultControls: some View {
+        HStack(spacing: 6) {
+            Menu {
+                Button("按目录") { search.grouping = .directories }
+                Button("按文件") { search.grouping = .files }
+            } label: {
+                Text(search.grouping == .directories ? "按目录分组" : "按文件分组")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            Spacer(minLength: 0)
+            if search.visiblePin == nil {
+                Button("保留结果") { search.pinCurrent() }
+                    .controlSize(.small)
+                    .disabled(search.replacementResult?.files.isEmpty != false)
+                    .toolTip("把这组结果保存为独立标签，继续查找时仍可切回来查看")
+            }
+        }
+        .font(Theme.smallFont)
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .overlay(alignment: .bottom) { Rectangle().fill(Theme.border).frame(height: 1) }
     }
 
     private func scopeTitle(_ scope: TextSearchScope) -> String {
@@ -180,30 +212,19 @@ struct FindInPathView: View {
         return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    ForEach(result.files) { file in
-                        let isCollapsed = search.collapsedFiles.contains(file.path)
-                        SearchFileRow(file: file, isCollapsed: isCollapsed) {
-                            isListFocused = true
-                            search.toggleCollapsed(file.path)
-                        }
-                        .id(Self.rowID(file.path, nil))
-                        if !isCollapsed {
-                            ForEach(file.lines) { line in
-                                let hit = TextSearchController.Hit(path: file.path, line: line.line)
-                                SearchLineRow(line: line, isSelected: hit == selected) {
-                                    isListFocused = true
-                                    search.select(hit)
-                                    session.openSearchResult(path: file.path, line: line, pinned: false)
-                                } release: { isClick in
-                                    if isClick, clicks.registerClick(on: Self.rowID(file.path, line.line)) {
-                                        session.openSearchResult(path: file.path, line: line, pinned: true)
-                                    }
-                                } copyReference: {
-                                    copy(FileReference.format(path: file.path, lines: line.line...line.line))
-                                }
-                                .id(Self.rowID(file.path, line.line))
+                    if search.grouping == .directories {
+                        ForEach(result.directories) { group in
+                            let isCollapsed = search.collapsedDirectories.contains(group.path)
+                            SearchGroupRow(title: group.path.isEmpty ? "根目录" : group.path,
+                                detail: "\(group.files.count) 个文件 · \(group.matchCount) 处", icon: "folder",
+                                iconColor: Theme.secondaryText, isCollapsed: isCollapsed, indentation: 0) {
+                                isListFocused = true
+                                search.toggleDirectory(group.path)
                             }
+                            if !isCollapsed { fileRows(group.files, grouped: true, selected: selected) }
                         }
+                    } else {
+                        fileRows(result.files, grouped: false, selected: selected)
                     }
                 }
                 .padding(.vertical, 4)
@@ -221,12 +242,44 @@ struct FindInPathView: View {
         }
     }
 
+    @ViewBuilder private func fileRows(_ files: [TextSearchFile], grouped: Bool, selected: TextSearchController.Hit?) -> some View {
+        ForEach(files) { file in
+            let isCollapsed = search.collapsedFiles.contains(file.path)
+            let icon = FileIcon.file(named: file.name)
+            let title = grouped || file.directory.isEmpty ? file.name : "\(file.name) · \(file.directory)"
+            SearchGroupRow(title: title, detail: "\(file.matchCount) 处", icon: icon.systemName, iconColor: icon.color,
+                           isCollapsed: isCollapsed, indentation: grouped ? 14 : 0) {
+                isListFocused = true
+                search.toggleCollapsed(file.path)
+            }
+            .toolTip(file.path)
+            .id(Self.rowID(file.path, nil))
+            if !isCollapsed {
+                ForEach(file.lines) { line in
+                    let hit = TextSearchController.Hit(path: file.path, line: line.line)
+                    SearchLineRow(line: line, isSelected: hit == selected, indentation: grouped ? 14 : 0) {
+                        isListFocused = true
+                        search.select(hit)
+                        session.openSearchResult(path: file.path, line: line, pinned: false)
+                    } release: { isClick in
+                        if isClick, clicks.registerClick(on: Self.rowID(file.path, line.line)) {
+                            session.openSearchResult(path: file.path, line: line, pinned: true)
+                        }
+                    } copyReference: {
+                        copy(FileReference.format(path: file.path, lines: line.line...line.line))
+                    }
+                    .id(Self.rowID(file.path, line.line))
+                }
+            }
+        }
+    }
+
     private static func rowID(_ path: String, _ line: Int?) -> String {
         line.map { "line:\($0):\(path)" } ?? "file:" + path
     }
 
     private func openSelected(pinned: Bool) {
-        guard let hit = search.selected, let line = search.line(for: hit) else { return }
+        guard let hit = search.selectForOpening(), let line = search.line(for: hit) else { return }
         session.openSearchResult(path: hit.path, line: line, pinned: pinned)
     }
 
@@ -260,33 +313,35 @@ private struct OptionToggle: View {
     }
 }
 
-/// 文件行：折叠箭头 + 图标 + 文件名 + 相对目录 + 匹配数。点一下折叠 / 展开。
-private struct SearchFileRow: View {
-    let file: TextSearchFile
+private struct SearchGroupRow: View {
+    let title: String
+    let detail: String
+    let icon: String
+    let iconColor: Color
     let isCollapsed: Bool
+    let indentation: CGFloat
     let toggle: () -> Void
     @State private var isHovering = false
 
     var body: some View {
-        let icon = FileIcon.file(named: file.name)
         HStack(spacing: 6) {
             Image(systemName: isCollapsed ? "chevron.right" : "chevron.down")
                 .font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.secondaryText).frame(width: 12)
-            Image(systemName: icon.systemName).font(.system(size: 12)).foregroundStyle(icon.color).frame(width: 16)
-            Text(file.name).font(Theme.uiFont).foregroundStyle(Theme.text).lineLimit(1).layoutPriority(1)
-            if !file.directory.isEmpty {
-                Text(file.directory).font(Theme.smallFont).foregroundStyle(Theme.mutedText).lineLimit(1).truncationMode(.head)
-            }
-            Text("\(file.matchCount)").font(Theme.smallFont).foregroundStyle(Theme.mutedText).layoutPriority(1)
+            Image(systemName: icon).font(.system(size: 12)).foregroundStyle(iconColor).frame(width: 16)
+            Text(title).font(Theme.uiFont).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 0)
+            Text(detail).font(Theme.smallFont).foregroundStyle(Theme.mutedText).fixedSize()
         }
-        .padding(.horizontal, 10)
+        .padding(.leading, 10 + indentation).padding(.trailing, 10)
         .frame(height: Theme.treeRowHeight)
         .background(Rectangle().fill(isHovering ? Theme.hover.opacity(0.5) : .clear))
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
         .onPress(modifiers: { _, modifiers in if !modifiers.contains(.control) { toggle() } })
-        .toolTip(file.path)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(title)，\(detail)，\(isCollapsed ? "已折叠" : "已展开")")
+        .accessibilityAddTraits(.isButton)
+        .accessibilityAction { toggle() }
         // 文件行不挂右键菜单：「复制路径」与匹配行的「复制路径和行号」重复（1.7.1 用户定的，只留后者）
     }
 }
@@ -295,6 +350,7 @@ private struct SearchFileRow: View {
 private struct SearchLineRow: View {
     let line: TextSearchLine
     let isSelected: Bool
+    let indentation: CGFloat
     let press: () -> Void
     let release: (Bool) -> Void
     let copyReference: () -> Void
@@ -314,7 +370,7 @@ private struct SearchLineRow: View {
                 .truncationMode(.tail)
             Spacer(minLength: 0)
         }
-        .padding(.leading, 26)
+        .padding(.leading, 26 + indentation)
         .padding(.trailing, 10)
         .frame(height: Theme.treeRowHeight)
         .background(Rectangle().fill(isSelected ? Theme.selection : (isHovering ? Theme.hover.opacity(0.5) : .clear)))

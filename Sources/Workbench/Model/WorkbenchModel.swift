@@ -116,8 +116,10 @@ final class WorkbenchModel: ObservableObject {
             self?.active?.applyEdit(path: path, text: text)
         }
         self.renderer.onEditLocation = { [weak self] path, cursor in
+            self?.active?.clearBlame(path: path)
             self?.active?.editorDidChange(at: cursor, path: path)
         }
+        self.renderer.onBlameCommit = { [weak self] path, line in self?.active?.openBlamedCommit(path: path, line: line) }
         self.renderer.onEditorHistory = { [weak self] path, text, history in
             self?.active?.applyEditorHistory(path: path, text: text, history: history)
         }
@@ -134,6 +136,14 @@ final class WorkbenchModel: ObservableObject {
         self.renderer.contextActions = { [weak self] in
             guard let session = self?.active, let tab = session.activeTab else { return [] }
             var actions: [ContentRenderer.ContextAction] = []
+            if session.blameFile != nil {
+                actions.append(ContentRenderer.ContextAction(title: session.blameActionTitle) { [weak session] in session?.toggleBlame() })
+            }
+            if let file = tab.fileURL, session.activeContent?.text != nil {
+                actions.append(ContentRenderer.ContextAction(title: "与剪贴板比较") { [weak session] in
+                    if let session { Desktop.compareWithClipboard(file, in: session) }
+                })
+            }
             if session.referenceURL(for: tab) != nil {
                 let id = tab.id
                 actions.append(ContentRenderer.ContextAction(title: "复制路径和行号") { [weak session] in
@@ -151,7 +161,8 @@ final class WorkbenchModel: ObservableObject {
         self.renderer.onRendered = { [weak self] _, _ in self?.active?.findInFile() }
         self.renderer.onChangePosition = { [weak self] position in self?.active?.setChangePosition(position) }
         self.renderer.onDiffNavigate = { [weak self] step, path in
-            guard let session = self?.active, session.activeTab?.diffChange?.path == path else { return }
+            guard let session = self?.active, let tab = session.activeTab,
+                  (tab.diffChange?.path ?? tab.comparison?.renderPath) == path else { return }
             session.navigateChange(step)
         }
         self.renderer.onDiffStatistics = { [weak self] path, counts in self?.active?.updateDiffStatistics(path: path, counts: counts) }
@@ -217,6 +228,14 @@ final class WorkbenchModel: ObservableObject {
             let session = ProjectSession(root: chosen, git: git, renderer: renderer, preferences: preferences, defaults: defaults,
                                          editorHistories: editorHistories)
             session.onRequestToolWindow = { [weak self] window in self?.toolWindow = window }
+            session.projectSearch.actions = { [weak self] in
+                guard let self else { return [] }
+                return WorkbenchAction.allCases.map { $0.searchEntry(in: self) }
+            }
+            session.onSearchAction = { [weak self] id in
+                guard let self, let action = WorkbenchAction(rawValue: id) else { return }
+                action.perform(in: self)
+            }
             sessions.append(session)
             activate(session.id)
             recentProjects = RecentProjects.adding(root, to: recentProjects)

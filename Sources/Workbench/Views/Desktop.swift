@@ -15,6 +15,30 @@ enum Desktop {
         pasteboard.setString(text, forType: .string)
     }
 
+    @MainActor static func compareWithClipboard(_ file: URL, in session: ProjectSession) {
+        guard let text = NSPasteboard.general.string(forType: .string) else {
+            session.notify("剪贴板里没有可比较的文本")
+            return
+        }
+        session.compareWithClipboard(file, text: text)
+    }
+
+    @MainActor static func chooseFileToCompare(with file: URL, in session: ProjectSession) {
+        let panel = NSOpenPanel()
+        panel.title = "选择要比较的文件"
+        panel.prompt = "比较"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = file.deletingLastPathComponent()
+        let picked: (NSApplication.ModalResponse) -> Void = { [weak session] response in
+            guard response == .OK, let other = panel.url else { return }
+            session?.compareFiles(file, other)
+        }
+        if let window = NSApp.keyWindow { panel.beginSheetModal(for: window, completionHandler: picked) }
+        else { panel.begin(completionHandler: picked) }
+    }
+
     /// 在终端里运行一个脚本：生成 `.command` 包装文件交给系统打开，默认由终端执行（见 `TerminalLauncher`）。
     /// 命令由 `ScriptRunner` 定（Python 优先用 uv、shell 按扩展名选解释器）。1.7.2 起这是唯一的运行方式：内置运行窗口已删。
     /// 读的是磁盘上的内容，调用方先 `saveAll`。失败了返回错误文案，由调用方决定显示在哪。

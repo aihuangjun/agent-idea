@@ -230,6 +230,29 @@ private func waitUntil(_ timeout: TimeInterval = 10, _ condition: @MainActor () 
     }
 }
 
+@Test @MainActor func arbitraryComparisonOpensReadOnlyDiffWithoutGit() async throws {
+    try await withTemporaryDirectory { root in
+        let a = root.appendingPathComponent("A.swift"), b = root.appendingPathComponent("B.swift")
+        try "let value = 1\n".write(to: a, atomically: true, encoding: .utf8)
+        try "let value = 2\n".write(to: b, atomically: true, encoding: .utf8)
+        let session = makeSession(in: root)
+        session.compareFiles(a, b)
+        await waitUntil { session.activeTab?.comparison != nil }
+        let tab = try #require(session.activeTab)
+        #expect(tab.comparison?.left == "A.swift" && tab.comparison?.right == "B.swift")
+        #expect(tab.isDiff && tab.diffChange == nil && session.documentID(for: tab) == nil)
+        #expect(session.supportsDiffReading && session.canNavigateChanges && !session.isEditable(tab))
+        #expect(session.diffReviewProgress.fileCount == 0)
+        let content = try #require(session.activeContent)
+        guard case .diff(_, _, _, _, _, let edit) = content.renderContent(for: tab, diffMode: .sideBySide) else {
+            Issue.record("Expected a rendered text comparison")
+            return
+        }
+        #expect(edit?.readOnly == true && edit?.oldText.contains("= 1") == true && edit?.newText.contains("= 2") == true)
+        #expect(edit?.displayPath == "B.swift")
+    }
+}
+
 @Test @MainActor func sourceNavigationRestoresDifferentLocationsInTheSameFile() async throws {
     try await withTemporaryDirectory { directory in
         let file = directory.appendingPathComponent("One.java")

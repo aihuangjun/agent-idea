@@ -20,7 +20,7 @@ public struct SourceOutline: Codable, Sendable {
 }
 
 public enum ProjectSearch {
-    public enum Scope: String, CaseIterable, Sendable { case all, types, files, symbols }
+    public enum Scope: String, CaseIterable, Sendable { case all, types, files, symbols, actions }
 
     public struct IndexedSymbol: Sendable {
         public let symbol: SourceSymbol
@@ -39,15 +39,17 @@ public enum ProjectSearch {
         public let symbol: SourceSymbol?
         public let location: SourceLocation?
         public let matchedNameIndices: [Int]
+        public let action: ActionSearch.Entry?
 
-        public var name: String { symbol?.name ?? (path as NSString).lastPathComponent }
+        public var name: String { action?.title ?? symbol?.name ?? (path as NSString).lastPathComponent }
         /// 显示项目相对路径。根目录的文件加上 ./，让它与同名文件的其它位置区分开。
         public var displayPath: String { path.contains("/") ? path : "./" + path }
-        public var id: ID { ID(path: path, symbol: symbol) }
+        public var id: ID { ID(path: path, symbol: symbol, actionID: action?.id) }
 
         public struct ID: Hashable {
             let path: String
             let symbol: SourceSymbol?
+            let actionID: String?
         }
 
         public init(path: String, symbol: SourceSymbol? = nil, location: SourceLocation? = nil, matchedNameIndices: [Int] = []) {
@@ -55,6 +57,15 @@ public enum ProjectSearch {
             self.symbol = symbol
             self.location = location
             self.matchedNameIndices = matchedNameIndices
+            self.action = nil
+        }
+
+        public init(action: ActionSearch.Entry) {
+            self.path = ""
+            self.symbol = nil
+            self.location = nil
+            self.matchedNameIndices = []
+            self.action = action
         }
     }
 
@@ -62,6 +73,7 @@ public enum ProjectSearch {
         _ rawQuery: String, scope: Scope, files: [FileSearchEntry], symbols: [IndexedSymbol], root: String,
         limit: Int = 100, shouldStop: () -> Bool = { false }
     ) -> [Result] {
+        guard scope != .actions else { return [] }
         let reference = FileReference.parseQuery(rawQuery, projectRoot: root, preservingRoot: true)
         let name = reference.path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return [] }

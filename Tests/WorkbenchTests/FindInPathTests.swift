@@ -20,6 +20,33 @@ private func record(_ path: String, _ line: Int, _ column: Int, _ text: String) 
     "\(path)\u{0}\(line)\u{0}\(column)\u{0}\(text)\n"
 }
 
+@Test @MainActor func largeSearchGroupsAndCollapsesResultsWithoutLosingKeyboardAccess() async throws {
+    let output = (0..<8).flatMap { folder in
+        (1...20).map { line in record("group\(folder)/find.swift", line, 1, "needle") }
+    }.joined()
+    let client = GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: FakeCommandRunner { _, _ in shellOutput(output) })
+    let search = TextSearchController(root: URL(fileURLWithPath: "/p"), git: client, debounce: 0)
+    search.text = "needle"
+    await waitUntil { search.displayedResult?.matchCount == 160 }
+    #expect(search.displayedResult?.directories.map(\.matchCount) == Array(repeating: 20, count: 8))
+    #expect(search.collapsedDirectories.count == 8 && search.collapsedFiles.count == 8)
+    #expect(search.selected == nil)
+    search.moveSelection(by: 1)
+    #expect(search.selected == .init(path: "group0/find.swift", line: 1))
+    #expect(!search.collapsedDirectories.contains("group0") && !search.collapsedFiles.contains("group0/find.swift"))
+    search.toggleDirectory("group0")
+    #expect(search.selected == nil)
+    search.grouping = .files
+    #expect(search.selectForOpening()?.path == "group0/find.swift")
+
+    search.pinCurrent()
+    let id = try #require(search.visiblePin)
+    search.resumeSearch()
+    #expect(search.visiblePin == nil && search.focusRequests == 1)
+    search.pinCurrent()
+    #expect(search.visiblePin == id && search.pinnedResults.count == 1)
+}
+
 /// 「slow」那一次挂起直到被取消（模拟大仓库里还没搜完就又敲了一个字），别的照常返回。
 private final class GatedRunner: CommandRunning, @unchecked Sendable {
     let slowWasCancelled = Locked(false)
