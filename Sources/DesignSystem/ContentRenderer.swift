@@ -101,7 +101,9 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     }
     public var contextActions: (() -> [ContextAction])?
     public var onGoToDefinition: ((_ sourcePath: String, _ point: CGPoint?) -> Void)?
+    public var onQuickDefinition: ((_ sourcePath: String, _ point: CGPoint) -> Void)?
     public var onJavaImplementations: ((_ sourcePath: String, _ point: CGPoint) -> Void)?
+    public var onJavaSemanticAction: ((JavaSemanticSearch.Action, String, CGPoint) -> Void)?
     /// HTML 不装 message handler，页面脚本无法向编辑器发送 edited / openPath 等消息。
     fileprivate var htmlWebView: CursorRestoringWebView?
     private var showingHTML = false
@@ -122,6 +124,7 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
     public var onRendered: ((String, Int) -> Void)?
     /// 编辑器里的文字变了（停手 300ms 后发一次）：文件路径与整份文本。
     public var onEdited: ((String, String) -> Void)?
+    public var onEditLocation: ((String, EditorCursor) -> Void)?
     /// 同一条 edited 消息里带的撤销历史（CodeMirror `getHistory()` 的 JSON 文本）：路径、整份文本、历史。在 `onEdited` 之后调。
     /// 宿主据此随时手握与最新草稿对得上的历史，退出时同步存盘不必再问页面（来不及问）。太大的历史页面不带。
     public var onEditorHistory: ((String, String, String) -> Void)?
@@ -265,8 +268,17 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         (webView as? CursorRestoringWebView)?.sourceActions = { [weak self] point in
             guard let self, let path = definitionPath else { return [] }
             var actions = [ContextAction(title: "跳转到定义（F3）") { [weak self] in self?.onGoToDefinition?(path, point) }]
+            if onQuickDefinition != nil {
+                actions.append(ContextAction(title: "快速查看定义") { [weak self] in self?.onQuickDefinition?(path, point) })
+            }
             if URL(fileURLWithPath: path).pathExtension.lowercased() == "java", onJavaImplementations != nil {
                 actions.append(ContextAction(title: "查看实现类") { [weak self] in self?.onJavaImplementations?(path, point) })
+                if onJavaSemanticAction != nil {
+                    for (action, title) in [(JavaSemanticSearch.Action.usages, "查找用法"), (.implementations, "查看方法实现"),
+                                            (.hierarchy, "调用层级"), (.rename, "重命名代码…")] {
+                        actions.append(ContextAction(title: title) { [weak self] in self?.onJavaSemanticAction?(action, path, point) })
+                    }
+                }
             }
             return actions
         }
@@ -464,6 +476,47 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
         }
     }
 
+    public func sourceCursor(_ completion: @escaping (EditorCursor?) -> Void) {
+        guard !showingHTML, isReady else { completion(nil); return }
+        webView.evaluateJavaScript("window.ide.sourceCursor()") { value, _ in
+            completion(Self.cursor(from: value))
+        }
+    }
+
+    public struct EditableSnapshot: Decodable {
+        public let text: String
+        public let start: Int
+        public let end: Int
+    }
+
+    public func editableSnapshot(path: String) async throws -> EditableSnapshot? {
+        guard isReady, !showingHTML else { return nil }
+        let value = try await webView.callAsyncJavaScript("return JSON.stringify(window.ide.editableSnapshot(path))",
+            arguments: ["path": path], in: nil, contentWorld: .page)
+        guard let json = value as? String else { return nil }
+        return try JSONDecoder().decode(EditableSnapshot?.self, from: Data(json.utf8))
+    }
+
+    public func applyTextEdits(_ edits: [TextReplacement], path: String, expected: String, selecting: Range<Int>?) async throws -> Bool {
+        guard isReady, !showingHTML else { return false }
+        let selection: Any = selecting.map { ["start": $0.lowerBound, "end": $0.upperBound] } as Any? ?? NSNull()
+        let value = try await webView.callAsyncJavaScript("return window.ide.applyTextEdits(path, expected, JSON.parse(edits), selection)",
+            arguments: ["path": path, "expected": expected, "edits": String(decoding: try JSONEncoder().encode(edits), as: UTF8.self),
+                        "selection": selection], in: nil, contentWorld: .page)
+        return value as? Bool == true
+    }
+
+    public enum SourceEditCommand: String {
+        case commentLine, duplicateLine, moveLineUp, moveLineDown, extendSelection
+    }
+
+    public func editSource(_ command: SourceEditCommand, path: String) async throws -> Bool {
+        guard isReady, !showingHTML else { return false }
+        let value = try await webView.callAsyncJavaScript("return await window.ide.editSource(path, command)",
+            arguments: ["path": path, "command": command.rawValue], in: nil, contentWorld: .page)
+        return value as? Bool == true
+    }
+
     /// 正文里选中的文字（编辑器的选区，只读视图的 DOM 选区）：在项目中查找拿它预填。没有选区、页面没就绪、HTML 预览时为 nil。
     public func selectedText(_ completion: @escaping (String?) -> Void) {
         guard !showingHTML, isReady else { completion(nil); return }
@@ -529,6 +582,10 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
 
     public func javaTypeReference(path: String, point: CGPoint?) async throws -> JavaTypeReference? {
         try await editorReference("javaTypeReference", path: path, point: point)
+    }
+
+    public func javaSelection(path: String, point: CGPoint?) async throws -> JavaSemanticSearch.Selection? {
+        try await editorReference("javaSelection", path: path, point: point)
     }
 
     private func editorReference<T: Decodable>(_ method: String, path: String, point: CGPoint?) async throws -> T? {
@@ -766,6 +823,10 @@ public final class ContentRenderer: NSObject, WKScriptMessageHandler, WKNavigati
                 onEdited?(path, text)
                 if let history = body["history"] as? String { onEditorHistory?(path, text, history) }
                 Task { [weak self] in await self?.updateDiffReview(path: path, text: text) }
+            }
+        case "editLocation":
+            if let path = body["path"] as? String, let cursor = Self.cursor(from: body["cursor"]) {
+                onEditLocation?(path, cursor)
             }
         case "diffReview":
             if let path = body["path"] as? String, let text = body["text"] as? String {

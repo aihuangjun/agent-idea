@@ -20,6 +20,42 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
     [hash, String(hash.prefix(7)), parents, "Alice", "a@x.io", "1725000000", "1725000000", subject, ""].joined(separator: us) + "\0"
 }
 
+@Test @MainActor func scopesAndPinnedSearchesKeepIndependentResultSets() async throws {
+    try await withTemporaryDirectory { root in
+        for file in ["src/a.txt", "src2/b.txt", "open.txt", "changed.txt"] {
+            let url = root.appendingPathComponent(file)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try "needle\n".write(to: url, atomically: true, encoding: .utf8)
+        }
+        let search = TextSearchController(root: root, debounce: 0)
+        search.filesInScope = { scope in
+            switch scope {
+            case .openFiles: return ["open.txt"]
+            case .changedFiles: return ["changed.txt"]
+            default: return nil
+            }
+        }
+        search.scope = .directory("src")
+        search.text = "needle"
+        await waitUntil { search.displayedResult?.files.map(\.path) == ["src/a.txt"] }
+        #expect(search.displayedResult?.files.map(\.path) == ["src/a.txt"])
+        search.pinCurrent()
+        let pinned = try #require(search.visiblePin)
+        search.scope = .changedFiles
+        await waitUntil { search.result?.files.map(\.path) == ["changed.txt"] }
+        #expect(search.displayedResult?.files.map(\.path) == ["src/a.txt"])
+        search.selectPin(nil)
+        #expect(search.displayedResult?.files.map(\.path) == ["changed.txt"])
+        search.scope = .openFiles
+        await waitUntil { search.displayedResult?.files.map(\.path) == ["open.txt"] }
+        #expect(search.displayedResult?.files.map(\.path) == ["open.txt"])
+        search.selectPin(pinned)
+        #expect(search.displayedResult?.files.map(\.path) == ["src/a.txt"])
+        search.closePin(pinned)
+        #expect(search.displayedResult?.files.map(\.path) == ["open.txt"])
+    }
+}
+
 @Test @MainActor func historyLoadsPagesSelectsAndOpensCommitDiff() async throws {
     try await withTemporaryDirectory { directory in
         let head = Locked("c2c2c2c2c2c2c2c2")

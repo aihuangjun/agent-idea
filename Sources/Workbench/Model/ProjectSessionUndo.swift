@@ -139,6 +139,9 @@ extension ProjectSession {
             return .done(updated)
         case .commit(let record):
             return await undoCommit(entry, record: record)
+        case .textChanges(let changes):
+            if let failure = await writeTextChanges(changes, reversing: true) { return .failed(failure) }
+            return .done(entry)
         case .batch(let operations):
             // 倒着撤：后搬的先搬回去。中途撤不成就停在那里报错，已经撤掉的那几个不再能重做（这一步整个作废）
             var reverted: [UndoableOperation] = []
@@ -237,6 +240,9 @@ extension ProjectSession {
             return .done(updated)
         case .commit(let record):
             return await redoCommit(entry, record: record)
+        case .textChanges(let changes):
+            if let failure = await writeTextChanges(changes) { return .failed(failure) }
+            return .done(entry)
         case .batch(let operations):
             var applied: [UndoableOperation] = []
             for operation in operations {

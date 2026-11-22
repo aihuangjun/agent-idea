@@ -67,7 +67,12 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     @Published private(set) var tabs: [EditorTab] = []
     @Published private(set) var activeTabID: String? {
-        didSet { if oldValue != activeTabID { cancelDefinitionNavigation() } }
+        didSet {
+            if oldValue != activeTabID {
+                cancelDefinitionNavigation()
+                fileReplace = nil
+            }
+        }
     }
     @Published private(set) var contents: [String: TabContent] = [:]
     /// 改了还没保存的文本，按标签 id（规则见 `DraftStore`）。
@@ -79,8 +84,9 @@ final class ProjectSession: ObservableObject, Identifiable {
     private var baseRequests: [String: UUID] = [:]
     private var diffRequests: [String: UUID] = [:]
     private var pendingDocumentReloads: [String: UUID] = [:]
-    /// 后退 / 前进的历史，元素是标签 id。
-    @Published private(set) var navigation = NavigationHistory<String>()
+    @Published private(set) var navigation = NavigationHistory<NavigationPoint>()
+    private var recentLocations: [NavigationPoint] = []
+    @Published private(set) var lastEditLocation: NavigationPoint?
     /// 文件操作的撤销 / 重做栈（重命名、移动、删除、回滚、提交）。编辑器里的撤销是 CodeMirror 自己的，见 `UndoDispatcher`。
     @Published var undoHistory = UndoHistory<UndoableOperation>()
     /// 一次撤销 / 重做正在跑（搬文件、git 都是异步的），跑完之前再按 ⌘Z 不响应。
@@ -103,6 +109,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     private var pendingDiffReveal: (tabID: String, edge: DiffEdge)?
     private var isSteppingDiff = false
     @Published var isFindShown = false
+    @Published var fileReplace: FileReplaceSession?
+    @Published var projectReplace: ProjectReplaceRequest?
     @Published var findQuery = ""
     @Published var findCaseSensitive = false
     @Published private(set) var findFound: Bool?
@@ -146,6 +154,10 @@ final class ProjectSession: ObservableObject, Identifiable {
     private var gitTask: Task<Void, Never>?
     var definitionTask: Task<Void, Never>?
     @Published var definitionChoices: DefinitionChoices?
+    @Published var sourceNavigation: SourceNavigationRequest?
+    @Published var javaHierarchy: JavaHierarchyRequest?
+    @Published var javaRename: JavaRenameRequest?
+    @Published var isAnalyzingJava = false
     /// 正在按历史后退/前进：这次切换不再记进历史。
     private var isNavigating = false
 
@@ -173,6 +185,8 @@ final class ProjectSession: ObservableObject, Identifiable {
         self.recentFiles = RecentFilesController(root: project.root, defaults: defaults)
         // git 先给上：仓库根还没解析出来时就搜也走 git grep；git 说不在仓库里，控制器自己退回逐个读文件
         self.textSearch = TextSearchController(root: project.root, git: git)
+        textSearch.filesInScope = { [weak self] scope in self?.pathsForTextSearch(scope) }
+        textSearch.exclusion = { [weak self] in self?.sourceSearchExclusion ?? { _, _ in false } }
         projectSearch.inputs = { [weak self] in
             guard let self else { return .init(drafts: [:], isExcluded: { _, _ in false }) }
             return .init(drafts: self.draftsByPath, isExcluded: self.sourceSearchExclusion)
@@ -572,7 +586,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     }
 
     /// 磁盘上已经搬好了：界面上所有指着旧路径的东西换到新路径。
-    private func didRename(_ oldURL: URL, to newURL: URL) {
+    func didRename(_ oldURL: URL, to newURL: URL) {
         Log.info("project", "已重命名 \(oldURL.path) → \(newURL.path)")
         // 标签里的 URL 是解析过符号链接的（openFile），这里同样解析一遍再比，/var 与 /private/var 才对得上。
         // 只解析父目录再把名字拼回去：磁盘已经搬完了，解析整条旧路径在不分大小写的文件系统上会得到新名字
@@ -603,8 +617,18 @@ final class ProjectSession: ObservableObject, Identifiable {
             contents[tab.id] = nil
             baseTexts[replaced.id] = baseTexts.removeValue(forKey: tab.id)
             draftStore.move(tab.id, to: replaced.id)
-            navigation.replace(tab.id, with: replaced.id)
         }
+        func moved(_ point: NavigationPoint) -> NavigationPoint {
+            if let id = renamedTabIDs[point.tabID] { return NavigationPoint(tabID: id, position: point.position) }
+            if let url = EditorTab.fileURL(fromID: point.tabID),
+               let path = FileRename.rewrite(url.path, from: resolvedOld, to: resolvedNew) {
+                return NavigationPoint(tabID: EditorTab.id(forFile: URL(fileURLWithPath: path)), position: point.position)
+            }
+            return point
+        }
+        navigation.mapEntries(moved)
+        recentLocations = recentLocations.map(moved)
+        lastEditLocation = lastEditLocation.map(moved)
         if let activeTabID, let moved = renamedTabIDs[activeTabID] { self.activeTabID = moved }
         // 工作区 diff 标签：变更的路径变了，git 刷新后会是另一条变更，直接关掉（草稿已经挪走，这里不会写回旧路径）
         for tab in tabs {
@@ -640,7 +664,9 @@ final class ProjectSession: ObservableObject, Identifiable {
         show(tab)
         if contents[tab.id] == nil { loadFile(for: tab) }
         // 已经是当前标签时 show 不重画，挂着的没人取：直接跳
-        if let location, pendingLineReveal?.tabID == tab.id, activeTabID == tab.id { goToLine(location, selecting: length) }
+        if let location, pendingLineReveal?.tabID == tab.id, activeTabID == tab.id {
+            goToLine(location, selecting: length, recording: navigation.current?.position != Self.editorPosition(location))
+        }
     }
 
     func openDiff(_ change: GitChange, pinned: Bool = false) {
@@ -684,7 +710,7 @@ final class ProjectSession: ObservableObject, Identifiable {
             let replaced = tabs[previewIndex]
             contents[replaced.id] = nil
             diffRequests[replaced.id] = nil
-            navigation.remove(replaced.id)
+            if replaced.fileURL == nil { navigation.removeAll { $0.tabID == replaced.id } }
             tabs[previewIndex] = incoming
             // 它指着的文档也要放掉：留在 contents 里的话没有标签替它盯着磁盘（reloadOpenFilesIfChanged 只看开着的），
             // 之后再打开同一个文件，ensureDocument 拿到的是旧内容——Agent 改过的文件 diff 里一行变更都没有
@@ -768,7 +794,48 @@ final class ProjectSession: ObservableObject, Identifiable {
     // MARK: - 后退 / 前进
 
     private func recordNavigation(_ tabID: String) {
-        if !isNavigating { navigation.visit(tabID) }
+        guard !isNavigating else { return }
+        let position = pendingLineReveal.flatMap { $0.tabID == tabID ? $0.position : nil }
+            ?? tabs.first { $0.id == tabID }?.cursor
+        recordLocation(NavigationPoint(tabID: tabID, position: position))
+    }
+
+    private func recordLocation(_ point: NavigationPoint) {
+        navigation.visit(point)
+        rememberRecentLocation(point)
+    }
+
+    private func rememberRecentLocation(_ point: NavigationPoint) {
+        guard point.position != nil, EditorTab.fileURL(fromID: point.tabID) != nil else { return }
+        recentLocations.removeAll { $0 == point }
+        recentLocations.insert(point, at: 0)
+        if recentLocations.count > 100 { recentLocations.removeLast() }
+    }
+
+    func editorDidChange(at cursor: EditorCursor, path: String) {
+        guard let tab = activeTab, documentURL(for: tab)?.path == path else { return }
+        let id = EditorTab.id(forFile: URL(fileURLWithPath: path))
+        lastEditLocation = NavigationPoint(tabID: id, position: cursor)
+    }
+
+    func showRecentLocations() {
+        let locations = recentLocations.filter { point in
+            EditorTab.fileURL(fromID: point.tabID).map(fileExists) ?? false
+        }
+        sourceNavigation = .locations(locations, root: project.root)
+    }
+
+    func goToLastEdit() {
+        if let lastEditLocation { openLocation(lastEditLocation) }
+    }
+
+    func openLocation(_ point: NavigationPoint) {
+        if let url = EditorTab.fileURL(fromID: point.tabID), fileExists(url) {
+            openFile(url, pinned: true, at: point.location)
+        } else if tabs.contains(where: { $0.id == point.tabID }) {
+            activate(point.tabID)
+            if let location = point.location { goToLine(location, recording: false) }
+        }
     }
 
     var canGoBack: Bool { navigation.canGoBack }
@@ -777,11 +844,16 @@ final class ProjectSession: ObservableObject, Identifiable {
     func goBack() { navigate { $0.goBack() } }
     func goForward() { navigate { $0.goForward() } }
 
-    private func navigate(_ step: (inout NavigationHistory<String>) -> String?) {
-        guard let target = step(&navigation), tabs.contains(where: { $0.id == target }) else { return }
+    private func navigate(_ step: (inout NavigationHistory<NavigationPoint>) -> NavigationPoint?) {
+        rememberNavigationOrigin()
         isNavigating = true
-        activate(target)
-        isNavigating = false
+        defer { isNavigating = false }
+        while let target = step(&navigation) {
+            if tabs.contains(where: { $0.id == target.tabID }) || EditorTab.fileURL(fromID: target.tabID).map(fileExists) == true {
+                openLocation(target)
+                return
+            }
+        }
     }
 
     // MARK: - 上一处 / 下一处变更
@@ -888,7 +960,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// 文档（内容、基线、草稿）只在最后一个用它的标签关掉时才释放：文件标签与 diff 标签可能同时开着同一个文件。
     private func finishClosing(_ tabID: String, discardingDraft: Bool = false) {
         guard let index = tabs.firstIndex(where: { $0.id == tabID }) else { return }
-        let documentID = documentID(for: tabs[index])
+        let tab = tabs[index]
+        let documentID = documentID(for: tab)
         if let documentID {
             // 文件已经不在磁盘上（外部删了）：关标签的自动保存不能凭空把它创建回来；显式 ⌘S 不受此限
             let fileExists = EditorTab.fileURL(fromID: documentID).map { fileManager.fileExists(atPath: $0.path) } ?? false
@@ -905,7 +978,9 @@ final class ProjectSession: ObservableObject, Identifiable {
         tabs.remove(at: index)
         contents[tabID] = nil
         diffRequests[tabID] = nil
-        navigation.remove(tabID)
+        if tab.fileURL == nil || !navigation.entries.contains(where: { $0.tabID == tabID && $0.position != nil }) {
+            navigation.removeAll { $0.tabID == tabID }
+        }
         if let documentID {
             if tabs.contains(where: { self.documentID(for: $0) == documentID }) {
                 contents[documentID] = document
@@ -987,6 +1062,7 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     func showFind() {
         guard activeTab != nil else { return }
+        fileReplace = nil
         isFindShown = true
         findFocusRequests += 1
     }
@@ -1079,9 +1155,13 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     /// 跳到当前标签的某一行。已经画出来的直接让页面跳（不重画，草稿、撤销历史都不动）；
     /// 还在加载、项目不是当前的、或者 Markdown / HTML 正在预览（没有行）就挂起来，等 `renderActiveTab` 带进 payload。
-    func goToLine(_ location: SourceLocation, selecting length: Int = 0) {
+    func goToLine(_ location: SourceLocation, selecting length: Int = 0, recording: Bool = true) {
         guard let tab = activeTab else { return }
         let position = Self.editorPosition(location)
+        if recording, !isNavigating, navigation.current != NavigationPoint(tabID: tab.id, position: position) {
+            rememberNavigationOrigin()
+            recordLocation(NavigationPoint(tabID: tab.id, position: position))
+        }
         guard isActive, let content = contents[tab.id], content != .loading, !needsSourceView(tab, content) else {
             pendingLineReveal = (tab.id, position, length)
             // 预览切源码要重画：先把编辑器里的状态要回来（分栏预览里可能正改着）
@@ -1138,7 +1218,27 @@ final class ProjectSession: ObservableObject, Identifiable {
 
     private func rememberScrollOfActiveTab() {
         guard isActive, let id = activeTabID else { return }
-        rememberScroll(of: id)
+        let capture = navigationCapture(for: id)
+        rememberScroll(of: id) { [weak self] tab in
+            self?.saveNavigationOrigin(capture, cursor: tab.cursor)
+        }
+    }
+
+    private func navigationCapture(for tabID: String) -> (Int, NavigationPoint)? {
+        guard !isNavigating, let current = navigation.current, current.tabID == tabID else { return nil }
+        return (navigation.index, current)
+    }
+
+    private func saveNavigationOrigin(_ capture: (Int, NavigationPoint)?, cursor: EditorCursor?) {
+        guard let (index, entry) = capture, let cursor else { return }
+        let point = NavigationPoint(tabID: entry.tabID, position: cursor)
+        navigation.update(at: index, expecting: entry, with: point)
+        rememberRecentLocation(point)
+    }
+
+    private func rememberNavigationOrigin() {
+        guard isActive, let id = activeTabID, let capture = navigationCapture(for: id) else { return }
+        renderer.sourceCursor { [weak self] cursor in self?.saveNavigationOrigin(capture, cursor: cursor) }
     }
 
     /// 问 WebView 当前的状态（滚到哪、编辑器里的文字与光标），记到那个标签上；记完之后可以接着做点别的（比如重读文件）。

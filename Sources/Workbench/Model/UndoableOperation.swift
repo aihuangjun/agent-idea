@@ -22,6 +22,7 @@ struct UndoableOperation: Identifiable {
         /// 提交了一次（含 amend、提交并推送）。撤销是 `reset --soft <提交前的 HEAD>`：改动回到暂存区、信息填回输入框；
         /// 重做是 `reset --soft <这次提交>`。核对规则在 Core 的 `GitCommitUndo`。
         case commit(GitCommitRecord)
+        case textChanges([FileTextTransaction.Change])
         /// 一步里做了好几件（多选之后一起拖走、一起删）：撤销按倒序逐个撤，重做按正序逐个做。
         case batch([UndoableOperation])
     }

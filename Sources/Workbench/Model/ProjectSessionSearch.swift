@@ -2,6 +2,25 @@ import Core
 import Foundation
 
 extension ProjectSession {
+    var selectedSearchDirectory: String? {
+        guard let selectedPath else { return nil }
+        let url = URL(fileURLWithPath: selectedPath)
+        let directory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+            ? url : url.deletingLastPathComponent()
+        if directory.path == project.root.path { return "" }
+        return FileReference.relativePath(of: directory.path, root: project.root.path)
+    }
+
+    func pathsForTextSearch(_ scope: TextSearchScope) -> [String]? {
+        let urls: [URL]
+        switch scope {
+        case .project, .directory: return nil
+        case .openFiles: urls = tabs.compactMap { documentURL(for: $0) }
+        case .changedFiles:
+            urls = (changeGroups.tracked + changeGroups.untracked).compactMap { url(for: $0) }
+        }
+        return Array(Set(urls.compactMap { FileReference.relativePath(of: $0.path, root: project.root.path) }))
+    }
     /// 搜索使用项目根的相对路径，Git 状态的忽略项使用仓库根的相对路径。
     var sourceSearchExclusion: @Sendable (String, Bool) -> Bool {
         guard let prefix = project.repositoryRelativePath(of: project.root) else {

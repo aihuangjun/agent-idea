@@ -14,6 +14,7 @@ struct EditorAreaView: View {
                 TabBar(session: session)
                 EditorHeader(session: session)
                 if session.isFindShown { FileFindBar(session: session) }
+                if let replace = session.fileReplace { FileReplaceBar(session: session, replace: replace) }
                 if session.isGoToLineShown { GoToLineBar(session: session) }
             }
             // WebView 常驻：没有标签时盖一层空态，而不是把它从视图树里拿掉——
@@ -26,10 +27,33 @@ struct EditorAreaView: View {
                     DelayedProgressView()
                 }
             }
+            .overlay(alignment: .topTrailing) {
+                if session.isAnalyzingJava {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("正在分析 Java 源码…").font(Theme.smallFont)
+                        Button("取消") { session.cancelDefinitionNavigation() }
+                    }
+                    .padding(8).background(Theme.panel, in: RoundedRectangle(cornerRadius: 6))
+                    .padding(8)
+                }
+            }
         }
         .background(Theme.editorBackground)
         .sheet(item: $session.definitionChoices) { choices in
             DefinitionPicker(session: session, choices: choices)
+        }
+        .sheet(item: $session.sourceNavigation) { request in
+            SourceNavigationPicker(session: session, request: request)
+        }
+        .sheet(item: $session.projectReplace) { request in
+            ProjectReplaceSheet(session: session, request: request)
+        }
+        .sheet(item: $session.javaHierarchy) { request in
+            JavaHierarchySheet(session: session, request: request)
+        }
+        .sheet(item: $session.javaRename) { request in
+            JavaRenameSheet(session: session, request: request)
         }
     }
 }

@@ -215,16 +215,74 @@ private func waitUntil(_ timeout: TimeInterval = 10, _ condition: @MainActor () 
         // 从中间去新地方：前进作废
         session.openFile(files[3], pinned: true)
         #expect(session.activeTab?.title == "d.txt" && !session.canGoForward)
-        #expect(session.navigation.entries.map { $0.hasSuffix("/a.txt") || $0.hasSuffix("/b.txt") || $0.hasSuffix("/d.txt") } == [true, true, true])
+        #expect(session.navigation.entries.map(\.tabID) == [files[0], files[1], files[3]].map {
+            EditorTab.id(forFile: $0.resolvingSymlinksInPath().standardizedFileURL)
+        })
         // 点标签切换也记进历史；关掉的标签抹掉
         session.activate(EditorTab.id(forFile: files[2]))
         session.closeTab(EditorTab.id(forFile: files[1]))
         await waitUntil { session.tabs.count == 3 }
-        #expect(!session.navigation.entries.contains { $0.hasSuffix("/b.txt") })
+        #expect(!session.navigation.entries.contains { $0.tabID.hasSuffix("/b.txt") })
         session.goBack()
         #expect(session.activeTab?.title == "d.txt")
         session.goBack()
         #expect(session.activeTab?.title == "a.txt")
+    }
+}
+
+@Test @MainActor func sourceNavigationRestoresDifferentLocationsInTheSameFile() async throws {
+    try await withTemporaryDirectory { directory in
+        let file = directory.appendingPathComponent("One.java")
+        try "class One {\n    int first;\n    int second;\n}\n".write(to: file, atomically: true, encoding: .utf8)
+        let session = makeSession(in: directory)
+        let editor = session.renderer
+        var didRender = false
+        editor.onRendered = { kind, _ in if kind == "code" { didRender = true } }
+        session.openFile(file, pinned: true)
+        await waitUntil { didRender }
+        _ = try await editor.webView.evaluateJavaScript("document.querySelector('.CodeMirror').CodeMirror.setCursor(1, 8)")
+        session.goToLine(SourceLocation(line: 3, column: 9))
+        await waitUntil { session.navigation.entries.first?.position == EditorCursor(line: 1, ch: 8) }
+        #expect(session.navigation.entries.count == 2)
+        #expect(session.canGoBack)
+        session.goBack()
+        let back = try await editor.webView.evaluateJavaScript("window.ide.sourceCursor().line") as? Int
+        #expect(back == 1)
+        session.goForward()
+        let forward = try await editor.webView.evaluateJavaScript("window.ide.sourceCursor().line") as? Int
+        #expect(forward == 2)
+        session.showRecentLocations()
+        #expect(session.sourceNavigation?.entries.count == 2)
+        session.sourceNavigation = nil
+        session.showFileStructure()
+        await waitUntil { session.sourceNavigation != nil }
+        #expect(session.sourceNavigation?.entries.map(\.title) == ["One", "first", "second"])
+    }
+}
+
+@Test @MainActor func fileReplacementRespectsCapturedSelectionAndAdvancesPastItsOwnOutput() async throws {
+    try await withTemporaryDirectory { directory in
+        let file = directory.appendingPathComponent("edit.txt")
+        try "token token\ntoken\n".write(to: file, atomically: true, encoding: .utf8)
+        let session = makeSession(in: directory)
+        let renderer = session.renderer
+        var didRender = false
+        renderer.onRendered = { kind, _ in if kind == "code" { didRender = true } }
+        renderer.onEditLocation = { [weak session] path, position in session?.editorDidChange(at: position, path: path) }
+        session.openFile(file, pinned: true)
+        await waitUntil { didRender }
+        _ = try await renderer.webView.evaluateJavaScript("document.querySelector('.CodeMirror').CodeMirror.setSelection({line:0,ch:0},{line:0,ch:11})")
+        session.showFileReplace()
+        await waitUntil { session.fileReplace?.inSelection == true }
+        let replace = try #require(session.fileReplace)
+        replace.query = "token"
+        replace.replacement = "token!"
+        await replace.replace(all: false, using: renderer)
+        await replace.replace(all: false, using: renderer)
+        let state = try await renderer.editableSnapshot(path: replace.path)
+        #expect(state?.text == "token! token!\ntoken\n")
+        #expect(session.lastEditLocation?.location?.line == 1)
+        #expect(session.lastEditLocation?.location?.column == 8)
     }
 }
 

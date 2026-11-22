@@ -7,6 +7,8 @@ struct DefinitionTarget: Hashable, Identifiable {
     let line: Int
     let column: Int
     var symbol: SourceSymbol? = nil
+    var label: String? = nil
+    var length: Int? = nil
     var id: Self { self }
 }
 
@@ -16,6 +18,9 @@ struct DefinitionChoices: Identifiable {
     let targets: [DefinitionTarget]
     let truncated: Bool
     var title: String? = nil
+    var preview = false
+    var groupByFile = false
+    var coverageMessage: String? = nil
 }
 
 extension ProjectSession {
@@ -31,10 +36,11 @@ extension ProjectSession {
     func cancelDefinitionNavigation() {
         definitionTask?.cancel()
         definitionTask = nil
+        isAnalyzingJava = false
         if definitionChoices != nil { definitionChoices = nil }
     }
 
-    func goToDefinition(path: String? = nil, point: CGPoint? = nil) {
+    func goToDefinition(path: String? = nil, point: CGPoint? = nil, preview: Bool = false) {
         guard isActive, let source = definitionSource, path == nil || path == source.path else { return }
         cancelDefinitionNavigation()
         definitionTask = Task { [weak self] in
@@ -50,7 +56,7 @@ extension ProjectSession {
                 if !reference.local.isEmpty {
                     showDefinitions(reference.name, targets: reference.local.map {
                         DefinitionTarget(url: source, line: $0.line, column: $0.ch)
-                    })
+                    }, preview: preview)
                     return
                 }
 
@@ -72,7 +78,8 @@ extension ProjectSession {
                 let targets = localCandidates + (preferred.isEmpty ? hits : preferred).map {
                     DefinitionTarget(url: URL(fileURLWithPath: $0.path), line: $0.line, column: $0.ch)
                 }
-                showDefinitions(reference.name, targets: targets, truncated: input.truncated, uncertain: reference.uncertain == true)
+                showDefinitions(reference.name, targets: targets, truncated: input.truncated,
+                                uncertain: reference.uncertain == true, preview: preview)
             } catch is CancellationError {
                 return
             } catch {
@@ -127,16 +134,16 @@ extension ProjectSession {
         }
     }
 
-    private func showDefinitions(_ name: String, targets: [DefinitionTarget], truncated: Bool = false, uncertain: Bool = false) {
+    private func showDefinitions(_ name: String, targets: [DefinitionTarget], truncated: Bool = false, uncertain: Bool = false, preview: Bool) {
         var seen: Set<DefinitionTarget> = []
         let unique = targets.filter { seen.insert($0).inserted }
         switch unique.count {
         case 0:
             notify(truncated ? "在已扫描的文件中找不到「\(name)」的定义" : "在项目中找不到「\(name)」的定义")
-        case 1 where !truncated && !uncertain:
+        case 1 where !truncated && !uncertain && !preview:
             if let target = unique.first { openDefinition(target, name: name) }
         default:
-            definitionChoices = DefinitionChoices(name: name, targets: unique, truncated: truncated)
+            definitionChoices = DefinitionChoices(name: name, targets: unique, truncated: truncated, preview: preview)
         }
     }
 
@@ -144,7 +151,7 @@ extension ProjectSession {
         definitionChoices = nil
         guard isActive else { return }
         let location = SourceLocation(line: target.line + 1, column: target.column + 1)
-        let length = (target.symbol?.name ?? name).utf16.count
+        let length = target.length ?? (target.symbol?.name ?? name).utf16.count
         if target.url == definitionSource {
             goToLine(location, selecting: length)
         } else {
@@ -155,5 +162,19 @@ extension ProjectSession {
             openFile(target.url, pinned: true, at: location, selecting: length)
         }
         renderer.focusContent()
+    }
+
+    func definitionPreview(_ target: DefinitionTarget) async -> [SourceExcerpt.Line] {
+        if target.url == definitionSource {
+            let state = await withCheckedContinuation { continuation in
+                renderer.currentState { continuation.resume(returning: $0) }
+            }
+            if let text = state.text { return SourceExcerpt.lines(in: text, at: target.line) }
+        }
+        if let text = draftsByPath[target.url.path] { return SourceExcerpt.lines(in: text, at: target.line) }
+        return await Task.detached(priority: .userInitiated) {
+            guard case .text(let text, _, _) = TextFileLoader.load(target.url, limit: TextSearchScanner.fileSizeLimit) else { return [] }
+            return SourceExcerpt.lines(in: text, at: target.line)
+        }.value
     }
 }

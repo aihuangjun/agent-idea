@@ -171,7 +171,24 @@ public struct AgentIDEARootScene: Scene {
                 Button("在项目中查找…") { workbench.active?.showFindInPath() }
                     .keyboardShortcut("f", modifiers: [.control, .shift])
                     .disabled(workbench.active == nil)
+                Button("在当前文件中替换…") { workbench.active?.showFileReplace() }
+                    .keyboardShortcut("r", modifiers: [.command, .option])
+                    .disabled(workbench.active?.canReplaceInFile != true)
+                Button("在项目中替换…") { workbench.active?.showProjectReplace() }
+                    .disabled(workbench.active?.textSearch.replacementResult?.files.isEmpty != false)
             }
+            Menu("源码编辑") {
+                Button("切换行注释") { workbench.active?.editSource(.commentLine) }
+                    .keyboardShortcut("/", modifiers: .command)
+                Button("复制行") { workbench.active?.editSource(.duplicateLine) }
+                    .keyboardShortcut("d", modifiers: .command)
+                Button("上移行") { workbench.active?.editSource(.moveLineUp) }
+                    .keyboardShortcut(.upArrow, modifiers: [.option, .shift])
+                Button("下移行") { workbench.active?.editSource(.moveLineDown) }
+                    .keyboardShortcut(.downArrow, modifiers: [.option, .shift])
+                Button("扩大选区") { workbench.active?.editSource(.extendSelection) }
+                    .keyboardShortcut(.upArrow, modifiers: [.control, .shift])
+            }.disabled(workbench.active?.canReplaceInFile != true)
         }
         // 系统的文字编辑组（若带「查找」子菜单就会和上面的「查找」重复）清空。查找子菜单不放这里：
         // 这个位置在本应用里没验证过一定会建出来，放在 after: .pasteboard（「复制路径和行号」已在那里出现过）更稳
@@ -238,6 +255,14 @@ public struct AgentIDEARootScene: Scene {
             Button("最近的文件…") { workbench.active?.showRecentFiles() }
                 .keyboardShortcut("e", modifiers: .command)
                 .disabled(workbench.active == nil)
+            Button("最近的位置…") { workbench.active?.showRecentLocations() }
+                .keyboardShortcut("e", modifiers: [.command, .shift])
+                .disabled(workbench.active == nil)
+            Button("上次编辑位置") { workbench.active?.goToLastEdit() }
+                .disabled(workbench.active?.lastEditLocation == nil)
+            Button("文件结构…") { workbench.active?.showFileStructure() }
+                .keyboardShortcut(.f12, modifiers: .command)
+                .disabled(workbench.active?.definitionSource == nil)
             // IDEA 的 Go to Line（⌘L）
             Button("跳到行…") { workbench.active?.showGoToLine() }
                 .keyboardShortcut("l", modifiers: .command)
@@ -245,6 +270,16 @@ public struct AgentIDEARootScene: Scene {
             Button("跳转到定义") { workbench.active?.goToDefinition() }
                 .keyboardShortcut(.f3, modifiers: [])
                 .disabled(workbench.active?.definitionSource == nil)
+            Button("快速查看定义…") { workbench.active?.goToDefinition(preview: true) }
+                .keyboardShortcut(.f3, modifiers: .option)
+                .disabled(workbench.active?.definitionSource == nil)
+            Menu("Java 源码") {
+                Button("查找用法") { workbench.active?.runJavaSemanticAction(.usages) }
+                    .keyboardShortcut(.f7, modifiers: .option)
+                Button("查看方法实现") { workbench.active?.runJavaSemanticAction(.implementations) }
+                Button("调用层级") { workbench.active?.runJavaSemanticAction(.hierarchy) }
+                Button("重命名代码…") { workbench.active?.runJavaSemanticAction(.rename) }
+            }.disabled(workbench.active?.javaDefinitionSource == nil)
             Button("在项目视图中定位当前文件") { workbench.active?.revealActiveTab() }
                 .keyboardShortcut("l", modifiers: [.command, .option])
                 .disabled(workbench.active?.activeTab == nil)

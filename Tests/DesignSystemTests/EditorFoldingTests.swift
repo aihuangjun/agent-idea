@@ -95,6 +95,37 @@ public class Counter {
 }
 """
 
+@Test @MainActor func sourceEditorCommandsAndReplacementInRealWebView() async throws {
+    let page = EditorPage()
+    let path = "/p/Counter.java"
+    await page.render(code(path, "java", sample))
+    _ = await page.evaluate("__cm().setCursor({line:10,ch:13})")
+    #expect(await page.string("__key(38, {ctrlKey: true, shiftKey: true})") == "1")
+    #expect(await page.wait(for: "__cm().getSelection() === 'local'"))
+    #expect(try await page.renderer.editSource(.extendSelection, path: path))
+    #expect((await page.string("__cm().getSelection()")).contains("local = count + by"))
+    _ = await page.evaluate("__cm().setCursor({line:10,ch:8})")
+    #expect(try await page.renderer.editSource(.commentLine, path: path))
+    #expect(await page.string("__cm().getLine(10)") == "        // int local = count + by;")
+    #expect(try await page.renderer.editSource(.commentLine, path: path))
+    #expect(await page.string("__cm().getLine(10)") == "        int local = count + by;")
+    #expect(await page.string("__key(68, {metaKey: true})") == "1")
+    #expect(await page.string("__cm().getLine(10) === __cm().getLine(11)") == "1")
+    #expect(await page.string("__key(40, {altKey: true, shiftKey: true})") == "1")
+    #expect(await page.string("__cm().getLine(11)") == "        System.out.println(local);")
+    #expect(await page.string("__key(38, {altKey: true, shiftKey: true})") == "1")
+    #expect(await page.string("__cm().getLine(11)") == "        int local = count + by;")
+
+    let snapshot = try #require(try await page.renderer.editableSnapshot(path: path))
+    let matcher = try TextSearchMatcher(TextSearchQuery(text: "local", wholeWords: true))
+    let changes = matcher.replacements(in: snapshot.text, template: "value", interpretingGroups: false)
+    #expect(try await page.renderer.applyTextEdits(changes, path: path, expected: snapshot.text, selecting: nil))
+    #expect(!(await page.string("__cm().getValue()")).contains("local"))
+    #expect(try await page.renderer.applyTextEdits(changes, path: path, expected: snapshot.text, selecting: nil) == false)
+    _ = await page.evaluate("window.ide.undo()")
+    #expect(await page.string("__cm().getValue()") == snapshot.text)
+}
+
 /// 折叠：点行号旁的三角折起 / 展开（没有快捷键，⌘- / ⌘= 留给应用的缩小 / 放大）；全部折起 / 展开的区块范围；箭头排在变更条右边；
 /// 切主题（重建编辑器）后折叠还在；经 Swift 的 payload 往返恢复，文本变了就丢弃；Markdown 源码同样往返。
 @Test @MainActor func foldingFollowsIDEAKeysAndSurvivesRebuilds() async throws {

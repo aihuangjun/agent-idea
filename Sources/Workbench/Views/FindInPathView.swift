@@ -25,13 +25,18 @@ struct FindInPathView: View {
                     ProgressView().controlSize(.mini).padding(.trailing, 4)
                 }
                 IconButton(ToolWindowIcon.refresh, help: "重新搜索：磁盘上的文件又变了（Agent 改过）之后", size: 22) { search.refresh() }
-                    .disabled(search.text.isEmpty)
+                    .disabled(search.text.isEmpty || search.visiblePin != nil)
+                IconButton("pin", help: "固定本组查找结果", size: 22) { search.pinCurrent() }
+                    .disabled(search.result == nil || search.isSearching || search.visiblePin != nil)
+                IconButton("arrow.left.arrow.right", help: "在项目中替换", size: 22) { session.showProjectReplace() }
+                    .disabled(search.replacementResult?.files.isEmpty != false)
                 IconButton(ToolWindowIcon.expandAll, help: "全部展开", size: 22) { search.expandAll() }
                     .disabled(search.collapsedFiles.isEmpty)
                 IconButton(ToolWindowIcon.collapseAll, help: "全部折叠", size: 22) { search.collapseAll() }
-                    .disabled(search.result?.files.isEmpty ?? true)
+                    .disabled(search.displayedResult?.files.isEmpty ?? true)
             }
-            queryBar
+            if !search.pinnedResults.isEmpty { resultTabs }
+            if search.visiblePin == nil { queryBar }
             statusLine
             results
         }
@@ -39,6 +44,23 @@ struct FindInPathView: View {
     }
 
     // MARK: - 输入
+
+    private var resultTabs: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 10) {
+                Button("新查找") { search.selectPin(nil) }.buttonStyle(.plain)
+                    .foregroundStyle(search.visiblePin == nil ? Theme.accent : Theme.text)
+                ForEach(search.pinnedResults) { pin in
+                    HStack(spacing: 4) {
+                        Button(pin.query.text) { search.selectPin(pin.id) }.buttonStyle(.plain).lineLimit(1)
+                            .foregroundStyle(search.visiblePin == pin.id ? Theme.accent : Theme.text)
+                            .toolTip(scopeTitle(pin.scope) + " · " + pin.query.text)
+                        IconButton("xmark", help: "关闭这组结果", size: 16) { search.closePin(pin.id) }
+                    }
+                }
+            }.padding(.horizontal, 8).padding(.vertical, 3)
+        }.scrollIndicators(.hidden).font(Theme.smallFont)
+    }
 
     private var queryBar: some View {
         VStack(spacing: 6) {
@@ -89,16 +111,38 @@ struct FindInPathView: View {
             .frame(height: 22)
             .background(RoundedRectangle(cornerRadius: 5).fill(Theme.editorBackground))
             .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(Theme.border, lineWidth: 1))
+            HStack {
+                Menu {
+                    Button("整个项目") { search.scope = .project }
+                    Button("当前目录") {
+                        if let path = session.selectedSearchDirectory { search.scope = .directory(path) }
+                    }.disabled(session.selectedSearchDirectory == nil)
+                    Button("已打开文件") { search.scope = .openFiles }
+                    Button("Git 已变更文件") { search.scope = .changedFiles }.disabled(!session.hasGit)
+                } label: {
+                    Text(scopeTitle(search.scope)).lineLimit(1)
+                }.menuStyle(.borderlessButton).fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }.font(Theme.smallFont)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
     }
 
+    private func scopeTitle(_ scope: TextSearchScope) -> String {
+        switch scope {
+        case .project: return "整个项目"
+        case .directory(let path): return "目录 · \(path.isEmpty ? "./" : path)"
+        case .openFiles: return "已打开文件"
+        case .changedFiles: return "Git 已变更文件"
+        }
+    }
+
     /// 「N 处匹配，M 个文件」/ 结果过多 / 出错。
     @ViewBuilder private var statusLine: some View {
         let text: String? = {
-            if let error = search.error { return error }
-            guard let result = search.result else { return search.isSearching ? "正在搜索…" : nil }
+            if search.visiblePin == nil, let error = search.error { return error }
+            guard let result = search.displayedResult else { return search.isSearching ? "正在搜索…" : nil }
             if result.files.isEmpty { return "没有找到" }
             let summary = "\(result.matchCount) 处匹配，\(result.files.count) 个文件"
             return result.isTruncated ? "结果过多，只显示前 \(result.matchCount) 处 · \(result.files.count) 个文件" : summary
@@ -106,7 +150,7 @@ struct FindInPathView: View {
         if let text {
             Text(text)
                 .font(Theme.smallFont)
-                .foregroundStyle(search.error != nil ? Theme.danger : (search.result?.isTruncated == true ? Theme.warning : Theme.secondaryText))
+                .foregroundStyle(search.visiblePin == nil && search.error != nil ? Theme.danger : (search.displayedResult?.isTruncated == true ? Theme.warning : Theme.secondaryText))
                 .lineLimit(3)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 10)
@@ -119,7 +163,7 @@ struct FindInPathView: View {
     // MARK: - 结果
 
     @ViewBuilder private var results: some View {
-        if let result = search.result, !result.files.isEmpty {
+        if let result = search.displayedResult, !result.files.isEmpty {
             list(result)
         } else if search.text.isEmpty {
             ToolWindowEmptyState(

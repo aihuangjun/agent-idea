@@ -44,12 +44,25 @@ public struct NavigationHistory<Element: Equatable>: Equatable {
         entries = entries.map { $0 == element ? replacement : $0 }
     }
 
+    public mutating func update(at index: Int, expecting element: Element, with replacement: Element) {
+        guard entries.indices.contains(index), entries[index] == element else { return }
+        entries[index] = replacement
+    }
+
+    public mutating func mapEntries(_ transform: (Element) -> Element) {
+        entries = entries.map(transform)
+    }
+
     /// 某个地方没了：抹掉它的每一条记录，相邻的重复项合并。
     public mutating func remove(_ element: Element) {
+        removeAll { $0 == element }
+    }
+
+    public mutating func removeAll(where predicate: (Element) -> Bool) {
         var kept: [Element] = []
         var newIndex = -1
         for (position, entry) in entries.enumerated() {
-            if entry == element { continue }
+            if predicate(entry) { continue }
             if kept.last == entry {
                 // 抹掉中间那个之后两边一样了，合并成一个
                 if position <= index { newIndex = kept.count - 1 }

@@ -36,5 +36,9 @@ public enum WebResources {
         bundle.url(forResource: "web/index", withExtension: "html")
     }
 
+    public static var javaAnalyzerURL: URL? {
+        bundle.url(forResource: "java/AgentIdeaJava", withExtension: "java")
+    }
+
     private final class BundleToken {}
 }

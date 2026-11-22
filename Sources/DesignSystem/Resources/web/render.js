@@ -290,6 +290,12 @@
         // 应用级的后退 / 前进；焦点在编辑器里时由这里转发，别让 CodeMirror 当成按词移动。
         "Alt-Left": () => post({ type: "navigate", direction: "back" }),
         "Alt-Right": () => post({ type: "navigate", direction: "forward" }),
+        // macDefault 自己的 Cmd-D 是删行，Shift+方向键还会先扩展文本选区。
+        "Cmd-D": (cm) => sourceEditKey(cm, "duplicateLine"),
+        "Cmd-/": (cm) => sourceEditKey(cm, "commentLine"),
+        "Shift-Alt-Up": (cm) => sourceEditKey(cm, "moveLineUp"),
+        "Shift-Alt-Down": (cm) => sourceEditKey(cm, "moveLineDown"),
+        "Shift-Ctrl-Up": (cm) => sourceEditKey(cm, "extendSelection"),
       },
     });
     const keys = options.extraKeys;
@@ -299,6 +305,13 @@
   }
 
   /* ---------- 鼠标：只有一个光标 ---------- */
+
+  function sourceEditKey(cm, command) {
+    if (cm !== editor || cm.getOption("readOnly")) return window.CodeMirror.Pass;
+    window.ide.editSource(editedPath(), command).catch(error => {
+      post({ type: "error", where: "sourceEditKey", message: String(error) });
+    });
+  }
 
   /* 1.7.0 加过 IDEA 式多光标（⌥⇧点击、⌃G），1.7.1 用户验收说用不上，删掉了，别加回来。CodeMirror 自己的多光标入口也关掉：
    * mac 上默认 ⌘点击加光标（addNew 显式回 false）、⌥拖动列选择（unit 显式按点击次数给，不让它变成 rectangle）。 */
@@ -481,6 +494,11 @@
 
   /* 改动停手 300ms 后：把全文发给宿主、重算标记；onChange 给分栏预览 / diff 装饰用（它们自己再去抖）。 */
   function attachEditorEvents(onChange) {
+    editor.on("changes", (_, changes) => {
+      const change = changes[0];
+      const path = current && editedPath();
+      if (path && change?.from) post({ type: "editLocation", path, cursor: change.from });
+    });
     editor.on("change", () => {
       changeLinesCache = null;
       if (editTimer) clearTimeout(editTimer);
@@ -1535,6 +1553,93 @@
     return current === payload && (!cm || cm.getValue() === text) ? reference : null;
   }
 
+  function selectedLines(cm) {
+    const from = cm.getCursor("from"), to = cm.getCursor("to");
+    return { from: from.line, to: to.line > from.line && to.ch === 0 ? to.line - 1 : to.line };
+  }
+
+  function commentLines(cm, lines) {
+    const mode = cm.getModeAt({line: lines.from, ch: cm.getLine(lines.from).search(/\S|$/)});
+    if (!mode.lineComment && (!mode.blockCommentStart || !mode.blockCommentEnd)) return false;
+    const open = mode.lineComment || mode.blockCommentStart;
+    const close = mode.lineComment ? "" : mode.blockCommentEnd;
+    const text = [];
+    for (let line = lines.from; line <= lines.to; line++) {
+      const original = cm.getLine(line);
+      if (!original.trim() && lines.from !== lines.to) continue;
+      const indent = original.search(/\S|$/);
+      text.push({ line, original, indent, marked: original.slice(indent).startsWith(open) && original.endsWith(close) });
+    }
+    const remove = text.every(row => row.marked);
+    const indent = Math.min(...text.map(row => row.indent));
+    for (const row of text) {
+      if (remove) {
+        const remainder = row.original.slice(row.indent + open.length, close ? -close.length : undefined);
+        const body = close ? remainder.replace(/ $/, "") : remainder;
+        cm.replaceRange(body.replace(/^ /, ""), {line: row.line, ch: row.indent}, {line: row.line, ch: row.original.length}, "commentLine");
+      } else if (!row.marked) {
+        const body = row.original.slice(indent);
+        const comment = open + (body ? " " + body : "") + (close ? " " + close : "");
+        cm.replaceRange(comment, {line: row.line, ch: indent}, {line: row.line, ch: row.original.length}, "commentLine");
+      }
+    }
+    return true;
+  }
+
+  function editLines(cm, command) {
+    const range = selectedLines(cm);
+    const anchor = cm.getCursor("anchor"), head = cm.getCursor("head");
+    const block = cm.getRange({line: range.from, ch: 0}, {line: range.to, ch: cm.getLine(range.to).length});
+    const shift = command === "duplicateLine" ? range.to - range.from + 1 : command === "moveLineUp" ? -1 : 1;
+    if (command === "duplicateLine") {
+      cm.replaceRange("\n" + block, {line: range.to, ch: cm.getLine(range.to).length}, undefined, "duplicateLine");
+    } else if (shift < 0) {
+      if (range.from === cm.firstLine()) return false;
+      const previous = cm.getLine(range.from - 1);
+      cm.replaceRange(block + "\n" + previous, {line: range.from - 1, ch: 0}, {line: range.to, ch: cm.getLine(range.to).length}, "moveLine");
+    } else {
+      const last = cm.lastLine();
+      if (range.to >= last || (range.to + 1 === last && cm.getLine(last) === "")) return false;
+      const next = cm.getLine(range.to + 1);
+      cm.replaceRange(next + "\n" + block, {line: range.from, ch: 0}, {line: range.to + 1, ch: next.length}, "moveLine");
+    }
+    const move = point => point.line + shift <= cm.lastLine()
+      ? {line: point.line + shift, ch: point.ch} : {line: cm.lastLine(), ch: cm.getLine(cm.lastLine()).length};
+    cm.setSelection(move(anchor), move(head));
+    return true;
+  }
+
+  async function extendSyntaxSelection(cm, payload) {
+    const text = cm.getValue(), path = editedPath();
+    const from = cm.getCursor("from"), to = cm.getCursor("to");
+    const start = cm.indexFromPos(from), end = cm.indexFromPos(to);
+    const runtime = text.length <= 2 * 1024 * 1024 && window.Syntax
+      ? await window.Syntax.load(payload.language, path) : null;
+    if (cm !== editor || payload !== current || cm.getValue() !== text
+        || window.CodeMirror.cmpPos(cm.getCursor("from"), from) || window.CodeMirror.cmpPos(cm.getCursor("to"), to)) return false;
+    const range = runtime && window.Syntax.withTree(runtime, text, cm, tree => {
+      let node = tree.rootNode.namedDescendantForIndex(start, end);
+      while (node) {
+        if (node.startIndex < start || node.endIndex > end) return [node.startIndex, node.endIndex];
+        node = node.parent;
+      }
+      return null;
+    });
+    if (range) {
+      cm.setSelection(cm.posFromIndex(range[0]), cm.posFromIndex(range[1]));
+      return true;
+    }
+    const word = start === end ? wordAt(cm, from) : null;
+    if (word) {
+      cm.setSelection(word.from, word.to);
+      return true;
+    }
+    const lineStart = {line: from.line, ch: 0}, lineEnd = {line: to.line, ch: cm.getLine(to.line).length};
+    if (from.ch > 0 || to.ch < lineEnd.ch) cm.setSelection(lineStart, lineEnd);
+    else cm.setSelection({line: 0, ch: 0}, cm.posFromIndex(text.length));
+    return true;
+  }
+
   /* ---------- 入口 ---------- */
 
   window.ide = {
@@ -1653,11 +1758,48 @@
     reference() {
       return selectionReference();
     },
+    sourceCursor() {
+      return editor ? editor.getCursor() : selectionReference()?.from || null;
+    },
+    editableSnapshot(path) {
+      if (!editor || editor.getOption("readOnly") || path !== editedPath()) return null;
+      return { text: editor.getValue(), start: editor.indexFromPos(editor.getCursor("from")), end: editor.indexFromPos(editor.getCursor("to")) };
+    },
+    applyTextEdits(path, expected, edits, selection) {
+      if (!editor || editor.getOption("readOnly") || path !== editedPath() || editor.getValue() !== expected) return false;
+      editor.operation(() => {
+        for (const edit of edits.slice().reverse()) {
+          editor.replaceRange(edit.text, editor.posFromIndex(edit.start), editor.posFromIndex(edit.start + edit.length), "replaceText");
+        }
+        if (selection) {
+          const start = editor.posFromIndex(selection.start), end = editor.posFromIndex(selection.end);
+          editor.setSelection(start, end);
+          editor.scrollIntoView(start, 36);
+        }
+      });
+      return true;
+    },
+    async editSource(path, command) {
+      const cm = editor;
+      if (!cm || cm.getOption("readOnly") || path !== editedPath() || (sideDiff && referencePane === "old")) return false;
+      if (command === "extendSelection") return extendSyntaxSelection(cm, current);
+      let applied = false;
+      cm.operation(() => {
+        applied = command === "commentLine" ? commentLines(cm, selectedLines(cm)) : editLines(cm, command);
+      });
+      return applied;
+    },
     definitionReference(path, point) {
       return symbolReference(path, point, window.Definitions.lookup);
     },
     javaTypeReference(path, point) {
       return symbolReference(path, point, window.Definitions.javaTypeReference);
+    },
+    javaSelection(path, point) {
+      if (!definitionDocument(point) || path !== editedPath()) return null;
+      const selection = definitionSelection(point);
+      if (!selection || selection.from.line !== selection.to.line) return null;
+      return {line: selection.from.line, ch: selection.from.ch, length: selection.to.ch - selection.from.ch};
     },
     sourceOutlines(sources) {
       return window.Definitions.sourceOutlines(sources);

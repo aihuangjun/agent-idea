@@ -22,7 +22,7 @@ let package = Package(
             name: "DesignSystem",
             dependencies: ["Core"],
             path: "Sources/DesignSystem",
-            resources: [.copy("Resources/web")],
+            resources: [.copy("Resources/web"), .copy("Resources/java")],
             swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .target(

@@ -1,5 +1,17 @@
 import Foundation
 
+public enum TextSearchScope: Equatable, Sendable {
+    case project
+    case directory(String)
+    case openFiles
+    case changedFiles
+
+    public func includes(_ path: String) -> Bool {
+        guard case .directory(let directory) = self, !directory.isEmpty else { return true }
+        return path.hasPrefix(directory + "/")
+    }
+}
+
 /// 全项目文本搜索（IDEA 的 Find in Path）的纯逻辑：查询参数、行内命中范围、`git grep -z` 输出解析、
 /// 结果分组与截断、长行取样，以及不在 git 仓库里时逐个读文件的退路。
 ///
@@ -117,7 +129,7 @@ public struct TextSearchMatcher: @unchecked Sendable {
         var pattern = query.isRegex ? query.text : NSRegularExpression.escapedPattern(for: query.text)
         if query.wholeWords { pattern = "(?<![A-Za-z0-9_])(?:\(pattern))(?![A-Za-z0-9_])" }
         do {
-            regex = try NSRegularExpression(pattern: pattern, options: query.caseSensitive ? [] : [.caseInsensitive])
+            regex = try NSRegularExpression(pattern: pattern, options: query.caseSensitive ? [.anchorsMatchLines] : [.caseInsensitive, .anchorsMatchLines])
         } catch {
             throw TextSearchError.invalidRegex(Self.explain(query.text))
         }
@@ -130,6 +142,21 @@ public struct TextSearchMatcher: @unchecked Sendable {
             .map(\.range)
             .filter { $0.length > 0 }
             .map { $0.location..<($0.location + $0.length) }
+    }
+
+    public func replacements(in text: String, template: String, interpretingGroups: Bool,
+                             within bounds: Range<Int>? = nil) -> [TextReplacement] {
+        let length = text.utf16.count
+        let bounds = bounds ?? 0..<length
+        guard bounds.lowerBound >= 0, bounds.upperBound <= length else { return [] }
+        // 看见选区外的字符（全词和前后查找条件），但 ^/$ 仍然只认原文边界。
+        let range = NSRange(location: bounds.lowerBound, length: bounds.count)
+        return regex.matches(in: text, options: [.withTransparentBounds, .withoutAnchoringBounds], range: range)
+            .filter { $0.range.length > 0 }
+            .map { match in
+                let replacement = interpretingGroups ? regex.replacementString(for: match, in: text, offset: 0, template: template) : template
+                return TextReplacement(start: match.range.location, length: match.range.length, text: replacement)
+            }
     }
 
     /// 正则写错了：尽量说清楚错在哪，最后总给一条出路（不想用正则就关掉）。
@@ -355,10 +382,13 @@ public enum TextSearchScanner {
         shouldStop: () -> Bool = { false }
     ) -> TextSearchResult {
         var collector = TextSearchCollector(limit: limit)
-        scan: for path in files.sorted() where query.matchesMask(path) {
+        let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+        scan: for path in Set(files).sorted() where query.matchesMask(path) {
             if shouldStop() { break }
-            let url = root.appendingPathComponent(path)
-            guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size <= fileSizeLimit,
+            let url = root.appendingPathComponent(path).resolvingSymlinksInPath().standardizedFileURL
+            guard FileReference.relativePath(of: url.path, root: rootPath) != nil,
+                  let facts = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+                  facts.isRegularFile == true, let size = facts.fileSize, size <= fileSizeLimit,
                   let data = try? Data(contentsOf: url),
                   case .text(let text, _, _) = TextFileLoader.decode(data) else { continue }
             var number = 0

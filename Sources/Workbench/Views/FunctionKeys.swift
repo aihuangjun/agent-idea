@@ -8,4 +8,5 @@ extension KeyEquivalent {
     static let f3 = KeyEquivalent(Character(Unicode.Scalar(UInt32(NSF3FunctionKey))!))
     static let f6 = KeyEquivalent(Character(Unicode.Scalar(UInt32(NSF6FunctionKey))!))
     static let f7 = KeyEquivalent(Character(Unicode.Scalar(UInt32(NSF7FunctionKey))!))
+    static let f12 = KeyEquivalent(Character(Unicode.Scalar(UInt32(NSF12FunctionKey))!))
 }

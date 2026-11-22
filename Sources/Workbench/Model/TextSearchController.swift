@@ -16,6 +16,9 @@ final class TextSearchController: ObservableObject {
     @Published var wholeWords = false { didSet { if wholeWords != oldValue { scheduleSearch() } } }
     @Published var isRegex = false { didSet { if isRegex != oldValue { scheduleSearch() } } }
     @Published var fileMask = "" { didSet { if fileMask != oldValue { scheduleSearch() } } }
+    @Published var scope: TextSearchScope = .project { didSet { if scope != oldValue { scheduleSearch() } } }
+    @Published private(set) var pinnedResults: [PinnedResult] = []
+    @Published private(set) var visiblePin: UUID?
 
     /// 最近一次搜完的结果；查询为空、出错时为 nil。
     @Published private(set) var result: TextSearchResult?
@@ -32,6 +35,22 @@ final class TextSearchController: ObservableObject {
         let path: String
         let line: Int
     }
+
+    struct PinnedResult: Identifiable {
+        let id = UUID()
+        let query: TextSearchQuery
+        let scope: TextSearchScope
+        let result: TextSearchResult
+    }
+
+    var displayedResult: TextSearchResult? {
+        guard let visiblePin else { return result }
+        return pinnedResults.first { $0.id == visiblePin }?.result
+    }
+    var filesInScope: ((TextSearchScope) -> [String]?)?
+    var exclusion: (() -> @Sendable (String, Bool) -> Bool)?
+    private var completedQuery: TextSearchQuery?
+    private var completedScope: TextSearchScope?
 
     let root: URL
     /// 由会话注入；为 nil（本机没有 git）或 git 说不在仓库里时逐个读文件。
@@ -57,12 +76,37 @@ final class TextSearchController: ObservableObject {
 
     /// 打开窗口时：有能用的选中文字就预填（会重新搜），然后把焦点给输入框。
     func activate(prefill selection: String? = nil) {
+        selectPin(nil)
         if let prefill = TextSearchQuery.prefill(fromSelection: selection, isRegex: isRegex) { text = prefill }
         focusRequests += 1
     }
 
     /// 不等去抖、马上按当前条件再搜一次（标题条的刷新：Agent 又改了文件）。
     func refresh() { scheduleSearch(immediately: true) }
+
+    var replacementResult: TextSearchResult? {
+        guard visiblePin == nil, !isSearching, error == nil, completedQuery == query, completedScope == scope else { return nil }
+        return result
+    }
+
+    func pinCurrent() {
+        guard !isSearching, let result, let completedQuery, let completedScope else { return }
+        let pin = PinnedResult(query: completedQuery, scope: completedScope, result: result)
+        pinnedResults.append(pin)
+        selectPin(pin.id)
+    }
+
+    func selectPin(_ id: UUID?) {
+        guard id != visiblePin else { return }
+        visiblePin = id
+        collapsedFiles = []
+        selected = allHits.first
+    }
+
+    func closePin(_ id: UUID) {
+        if visiblePin == id { selectPin(nil) }
+        pinnedResults.removeAll { $0.id == id }
+    }
 
     /// 项目关掉：正在跑的停掉。
     func cancel() {
@@ -73,14 +117,14 @@ final class TextSearchController: ObservableObject {
     // MARK: - 选中与折叠
 
     func line(for hit: Hit) -> TextSearchLine? {
-        result?.files.first { $0.path == hit.path }?.lines.first { $0.line == hit.line }
+        displayedResult?.files.first { $0.path == hit.path }?.lines.first { $0.line == hit.line }
     }
 
     func select(_ hit: Hit) { selected = hit }
 
     /// 全部结果，按列表顺序。
     private var allHits: [Hit] {
-        (result?.files ?? []).flatMap { file in file.lines.map { Hit(path: file.path, line: $0.line) } }
+        (displayedResult?.files ?? []).flatMap { file in file.lines.map { Hit(path: file.path, line: $0.line) } }
     }
 
     /// ↑ ↓：在没折叠的文件里走；还没选中时 ↓ 选第一处、↑ 选最后一处。到头不动。
@@ -109,7 +153,7 @@ final class TextSearchController: ObservableObject {
         if !collapsedFiles.insert(path).inserted { collapsedFiles.remove(path) }
     }
 
-    func collapseAll() { collapsedFiles = Set(result?.files.map(\.path) ?? []) }
+    func collapseAll() { collapsedFiles = Set(displayedResult?.files.map(\.path) ?? []) }
     func expandAll() { collapsedFiles = [] }
 
     // MARK: - 搜索
@@ -118,6 +162,7 @@ final class TextSearchController: ObservableObject {
         searchTask?.cancel()
         searchTask = nil
         let query = self.query
+        let scope = self.scope
         guard !query.isEmpty else {
             result = nil
             error = nil
@@ -145,8 +190,10 @@ final class TextSearchController: ObservableObject {
             }
             guard let self else { return }
             do {
-                let found = try await self.search(query, matcher: matcher)
+                let found = try await self.search(query, matcher: matcher, scope: scope)
                 guard !Task.isCancelled else { return }
+                self.completedQuery = query
+                self.completedScope = scope
                 self.apply(found)
             } catch is CancellationError {
                 // 被下一次顶掉：不是失败，转圈由最新那次关
@@ -160,9 +207,9 @@ final class TextSearchController: ObservableObject {
         }
     }
 
-    private func search(_ query: TextSearchQuery, matcher: TextSearchMatcher) async throws -> TextSearchResult {
+    private func search(_ query: TextSearchQuery, matcher: TextSearchMatcher, scope: TextSearchScope) async throws -> TextSearchResult {
         let root = self.root, limit = self.limit
-        if let git, !isOutsideRepository {
+        if scope == .project, let git, !isOutsideRepository {
             do {
                 return try await git.grep(query, matcher: matcher, in: root, limit: limit)
             } catch TextSearchError.notARepository {
@@ -170,13 +217,24 @@ final class TextSearchController: ObservableObject {
                 isOutsideRepository = true
             }
         }
-        return try await Self.scan(root: root, query: query, matcher: matcher, limit: limit)
+        let exclude = exclusion?() ?? Self.defaultExclusion
+        return try await Self.scan(root: root, query: query, matcher: matcher, limit: limit,
+            scope: scope, paths: filesInScope?(scope), exclude: exclude)
+    }
+
+    nonisolated private static let defaultExclusion: @Sendable (String, Bool) -> Bool = { path, directory in
+        directory && TextSearchScanner.skipsDirectory(path)
     }
 
     /// 不在 git 仓库里：列出项目里的文件，逐个读。在协作线程上跑，取消了就停。
-    nonisolated private static func scan(root: URL, query: TextSearchQuery, matcher: TextSearchMatcher, limit: Int) async throws -> TextSearchResult {
-        let files = FileIndexer.index(root: root, shouldStop: { Task.isCancelled }, isExcluded: { path, isDirectory in
-            isDirectory && TextSearchScanner.skipsDirectory(path)
+    nonisolated private static func scan(root: URL, query: TextSearchQuery, matcher: TextSearchMatcher, limit: Int,
+        scope: TextSearchScope, paths: [String]?, exclude: @Sendable (String, Bool) -> Bool) async throws -> TextSearchResult {
+        let files = paths ?? FileIndexer.index(root: root, shouldStop: { Task.isCancelled }, isExcluded: { path, isDirectory in
+            if exclude(path, isDirectory) { return true }
+            if isDirectory, case .directory(let directory) = scope, !directory.isEmpty {
+                return !scope.includes(path) && directory != path && !directory.hasPrefix(path + "/")
+            }
+            return !isDirectory && !scope.includes(path)
         }).map(\.path)
         try Task.checkCancellation()
         let result = TextSearchScanner.search(files: files, root: root, query: query, matcher: matcher, limit: limit, shouldStop: { Task.isCancelled })
@@ -188,6 +246,7 @@ final class TextSearchController: ObservableObject {
         result = found
         error = nil
         isSearching = false
+        guard visiblePin == nil else { return }
         let paths = Set(found.files.map(\.path))
         collapsedFiles = collapsedFiles.intersection(paths)
         // 选中的那一处还在就留着（刷新之后接着往下看），否则选第一处：回车就能打开

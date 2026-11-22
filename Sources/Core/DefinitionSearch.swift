@@ -17,6 +17,11 @@ public enum DefinitionSearch {
     public struct Source: Codable, Sendable {
         public let path: String
         public let text: String
+
+        public init(path: String, text: String) {
+            self.path = path
+            self.text = text
+        }
     }
 
     public struct Input: Sendable {

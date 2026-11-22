@@ -115,6 +115,9 @@ final class WorkbenchModel: ObservableObject {
         self.renderer.onEdited = { [weak self] path, text in
             self?.active?.applyEdit(path: path, text: text)
         }
+        self.renderer.onEditLocation = { [weak self] path, cursor in
+            self?.active?.editorDidChange(at: cursor, path: path)
+        }
         self.renderer.onEditorHistory = { [weak self] path, text, history in
             self?.active?.applyEditorHistory(path: path, text: text, history: history)
         }
@@ -122,7 +125,11 @@ final class WorkbenchModel: ObservableObject {
         self.renderer.onFind = { [weak self] in self?.active?.showFind() }
         self.renderer.onFindInPath = { [weak self] in self?.active?.showFindInPath() }
         self.renderer.onGoToDefinition = { [weak self] path, point in self?.active?.goToDefinition(path: path, point: point) }
+        self.renderer.onQuickDefinition = { [weak self] path, point in self?.active?.goToDefinition(path: path, point: point, preview: true) }
         self.renderer.onJavaImplementations = { [weak self] path, point in self?.active?.showJavaImplementations(path: path, point: point) }
+        self.renderer.onJavaSemanticAction = { [weak self] action, path, point in
+            self?.active?.runJavaSemanticAction(action, path: path, point: point)
+        }
         // 正文右键菜单里我们自己的项：复制路径和行号（IDEA 编辑器右键的 Copy Reference）、工作区 diff 的回滚
         self.renderer.contextActions = { [weak self] in
             guard let session = self?.active, let tab = session.activeTab else { return [] }
