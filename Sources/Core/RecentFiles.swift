@@ -78,13 +78,11 @@ public struct RecentFiles: Equatable, Sendable {
     /// 输入即过滤：打分沿用查找文件（`FileSearch`：文件名全等 > 前缀 > 包含 > 子序列，带 `/` 按路径），
     /// 同分的保持最近打开的顺序。空查询原样返回（按最近排）。
     public static func filter(_ entries: [Entry], query rawQuery: String) -> [FileSearchMatch] {
-        let query = Array(rawQuery.trimmingCharacters(in: .whitespaces).lowercased())
-        guard !query.isEmpty else {
+        guard let query = FileSearch.Query(rawQuery) else {
             return entries.map { FileSearchMatch(entry: $0.searchEntry, score: 0, matchedNameIndices: []) }
         }
-        let byPath = query.contains("/")
         return entries.enumerated()
-            .compactMap { offset, entry in FileSearch.score(entry.searchEntry, query: query, byPath: byPath).map { (offset, $0) } }
+            .compactMap { offset, entry in FileSearch.score(entry.searchEntry, query: query).map { (offset, $0) } }
             .sorted { $0.1.score != $1.1.score ? $0.1.score > $1.1.score : $0.0 < $1.0 }
             .map(\.1)
     }

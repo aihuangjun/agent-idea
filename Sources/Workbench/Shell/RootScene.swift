@@ -228,9 +228,9 @@ public struct AgentIDEARootScene: Scene {
         CommandMenu("导航") {
             Button("全局搜索…（⇧⇧）") { workbench.active?.showProjectSearch() }
                 .disabled(workbench.active == nil)
-            Button("查找文件…") {
+            Button("侧栏搜索…") {
                 workbench.toolWindow = .project
-                workbench.active?.search.activate()
+                workbench.active?.showSidebarSearch()
             }
             .keyboardShortcut("f", modifiers: [.command, .shift])
             .disabled(workbench.active == nil)

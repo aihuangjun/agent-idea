@@ -33,7 +33,7 @@ extension ProjectSession {
         Log.info("project", "已新建文件夹 \(url.path)")
         refreshTree(directoryContaining: url)
         revealInTree(url)
-        search.applyChanges([url.path])
+        projectSearch.invalidate()
         return nil
     }
 
@@ -62,7 +62,7 @@ extension ProjectSession {
     func didCreateFile(at url: URL) {
         refreshTree(directoryContaining: url)
         revealInTree(url)
-        search.applyChanges([url.path])
+        projectSearch.invalidate()
         refreshGit()
         openFile(url, pinned: true)
     }

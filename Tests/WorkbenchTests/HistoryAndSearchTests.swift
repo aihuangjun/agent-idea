@@ -111,7 +111,7 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
     }
 }
 
-@Test @MainActor func fileSearchIndexesLazilyAndSkipsIgnored() async throws {
+@Test @MainActor func sidebarSearchIndexesLazilyAndSkipsIgnored() async throws {
     try await withTemporaryDirectory { directory in
         let fm = FileManager.default
         for path in ["Sources/App/AppModel.swift", "Sources/Core/Model.swift", ".build/junk.swift", "docs/guide.md"] {
@@ -119,67 +119,71 @@ private func logRecord(_ hash: String, parents: String, subject: String) -> Stri
             try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             try "x".write(to: url, atomically: true, encoding: .utf8)
         }
+        let ignoredBuild = Locked(true)
         let runner = FakeCommandRunner { arguments, _ in
             switch arguments.first {
             case "rev-parse" where arguments.contains("--show-toplevel"): return shellOutput(directory.path + "\n")
-            case "status": return shellOutput("# branch.oid abc\u{0}# branch.head main\u{0}! .build/\u{0}")
+            case "status":
+                let ignored = ignoredBuild.value ? "! .build/\u{0}" : ""
+                return shellOutput("# branch.oid abc\u{0}# branch.head main\u{0}" + ignored)
             default: return shellOutput("")
             }
         }
         let session = ProjectSession(root: directory, git: GitClient(executable: URL(fileURLWithPath: "/usr/bin/git"), runner: runner),
                                      renderer: ContentRenderer(),
                                      preferences: ReadingPreferences(defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!))
+        defer { session.tearDown() }
         await waitUntil { session.gitIndex.isIgnored(".build", isDirectory: true) }
-        let search = session.search
-        #expect(search.indexedCount == 0)
-
-        search.isActive = true
-        await waitUntil { !search.isIndexing && search.indexedCount > 0 }
-        #expect(search.indexedCount == 3)
-
+        let search = session.projectSearch
+        #expect(!search.isIndexing && search.presentation == nil)
+        session.showSidebarSearch()
         search.query = "model"
-        await waitUntil { !search.results.isEmpty }
-        #expect(search.results.map(\.entry.path) == ["Sources/Core/Model.swift", "Sources/App/AppModel.swift"])
+        await waitUntil { search.results.count == 2 }
+        #expect(search.results.map(\.path) == ["Sources/Core/Model.swift", "Sources/App/AppModel.swift"])
         #expect(search.selectedIndex == 0)
         search.moveSelection(by: 1)
-        #expect(search.selectedResult?.entry.name == "AppModel.swift")
-        #expect(search.url(for: search.selectedResult!).path == directory.appendingPathComponent("Sources/App/AppModel.swift").path)
+        #expect(search.selected?.name == "AppModel.swift")
+        #expect(search.selected?.path == "Sources/App/AppModel.swift")
         search.moveSelection(by: 5)
         #expect(search.selectedIndex == 1)
 
         // 被忽略的文件搜不到；旧结果在新结果到达时被替换
-        search.query = "junk"
-        await waitUntil { search.results.isEmpty }
+        search.query = "junk.swift"
+        let before = try await search.snapshot()
+        #expect(!before.outlines.contains { $0.path == ".build/junk.swift" })
         #expect(search.results.isEmpty)
 
         // 关掉搜索会清空查询
-        search.isActive = false
+        search.close()
         #expect(search.query.isEmpty && search.results.isEmpty)
-        search.isActive = true
+        session.showSidebarSearch()
+        search.query = "guide.md"
+        await waitUntil { search.results.first?.path == "docs/guide.md" }
+        #expect(search.results.first?.path == "docs/guide.md")
 
-        // 目录变化增量更新：新文件、新目录（连里面的文件）、删掉的文件
+        // 索引刷新会移除删掉的文件，并加入新文件和新目录。
         let newFile = directory.appendingPathComponent("docs/new-model.md")
         try "y".write(to: newFile, atomically: true, encoding: .utf8)
         let newDirectory = directory.appendingPathComponent("Sources/Extra")
         try fm.createDirectory(at: newDirectory, withIntermediateDirectories: true)
         try "z".write(to: newDirectory.appendingPathComponent("Thing.swift"), atomically: true, encoding: .utf8)
         try fm.removeItem(at: directory.appendingPathComponent("docs/guide.md"))
-        search.applyChanges([newFile.path, newDirectory.path, directory.appendingPathComponent("docs/guide.md").path])
-        #expect(search.indexedCount == 4)
+        session.refreshAll()
+        await waitUntil { search.results.isEmpty }
+        #expect(search.results.isEmpty)
         search.query = "new-model"
         await waitUntil { !search.results.isEmpty }
-        #expect(search.results.first?.entry.path == "docs/new-model.md")
+        #expect(search.results.first?.path == "docs/new-model.md")
         search.query = "thing"
-        await waitUntil { search.results.first?.entry.path == "Sources/Extra/Thing.swift" }
-        search.query = "guide"
-        await waitUntil { search.results.isEmpty }
+        await waitUntil { search.results.first?.path == "Sources/Extra/Thing.swift" }
+        #expect(search.results.first?.path == "Sources/Extra/Thing.swift")
 
-        // 忽略规则变了：整个索引作废重建（.build 不再被忽略 → junk.swift 进来）
-        search.markStale()
-        await waitUntil { search.indexedCount == 4 && !search.isIndexing }
-        search.isExcluded = { _, _ in false }
-        search.markStale()
-        await waitUntil { search.indexedCount == 5 }
+        // 忽略规则变了：.build 不再被忽略，已有的查询也会刷新。
+        search.query = "junk.swift"
+        ignoredBuild.value = false
+        session.refreshGit()
+        await waitUntil { search.results.first?.path == ".build/junk.swift" }
+        #expect(search.results.first?.path == ".build/junk.swift")
     }
 }
 

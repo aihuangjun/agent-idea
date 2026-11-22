@@ -57,7 +57,8 @@ public enum FileReference {
     /// 编译器那种结尾多一个冒号的（`a.swift:12:5:`），外面包着反引号 / 引号的（从 Markdown 里复制来的），
     /// 前面带 `./` 的，`file://` 地址，以及项目根下的绝对路径（换成相对路径再搜）。
     /// 拆完路径部分是空的（`:12`）就不拆，原样当文件名搜。`projectRoot` 为 nil 时不换算绝对路径。
-    public static func parseQuery(_ query: String, projectRoot: String?) -> (path: String, location: SourceLocation?) {
+    /// `preservingRoot` 保留显式的项目根定位，供搜索区分 `./index.html` 与任意目录下的 `index.html`。
+    public static func parseQuery(_ query: String, projectRoot: String?, preservingRoot: Bool = false) -> (path: String, location: SourceLocation?) {
         let original = query.trimmingCharacters(in: .whitespacesAndNewlines)
         var text = original
         let quotes: Set<Character> = ["`", "\"", "'"]
@@ -76,10 +77,13 @@ public enum FileReference {
         }
 
         if text.hasPrefix("file://"), let url = URL(string: text), url.isFileURL { text = url.path }
-        if let projectRoot, text.hasPrefix("/"), let relative = relativePath(of: text, root: projectRoot), !relative.isEmpty { text = relative }
+        if let projectRoot, text.hasPrefix("/"), let relative = relativePath(of: text, root: projectRoot), !relative.isEmpty {
+            text = "./" + relative
+        }
+        let rooted = text.hasPrefix("./")
         while text.hasPrefix("./") { text = String(text.dropFirst(2)) }
         if text.isEmpty { return (original, nil) }
-        return (text, location)
+        return (preservingRoot && rooted ? "./" + text : text, location)
     }
 
     // MARK: - 内部

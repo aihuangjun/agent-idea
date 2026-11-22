@@ -3,10 +3,10 @@ import Core
 import DesignSystem
 import SwiftUI
 
-/// 项目目录树（IDEA 的 Project 工具窗口），顶上可以拉出一条文件搜索（IDEA 的 Go to File）。
+/// 项目目录树，标题栏的放大镜打开侧栏搜索。
 struct ProjectTreeView: View {
     @ObservedObject var session: ProjectSession
-    @ObservedObject var search: FileSearchController
+    @ObservedObject var search: ProjectSearchController
     @FocusState private var isFocused: Bool
     @State private var scrollOnSelection = false
     /// 双击判定是输入层的事，放在视图里；一棵树共用一个，跨行才能判「同一行点了两下」。
@@ -24,7 +24,7 @@ struct ProjectTreeView: View {
 
     init(session: ProjectSession) {
         self.session = session
-        self.search = session.search
+        self.search = session.projectSearch
     }
 
     var body: some View {
@@ -35,24 +35,24 @@ struct ProjectTreeView: View {
                 }
                 IconButton(ToolWindowIcon.syncWithRemote, help: syncHelp, size: 22) { session.requestSync() }
                     .disabled(!session.canRequestSync)
-                IconButton("magnifyingglass", help: "查找文件（⇧⌘F），可粘贴 路径:行号", isActive: search.isActive, size: 22) {
-                    if search.isActive { closeSearch() } else { search.activate() }
+                IconButton("magnifyingglass", help: "侧栏搜索（⇧⌘F），可粘贴 路径:行号", isActive: search.presentation == .sidebar, size: 22) {
+                    if search.presentation == .sidebar { closeSearch() } else { session.showSidebarSearch() }
                 }
                 IconButton("scope", help: "定位当前打开的文件（⌥⌘L）", size: 22) {
-                    search.isActive = false
+                    if search.presentation == .sidebar { search.close() }
                     session.revealActiveTab()
                 }
                     .disabled(session.activeTab == nil)
                 IconButton(ToolWindowIcon.collapseAll, help: "全部折叠", size: 22) { session.collapseAll() }
             }
-            if search.isActive {
-                FileSearchBar(search: search, open: openResult, close: closeSearch)
+            if search.presentation == .sidebar {
+                SidebarSearchBar(search: search, open: openResult, close: closeSearch)
             }
             // 结果盖在树上面而不是替换它：树留在视图树里，滚动位置、定位时的 onChange 才不会丢
             ZStack {
                 tree
-                if search.isActive, !search.query.trimmingCharacters(in: .whitespaces).isEmpty {
-                    FileSearchResults(search: search, open: openResult).background(Theme.panel)
+                if search.presentation == .sidebar, !search.query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    SidebarSearchResults(search: search, open: openResult).background(Theme.panel)
                 }
             }
         }
@@ -81,17 +81,13 @@ struct ProjectTreeView: View {
         return "拉取最新（git fetch + rebase）⌘T：从 \(upstream) 拉"
     }
 
-    /// 打开一条搜索结果：固定标签、关掉搜索、在树上定位——照 IDEA 的 Go to File。
-    private func openResult(_ match: FileSearchMatch) {
-        let url = search.url(for: match)
-        // 查找框里带着行号（`Sources/Foo.swift:12`）就跳过去；关搜索会清掉它，先取出来
-        session.openFile(url, pinned: true, at: search.location)
-        closeSearch()
-        session.reveal(url)
+    private func openResult(_ result: ProjectSearch.Result) {
+        session.openProjectSearchResult(result)
+        isFocused = true
     }
 
     private func closeSearch() {
-        search.isActive = false
+        search.close()
         isFocused = true
     }
 
@@ -276,25 +272,26 @@ struct ProjectTreeView: View {
 }
 
 /// 搜索框。回车打开选中的结果，↑↓ 换选中，Esc 关掉搜索。
-private struct FileSearchBar: View {
-    @ObservedObject var search: FileSearchController
-    let open: (FileSearchMatch) -> Void
+private struct SidebarSearchBar: View {
+    @ObservedObject var search: ProjectSearchController
+    let open: (ProjectSearch.Result) -> Void
     let close: () -> Void
     @State private var isFieldFocused = false
 
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(Theme.mutedText)
-            // NSTextField 直包：⌘F / 点放大镜时要从 WebView 手里把焦点抢过来，SwiftUI 的 FocusState 做不到
-            FocusedTextField(text: $search.query, placeholder: "查找文件名或路径", focusRequests: search.focusRequests) { key in
+            // NSTextField 直包：⇧⌘F / 点放大镜时要从 WebView 手里把焦点抢过来，SwiftUI 的 FocusState 做不到
+            FocusedTextField(text: $search.query, placeholder: "搜索类、函数和文件", focusRequests: search.focusRequests) { key in
                 switch key {
                 case .up: search.moveSelection(by: -1)
                 case .down: search.moveSelection(by: 1)
-                case .submit: if let match = search.selectedResult { open(match) }
+                case .submit: if let result = search.selected { open(result) }
                 case .cancel: close()
                 }
                 return true
             } onFocusChange: { isFieldFocused = $0 }
+            .accessibilityLabel("侧栏搜索")
             if let location = search.location {
                 // 粘进来的 `路径:行号`：告诉用户行号认出来了，打开后会跳过去
                 Text(location.column.map { "行 \(location.line):\($0)" } ?? "行 \(location.line)")
@@ -321,81 +318,34 @@ private struct FileSearchBar: View {
 }
 
 /// 搜索结果列表。单击打开。
-private struct FileSearchResults: View {
-    @ObservedObject var search: FileSearchController
-    let open: (FileSearchMatch) -> Void
+private struct SidebarSearchResults: View {
+    @ObservedObject var search: ProjectSearchController
+    let open: (ProjectSearch.Result) -> Void
 
     var body: some View {
         if search.results.isEmpty {
             ToolWindowEmptyState(
-                title: search.isIndexing ? "正在建索引…" : "没有匹配的文件",
-                detail: search.isIndexing ? "第一次搜索要先扫一遍项目目录。" : "已索引 \(search.indexedCount) 个文件（git 忽略的不算）。试试文件名的一部分，或带 / 的路径。"
+                title: search.isIndexing ? "正在索引…" : "没有匹配的结果",
+                detail: search.incomplete && !search.isIndexing ? "部分源码未能加入索引。" : ""
             )
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(Array(search.results.enumerated()), id: \.element.entry.path) { index, match in
-                            FileSearchRow(match: match, isSelected: index == search.selectedIndex) {
+                        ForEach(Array(search.results.enumerated()), id: \.element.id) { index, result in
+                            SearchResultRow(result: result, selected: index == search.selectedIndex) {
                                 search.select(index)
                             } open: {
-                                open(match)
+                                open(result)
                             }
-                            .id(match.entry.path)
+                            .id(result.id)
                         }
                     }
                     .padding(.vertical, 4)
                 }
-                .onChange(of: search.selectedIndex) { _, index in
-                    if search.results.indices.contains(index) { proxy.scrollTo(search.results[index].entry.path) }
-                }
+                .onChange(of: search.selected?.id) { _, id in if let id { proxy.scrollTo(id) } }
             }
         }
-    }
-}
-
-struct FileSearchRow: View {
-    let match: FileSearchMatch
-    let isSelected: Bool
-    let select: () -> Void
-    let open: () -> Void
-    @State private var isHovering = false
-
-    /// 文件名，命中的字符加粗、用强调色。
-    private var highlightedName: AttributedString {
-        var text = AttributedString(match.entry.name)
-        let characters = Array(match.entry.name)
-        for index in match.matchedNameIndices where index < characters.count {
-            let start = text.index(text.startIndex, offsetByCharacters: index)
-            let end = text.index(start, offsetByCharacters: 1)
-            text[start..<end].foregroundColor = Theme.accent
-            text[start..<end].font = .system(size: 13, weight: .semibold)
-        }
-        return text
-    }
-
-    var body: some View {
-        let icon = FileIcon.file(named: match.entry.name)
-        HStack(spacing: 6) {
-            Image(systemName: icon.systemName).font(.system(size: 12)).foregroundStyle(icon.color).frame(width: 16)
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 6) {
-                    Text(highlightedName).font(Theme.uiFont).foregroundStyle(Theme.text).lineLimit(1)
-                    if !match.entry.directory.isEmpty {
-                        Text(match.entry.directory).font(Theme.smallFont).foregroundStyle(Theme.mutedText).lineLimit(1).fixedSize()
-                    }
-                }
-                Text(highlightedName).font(Theme.uiFont).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
-            }
-            Spacer(minLength: 4)
-        }
-        .padding(.horizontal, 10)
-        .frame(height: Theme.treeRowHeight)
-        .background(Rectangle().fill(isSelected ? Theme.selection : (isHovering ? Theme.hover.opacity(0.5) : .clear)))
-        .contentShape(Rectangle())
-        .onHover { isHovering = $0 }
-        .onPress { _ in select() } release: { isClick in if isClick { open() } }
-        .help(match.entry.path)
     }
 }
 

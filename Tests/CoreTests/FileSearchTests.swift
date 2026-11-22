@@ -41,6 +41,19 @@ private func entries(_ paths: String...) -> [FileSearchEntry] { paths.map(FileSe
     #expect(FileSearch.search("prjsess", in: session).first?.matchedNameIndices == [0, 1, 3, 7, 8, 9, 10])
 }
 
+@Test func filenameWithExtensionMatchesOnlyTheWholeFilename() {
+    let index = entries(
+        "mcp.md", "docs/MCP.md", "notdocs/mcp.md", "mcp/wiki-raws-patterns.md",
+        "mcp.md/wiki-raws-patterns.md", "docs/mcp-guide.md", "docs/mcp.md.bak", "missing/wiki-raws-patterns.md",
+        ".gitignore", "docs/.gitignore", ".gitignore.bak", ".gitignore-local"
+    )
+    #expect(Set(FileSearch.search("mcp.md", in: index).map(\.entry.path)) == ["mcp.md", "docs/MCP.md", "notdocs/mcp.md"])
+    #expect(FileSearch.search("docs/mcp.md", in: index).map(\.entry.path) == ["docs/MCP.md"])
+    #expect(FileSearch.search("missing.md", in: index).isEmpty)
+    #expect(FileSearch.search("mcp-guide", in: index).first?.entry.path == "docs/mcp-guide.md")
+    #expect(Set(FileSearch.search(".gitignore", in: index).map(\.entry.path)) == [".gitignore", "docs/.gitignore"])
+}
+
 @Test func indexerSkipsHiddenExcludedAndSymlinkedDirectories() async throws {
     try await withTemporaryDirectory { root in
         let fm = FileManager.default

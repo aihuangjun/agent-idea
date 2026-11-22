@@ -56,9 +56,7 @@ public struct FocusedTextField: NSViewRepresentable {
         field.cell?.usesSingleLineMode = true
         field.cell?.isScrollable = true
         field.stringValue = text
-        field.placeholderAttributedString = NSAttributedString(string: placeholder, attributes: [
-            .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor(Theme.mutedText),
-        ])
+        field.placeholderAttributedString = styledPlaceholder
         field.onAttach = { [weak field] in
             guard let field else { return }
             context.coordinator.focus(field, selecting: initialSelection)
@@ -71,10 +69,19 @@ public struct FocusedTextField: NSViewRepresentable {
     public func updateNSView(_ field: Field, context: Context) {
         context.coordinator.parent = self
         if field.stringValue != text { field.stringValue = text }
+        if field.placeholderAttributedString?.string != placeholder {
+            field.placeholderAttributedString = styledPlaceholder
+        }
         if context.coordinator.seenFocusRequests != focusRequests {
             context.coordinator.seenFocusRequests = focusRequests
             context.coordinator.focus(field, selecting: nil)
         }
+    }
+
+    private var styledPlaceholder: NSAttributedString {
+        NSAttributedString(string: placeholder, attributes: [
+            .font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor(Theme.mutedText),
+        ])
     }
 
     /// 挂上窗口时通知一声（`makeNSView` 时还没有窗口，抢不了焦点）；成为第一响应者时也通知。

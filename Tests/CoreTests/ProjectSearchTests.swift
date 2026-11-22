@@ -20,6 +20,35 @@ import TestSupport
     #expect(search("README", .files).first?.path == "README.md")
 }
 
+@Test func sameNamedFilesDisplayTheirProjectRelativePaths() {
+    let paths = ["index.html", "admin/public/index.html", "web/public/index.html"]
+    let files = paths.map(FileSearchEntry.init(path:))
+    for scope in [ProjectSearch.Scope.all, .files] {
+        let results = ProjectSearch.search("index.html", scope: scope, files: files, symbols: [], root: "/tmp/project")
+        #expect(results.map(\.name) == Array(repeating: "index.html", count: 3))
+        #expect(Set(results.map(\.displayPath)) == ["./index.html", "admin/public/index.html", "web/public/index.html"])
+        #expect(Set(results.map(\.path)) == Set(paths), "跳转仍使用原始项目相对路径")
+        for reference in ["./index.html", "`./index.html:8`", "/tmp/project/index.html", "file:///tmp/project/index.html#L8"] {
+            let rooted = ProjectSearch.search(reference, scope: scope, files: files, symbols: [], root: "/tmp/project")
+            #expect(rooted.map(\.path) == ["index.html"])
+            if reference.contains("8") { #expect(rooted.first?.location == SourceLocation(line: 8)) }
+        }
+    }
+}
+
+@Test func globalSearchDoesNotUseParentDirectoryToMatchCompleteFilenames() {
+    let paths = ["mcp.md", "docs/MCP.md", "mcp/wiki-raws-patterns.md", "mcp.md/wiki-raws-patterns.md", "docs/mcp.md.bak"]
+    let files = paths.map(FileSearchEntry.init(path:))
+    let method = SourceSymbol(name: "md", qualifiedName: "mcp.md", kind: .function, line: 0, ch: 0)
+    let symbols = [ProjectSearch.IndexedSymbol(symbol: method, path: "mcp.java")]
+    for scope in [ProjectSearch.Scope.all, .files] {
+        let results = ProjectSearch.search("mcp.md", scope: scope, files: files, symbols: symbols, root: "/tmp/project")
+        #expect(Set(results.map(\.path)) == ["mcp.md", "docs/MCP.md"])
+    }
+    #expect(ProjectSearch.search("mcp.md", scope: .all, files: [], symbols: symbols, root: "/tmp/project").isEmpty)
+    #expect(ProjectSearch.search("mcp.md", scope: .symbols, files: files, symbols: symbols, root: "/tmp/project").map(\.symbol) == [method])
+}
+
 @Test func javaImplementationsFollowImportsAndTransitiveInheritance() throws {
     typealias Declaration = JavaSource.TypeDeclaration
     func declaration(_ name: String, _ kind: SourceSymbol.Kind = .type, owner: String? = nil, parents: [String] = []) -> Declaration {

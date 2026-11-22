@@ -176,6 +176,7 @@ import TestSupport
         """)
         _ = try write("legacy/Service.java", "package legacy;\ninterface Service {}\nclass Other implements Service {}")
         _ = try write("README.md", "# Project")
+        _ = try write("impl/Worker.java.bak", "旧备份")
 
         let suite = "agentidea-project-search-\(UUID())"
         let defaults = UserDefaults(suiteName: suite)!
@@ -251,6 +252,26 @@ import TestSupport
         search.query = "updateQueue"
         await waitUntil { search.results.first?.symbol?.name == "updateQueue" }
         #expect(search.results.first?.symbol?.name == "updateQueue", "草稿变更应使已缓存的符号更新")
+
+        session.showSidebarSearch()
+        #expect(search.presentation == .sidebar && search.scope == .all)
+        search.query = "Worker"
+        await waitUntil { search.results.first?.symbol?.qualifiedName == "impl.Worker" }
+        #expect(search.results.first?.symbol?.qualifiedName == "impl.Worker")
+        search.query = "updateQueue"
+        await waitUntil { search.results.first?.symbol?.name == "updateQueue" }
+        let sidebarMethod = try #require(search.selected)
+        #expect(sidebarMethod.symbol?.name == "updateQueue")
+        session.openProjectSearchResult(sidebarMethod)
+        await waitUntil { await cursor(renderer) == "2:20" }
+        #expect(await cursor(renderer) == "2:20")
+        #expect(session.selectedPath == implementation.path)
+
+        session.showSidebarSearch()
+        search.query = "Worker.java"
+        await waitUntil { search.results.first?.path == "impl/Worker.java" }
+        #expect(search.results.map(\.path) == ["impl/Worker.java"])
+        #expect(search.selected?.symbol == nil)
     }
 }
 
@@ -278,12 +299,12 @@ import TestSupport
         session.setActive(true)
         defer { session.tearDown() }
 
-        session.search.activate()
-        session.search.query = "./Sources/Foo.swift:150:3"
-        await waitUntil { session.search.results.first?.entry.path == "Sources/Foo.swift" }
-        #expect(session.search.location == SourceLocation(line: 150, column: 3))
-        let match = try #require(session.search.selectedResult)
-        session.openFile(session.search.url(for: match), pinned: true, at: session.search.location)
+        session.showSidebarSearch()
+        session.projectSearch.query = "./Sources/Foo.swift:150:3"
+        await waitUntil { session.projectSearch.results.first?.path == "Sources/Foo.swift" }
+        #expect(session.projectSearch.location == SourceLocation(line: 150, column: 3))
+        let match = try #require(session.projectSearch.selected)
+        session.openProjectSearchResult(match)
         await waitUntil { await cursor(renderer) == "149:2" }
         #expect(await cursor(renderer) == "149:2", "新打开的文件跳到粘进来的行列")
 

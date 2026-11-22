@@ -41,6 +41,8 @@ public enum ProjectSearch {
         public let matchedNameIndices: [Int]
 
         public var name: String { symbol?.name ?? (path as NSString).lastPathComponent }
+        /// 显示项目相对路径。根目录的文件加上 ./，让它与同名文件的其它位置区分开。
+        public var displayPath: String { path.contains("/") ? path : "./" + path }
         public var id: ID { ID(path: path, symbol: symbol) }
 
         public struct ID: Hashable {
@@ -60,7 +62,7 @@ public enum ProjectSearch {
         _ rawQuery: String, scope: Scope, files: [FileSearchEntry], symbols: [IndexedSymbol], root: String,
         limit: Int = 100, shouldStop: () -> Bool = { false }
     ) -> [Result] {
-        let reference = FileReference.parseQuery(rawQuery, projectRoot: root)
+        let reference = FileReference.parseQuery(rawQuery, projectRoot: root, preservingRoot: true)
         let name = reference.path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return [] }
         var matches: [(score: Int, result: Result)] = []
@@ -69,7 +71,9 @@ public enum ProjectSearch {
                 ($0.score, Result(path: $0.entry.path, location: reference.location, matchedNameIndices: $0.matchedNameIndices))
             }
         }
-        if scope != .files, reference.location == nil, !name.contains("/") {
+        // 「全部」里，完整文件名优先作为文件查找。有相同拼写的限定符号时可在「类」或「函数和变量」页查找。
+        let isFilenameQuery = scope == .all && isCompleteFilename(name, hasFileMatch: !matches.isEmpty)
+        if scope != .files, !isFilenameQuery, reference.location == nil, !name.contains("/") {
             let query = Array(name.lowercased())
             let initials = name.count > 1 && name.allSatisfy(\.isUppercase) ? query : []
             for (offset, entry) in symbols.enumerated() {
@@ -77,7 +81,7 @@ public enum ProjectSearch {
                 let symbol = entry.symbol
                 if scope == .types && !symbol.kind.isType { continue }
                 if scope == .symbols && symbol.kind.isType { continue }
-                guard let match = FileSearch.score(entry.key, query: query, byPath: false) else { continue }
+                guard let match = FileSearch.scoreSymbol(entry.key, query: query) else { continue }
                 let qualified = entry.key.lowercasedPath == query
                 let hump = !initials.isEmpty && Array(symbol.name.filter(\.isUppercase).lowercased()) == initials
                 let score = qualified ? 1000 : hump ? max(match.score, 820) : match.score
@@ -93,5 +97,11 @@ public enum ProjectSearch {
             if $0.result.path != $1.result.path { return $0.result.path < $1.result.path }
             return ($0.result.location?.line ?? 0, $0.result.location?.column ?? 0) < ($1.result.location?.line ?? 0, $1.result.location?.column ?? 0)
         }.prefix(limit).map(\.result)
+    }
+
+    private static func isCompleteFilename(_ name: String, hasFileMatch: Bool) -> Bool {
+        guard FileSearch.Query(name)?.exactName != nil else { return false }
+        let suffix = (name as NSString).pathExtension.lowercased()
+        return hasFileMatch || name.hasPrefix(".") || Language.recognizesExtension(suffix) || FileCategory.imageExtensions.contains(suffix) || suffix == "pdf"
     }
 }

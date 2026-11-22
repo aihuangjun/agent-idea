@@ -5,7 +5,7 @@ import SwiftUI
 /// 最近的文件（⌘E，IDEA 的 Recent Files）：浮在项目主体上方的小弹窗。输入即过滤、↑ ↓ 换、回车打开、Esc 关，点外面也关。
 ///
 /// 挂在 `ProjectContent` 上而不是编辑区的标签栏那一组里：关掉所有标签之后 ⌘E 照样要能用（那时最需要它）。
-/// 行沿用查找文件的 `FileSearchRow`；选中状态作为值传进去。
+/// 行沿用查找文件的 `SearchResultRow`；选中状态作为值传进去。
 struct RecentFilesPopup: View {
     let session: ProjectSession
     @ObservedObject var recent: RecentFilesController
@@ -68,7 +68,7 @@ struct RecentFilesPopup: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(recent.results.enumerated()), id: \.element.entry.path) { index, match in
-                            FileSearchRow(match: match, isSelected: index == recent.selectedIndex) {
+                            SearchResultRow(match: match, selected: index == recent.selectedIndex) {
                                 recent.select(index)
                             } open: {
                                 session.openRecentFile(match)
@@ -78,7 +78,7 @@ struct RecentFilesPopup: View {
                     }
                     .padding(.vertical, 4)
                 }
-                .frame(height: min(CGFloat(recent.results.count) * Theme.treeRowHeight + 8, 320))
+                .frame(height: min(CGFloat(recent.results.count) * SearchResultRow.height + 8, 320))
                 .onChange(of: recent.selectedIndex) { _, index in
                     if recent.results.indices.contains(index) { proxy.scrollTo(recent.results[index].entry.path) }
                 }

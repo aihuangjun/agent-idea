@@ -32,6 +32,10 @@ public struct Language: Equatable, Hashable, Sendable {
         return byExtension[ext] ?? Language(name: ext.uppercased(), highlightID: nil)
     }
 
+    static func recognizesExtension(_ suffix: String) -> Bool {
+        byExtension[suffix] != nil
+    }
+
     private static let byFileName: [String: Language] = [
         "dockerfile": Language(name: "Dockerfile", highlightID: "dockerfile"),
         "makefile": Language(name: "Makefile", highlightID: "makefile"),

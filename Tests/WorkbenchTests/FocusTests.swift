@@ -7,7 +7,7 @@ import Testing
 import TestSupport
 @testable import Workbench
 
-/// ⌘F / 点放大镜打开查找文件时，焦点得真的到搜索框里——哪怕之前第一响应者是正文的 WKWebView
+/// ⇧⌘F / 点放大镜打开侧栏搜索时，焦点得真的到搜索框里——哪怕之前第一响应者是正文的 WKWebView
 /// （SwiftUI 的 FocusState 在这种情况下拿不到焦点，0.5.0 改成 NSTextField 直包）。整个 WorkbenchView 放进离屏窗口走一遍。
 @Test @MainActor func fileSearchTakesKeyboardFocusFromWebView() async throws {
     try await withTemporaryDirectory { directory in
@@ -37,19 +37,29 @@ import TestSupport
         window.makeFirstResponder(workbench.renderer.webView)
         #expect(window.firstResponder === workbench.renderer.webView)
 
-        // ⌘F（菜单项做的就是这两步）
+        // ⇧⌘F（菜单项做的就是这两步）
         workbench.toolWindow = .project
-        session.search.activate()
+        session.showSidebarSearch()
         hosting.layoutSubtreeIfNeeded()
-        try await Task.sleep(nanoseconds: 300_000_000)
+        await waitForSearchFocus(in: window)
         #expect(searchFieldIsFirstResponder(in: window), "打开搜索后焦点应在搜索框里，现在是 \(String(describing: window.firstResponder))")
 
-        // 搜索已经开着、焦点又回到编辑器，再按一次 ⌘F 也得把焦点抢回来
+        // 搜索已经开着、焦点又回到编辑器，再按一次 ⇧⌘F 也得把焦点抢回来
         window.makeFirstResponder(workbench.renderer.webView)
-        session.search.activate()
+        session.showSidebarSearch()
         hosting.layoutSubtreeIfNeeded()
-        try await Task.sleep(nanoseconds: 300_000_000)
-        #expect(searchFieldIsFirstResponder(in: window), "再次 ⌘F 焦点应回到搜索框，现在是 \(String(describing: window.firstResponder))")
+        await waitForSearchFocus(in: window)
+        #expect(searchFieldIsFirstResponder(in: window), "再次 ⇧⌘F 焦点应回到搜索框，现在是 \(String(describing: window.firstResponder))")
+
+        session.showProjectSearch()
+        let allHint = "搜索类、文件、方法、函数和变量"
+        await waitForSearchFocus(in: window, placeholder: allHint)
+        #expect(searchFieldIsFirstResponder(in: window, placeholder: allHint))
+
+        session.projectSearch.scope = .symbols
+        let functionHint = "搜索方法名、函数名或变量名"
+        await waitForSearchFocus(in: window, placeholder: functionHint)
+        #expect(searchFieldIsFirstResponder(in: window, placeholder: functionHint), "切换搜索范围时应更新提示并保留输入焦点")
     }
 }
 
@@ -90,7 +100,15 @@ import TestSupport
 
 /// 窗口的第一响应者是不是搜索框（NSTextField 编辑时第一响应者是它的字段编辑器，delegate 指回输入框）。
 @MainActor
-private func searchFieldIsFirstResponder(in window: NSWindow) -> Bool {
+private func waitForSearchFocus(in window: NSWindow, placeholder: String = "搜索类、函数和文件") async {
+    let deadline = ContinuousClock.now + .seconds(5)
+    while !searchFieldIsFirstResponder(in: window, placeholder: placeholder), ContinuousClock.now < deadline {
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+}
+
+@MainActor
+private func searchFieldIsFirstResponder(in window: NSWindow, placeholder: String = "搜索类、函数和文件") -> Bool {
     guard let editor = window.firstResponder as? NSTextView, let field = editor.delegate as? FocusedTextField.Field else { return false }
-    return field.placeholderAttributedString?.string == "查找文件名或路径"
+    return field.placeholderAttributedString?.string == placeholder
 }

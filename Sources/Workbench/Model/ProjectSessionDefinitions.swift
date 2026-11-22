@@ -56,7 +56,7 @@ extension ProjectSession {
 
                 let input = try await DefinitionSearch.input(
                     name: reference.name, preferredFileStem: reference.preferredFileStem, source: source, root: project.root, git: git,
-                    drafts: draftsByPath, isExcluded: search.isExcluded
+                    drafts: draftsByPath, isExcluded: sourceSearchExclusion
                 )
                 var hits: [ContentRenderer.DefinitionHit] = []
                 for offset in stride(from: 0, to: input.sources.count, by: 12) {

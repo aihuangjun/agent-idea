@@ -7,7 +7,7 @@ struct ProjectSearchPopup: View {
     @ObservedObject var search: ProjectSearchController
 
     var body: some View {
-        if search.isShown {
+        if search.presentation == .popup {
             ZStack(alignment: .top) {
                 Color.black.opacity(0.001).contentShape(Rectangle()).onPress { _ in session.closeProjectSearch() }
                 panel.padding(.top, 48).padding(.horizontal, 12)
@@ -86,21 +86,24 @@ struct ProjectSearchPopup: View {
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(Array(search.results.enumerated()), id: \.element.id) { index, result in
-                            ProjectSearchRow(result: result, selected: index == search.selectedIndex,
-                                             select: { search.select(index) }, open: { session.openProjectSearchResult(result) })
+                            SearchResultRow(result: result, selected: index == search.selectedIndex,
+                                            select: { search.select(index) }, open: { session.openProjectSearchResult(result) })
                                 .id(result.id)
                         }
                     }
                     .padding(.vertical, 4)
                 }
-                .frame(height: min(340, CGFloat(search.results.count) * Theme.treeRowHeight + 8))
+                .frame(height: min(340, CGFloat(search.results.count) * SearchResultRow.height + 8))
                 .onChange(of: search.selected?.id) { _, id in if let id { proxy.scrollTo(id) } }
             }
         }
     }
 }
 
-private struct ProjectSearchRow: View {
+/// 全局搜索、查找文件和最近的文件共用两行布局，路径在窄栏里也有独立的一行。
+struct SearchResultRow: View {
+    static let height: CGFloat = 38
+
     let result: ProjectSearch.Result
     let selected: Bool
     let select: () -> Void
@@ -130,27 +133,33 @@ private struct ProjectSearchRow: View {
 
     var body: some View {
         let detail = result.symbol.map { symbol in
-            let source = "\(result.path):\(symbol.line + 1)"
+            let source = "\(result.displayPath):\(symbol.line + 1)"
             let owner = String(symbol.qualifiedName.dropLast(symbol.name.count)).dropLast()
             return owner.isEmpty ? source : "\(owner) · \(source)"
-        } ?? (result.path as NSString).deletingLastPathComponent
+        } ?? result.displayPath
         HStack(spacing: 7) {
             Image(systemName: icon.systemName).font(.system(size: 12)).foregroundStyle(icon.color).frame(width: 17)
-            Text(name).font(Theme.uiFont).foregroundStyle(Theme.text).lineLimit(1)
-                .layoutPriority(1)
-            if !detail.isEmpty {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name).font(Theme.uiFont).foregroundStyle(Theme.text).lineLimit(1).truncationMode(.middle)
                 Text(detail).font(Theme.smallFont).foregroundStyle(Theme.secondaryText).lineLimit(1).truncationMode(.middle)
             }
-            Spacer(minLength: 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.horizontal, 10).frame(height: Theme.treeRowHeight)
+        .padding(.horizontal, 10).frame(height: Self.height)
         .background(selected ? Theme.selection : hovering ? Theme.hover.opacity(0.5) : .clear)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onPress { _ in select() } release: { clicked in if clicked { open() } }
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityAction { open() }
-        .help(detail.isEmpty ? result.path : detail)
+        .help(detail)
+    }
+}
+
+extension SearchResultRow {
+    init(match: FileSearchMatch, selected: Bool, select: @escaping () -> Void, open: @escaping () -> Void) {
+        self.init(result: ProjectSearch.Result(path: match.entry.path, matchedNameIndices: match.matchedNameIndices),
+                  selected: selected, select: select, open: open)
     }
 }
 
@@ -160,16 +169,16 @@ private extension ProjectSearch.Scope {
         case .all: return "全部"
         case .types: return "类"
         case .files: return "文件"
-        case .symbols: return "符号"
+        case .symbols: return "函数和变量"
         }
     }
 
     var placeholder: String {
         switch self {
-        case .all: return "搜索类、文件和符号"
+        case .all: return "搜索类、文件、方法、函数和变量"
         case .types: return "搜索类名或接口名"
         case .files: return "搜索文件名或路径"
-        case .symbols: return "搜索方法、函数和变量"
+        case .symbols: return "搜索方法名、函数名或变量名"
         }
     }
 }

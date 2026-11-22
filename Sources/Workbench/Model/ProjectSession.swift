@@ -56,8 +56,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     @Published private(set) var commit: CommitController?
     @Published private(set) var history: HistoryController?
     var hasGit: Bool { commit != nil }
-    /// 项目视图里的文件搜索。
-    let search: FileSearchController
+    /// 项目侧栏与浮层共用的搜索。
     let projectSearch: ProjectSearchController
     /// 「查找」工具窗口：全项目文本搜索（⌃⇧F）。
     let textSearch: TextSearchController
@@ -170,18 +169,13 @@ final class ProjectSession: ObservableObject, Identifiable {
         let project = Project(root: root)
         self.project = project
         self.id = project.root.path
-        self.search = FileSearchController(root: project.root)
         self.projectSearch = ProjectSearchController(root: project.root, renderer: renderer)
         self.recentFiles = RecentFilesController(root: project.root, defaults: defaults)
         // git 先给上：仓库根还没解析出来时就搜也走 git grep；git 说不在仓库里，控制器自己退回逐个读文件
         self.textSearch = TextSearchController(root: project.root, git: git)
         projectSearch.inputs = { [weak self] in
             guard let self else { return .init(drafts: [:], isExcluded: { _, _ in false }) }
-            let excluded = self.search.isExcluded
-            let noRepository = self.project.repositoryRoot == nil
-            return .init(drafts: self.draftsByPath, isExcluded: { path, directory in
-                excluded(path, directory) || (noRepository && directory && TextSearchScanner.skipsDirectory(path))
-            })
+            return .init(drafts: self.draftsByPath, isExcluded: self.sourceSearchExclusion)
         }
         Log.info("project", "打开 \(project.root.path)")
 
@@ -236,7 +230,6 @@ final class ProjectSession: ObservableObject, Identifiable {
         saveAll()
         gitTask?.cancel()
         history?.cancel()
-        search.cancel()
         textSearch.cancel()
         watcher?.stop()
         watcher = nil
@@ -628,7 +621,7 @@ final class ProjectSession: ObservableObject, Identifiable {
             pendingReveal = newURL.path
         }
         recomputeRows()
-        search.applyChanges([oldURL.path, newURL.path])
+        projectSearch.invalidate()
         if let tab = activeTab, tab.fileURL != nil, contents[tab.id] == nil { loadFile(for: tab) }
         refreshGit()
     }
@@ -1575,17 +1568,7 @@ final class ProjectSession: ObservableObject, Identifiable {
             baseTextsHead = snapshot.branch.headOID
             for documentID in Set(tabs.compactMap(documentID(for:))) { fetchBaseText(documentID: documentID) }
         }
-        // 搜索索引跳过 git 忽略的路径。闭包里只放值类型，能拿到后台去跑；忽略集变了已建的索引作废
-        if let prefix = project.repositoryRelativePath(of: project.root) {
-            let index = gitIndex
-            search.isExcluded = { path, isDirectory in
-                index.isIgnored(prefix.isEmpty ? path : prefix + "/" + path, isDirectory: isDirectory)
-            }
-            if ignoredChanged {
-                search.markStale()
-                projectSearch.invalidate()
-            }
-        }
+        if ignoredChanged { projectSearch.invalidate() }
 
         // 开着的 diff 标签：变更已经不在了的关掉（比如被提交了），其余重新算
         let stillChanged = Dictionary(uniqueKeysWithValues: snapshot.changes.map { ($0.path, $0) })
@@ -1762,7 +1745,6 @@ final class ProjectSession: ObservableObject, Identifiable {
         recomputeRows()
         reloadOpenFilesIfChanged()
         refreshGit()
-        search.applyChanges(paths)
         projectSearch.invalidate()
     }
 

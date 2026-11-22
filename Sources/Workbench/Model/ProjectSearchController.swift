@@ -2,9 +2,11 @@ import Core
 import DesignSystem
 import Foundation
 
-/// 全局搜索和 Java 实现类共用一个项目索引。单次解析只发送少量文件，切项目时停止解析。
+/// 侧栏搜索、全局搜索和 Java 实现类共用一个项目索引。单次解析只发送少量文件，切项目时停止解析。
 @MainActor
 final class ProjectSearchController: ObservableObject {
+    enum Presentation { case sidebar, popup }
+
     struct Inputs: Sendable {
         let drafts: [String: String]
         let isExcluded: @Sendable (String, Bool) -> Bool
@@ -15,7 +17,7 @@ final class ProjectSearchController: ObservableObject {
         let incomplete: Bool
     }
 
-    @Published private(set) var isShown = false
+    @Published private(set) var presentation: Presentation?
     @Published var query = "" { didSet { if oldValue != query { refreshResults(reset: true) } } }
     @Published var scope: ProjectSearch.Scope = .all { didSet { if oldValue != scope { refreshResults(reset: true) } } }
     @Published private(set) var results: [ProjectSearch.Result] = []
@@ -43,23 +45,28 @@ final class ProjectSearchController: ObservableObject {
         self.renderer = renderer
     }
 
+    var isShown: Bool { presentation != nil }
+    var location: SourceLocation? { FileReference.parseQuery(query, projectRoot: root.path).location }
     var selected: ProjectSearch.Result? { results.indices.contains(selectedIndex) ? results[selectedIndex] : nil }
 
-    func show(recent: [String]) {
+    func show(_ presentation: Presentation, recent: [String] = []) {
         self.recent = recent
-        if !isShown {
+        if self.presentation != presentation {
             scope = .all
             query = ""
-            isShown = true
-            refreshResults()
+            self.presentation = presentation
+            refreshResults(reset: true)
         }
         focusRequests += 1
         startIndexIfNeeded()
     }
 
     func close() {
-        isShown = false
+        presentation = nil
         queryTask?.cancel()
+        query = ""
+        results = []
+        selectedIndex = 0
     }
 
     func select(_ index: Int) {

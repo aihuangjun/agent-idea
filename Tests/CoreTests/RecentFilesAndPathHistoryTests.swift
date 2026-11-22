@@ -68,9 +68,9 @@ private func date(_ seconds: TimeInterval) -> Date { Date(timeIntervalSince1970:
         .enumerated().map { RecentFiles.Entry(path: $0.element, openedAt: date(TimeInterval(10 - $0.offset))) }
     // 空查询：原样（最近的在前）
     #expect(RecentFiles.filter(entries, query: " ").map(\.entry.path) == entries.map(\.path))
-    // 前缀命中排在子序列前面（AppModelTests.swift 只是子序列）；同分（两个 AppModel.swift）保持最近打开的顺序
+    // 带扩展名时只匹配整名。两个 AppModel.swift 同分，保持最近打开的顺序。
     let found = RecentFiles.filter(entries, query: "appmodel.swift")
-    #expect(found.map(\.entry.path) == ["Sources/AppModel.swift", "Sources/Other/AppModel.swift", "Tests/AppModelTests.swift"])
+    #expect(found.map(\.entry.path) == ["Sources/AppModel.swift", "Sources/Other/AppModel.swift"])
     #expect(found.first?.matchedNameIndices == Array(0..<14))
     // 都是前缀命中时纯按最近打开排
     #expect(RecentFiles.filter(entries, query: "appmodel").map(\.entry.path) == ["Sources/AppModel.swift", "Tests/AppModelTests.swift", "Sources/Other/AppModel.swift"])

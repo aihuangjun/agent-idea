@@ -90,20 +90,41 @@ public struct FileSearchMatch: Equatable, Sendable {
 /// 按文件名/路径找文件，照 IDEA 的 Go to File 的手感：
 ///
 /// - 不分大小写；
-/// - 先按文件名匹配：全等 > 前缀 > 包含 > 子序列（`amdl` 能找到 `AppModel.swift`），子序列里落在单词开头的字符加分；
-/// - 查询里带 `/` 时按整条路径匹配；文件名匹配不上的再退到路径包含；
+/// - 带扩展名的文件和点文件匹配完整名称。带目录时按完整路径组件从末尾匹配，`./` 指向项目根；
+/// - 其它名字按全等 > 前缀 > 包含 > 子序列匹配（`amdl` 能找到 `AppModel.swift`）。路径只做连续匹配；
 /// - 同分的短名字在前，再按路径字母序。
 public enum FileSearch {
+    struct Query {
+        let text: [Character]
+        let byPath: Bool
+        let rooted: Bool
+        let exactName: [Character]?
+        let hasDot: Bool
+
+        init?(_ raw: String) {
+            var normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            rooted = normalized.hasPrefix("./")
+            while normalized.hasPrefix("./") { normalized.removeFirst(2) }
+            let text = Array(normalized)
+            guard !text.isEmpty else { return nil }
+            self.text = text
+            byPath = text.contains("/")
+            let nameStart = text.lastIndex(of: "/").map { $0 + 1 } ?? 0
+            let name = Array(text[nameStart...])
+            let dot = name.lastIndex(of: ".")
+            hasDot = dot != nil
+            exactName = dot.map { $0 < name.count - 1 } == true ? name : nil
+        }
+    }
+
     /// `shouldStop` 每扫 1024 条问一次；说停就返回空（结果反正会被丢掉）。
     public static func search(_ rawQuery: String, in entries: [FileSearchEntry], limit: Int = 200, shouldStop: () -> Bool = { false }) -> [FileSearchMatch] {
-        let query = Array(rawQuery.trimmingCharacters(in: .whitespaces).lowercased())
-        guard !query.isEmpty else { return [] }
-        let byPath = query.contains("/")
+        guard let query = Query(rawQuery) else { return [] }
         var matches: [FileSearchMatch] = []
         matches.reserveCapacity(min(limit * 4, 1024))
         for (offset, entry) in entries.enumerated() {
             if offset % 1024 == 1023, shouldStop() { return [] }
-            if let match = score(entry, query: query, byPath: byPath) { matches.append(match) }
+            if let match = score(entry, query: query) { matches.append(match) }
         }
         matches.sort { lhs, rhs in
             if lhs.score != rhs.score { return lhs.score > rhs.score }
@@ -113,23 +134,54 @@ public enum FileSearch {
         return Array(matches.prefix(limit))
     }
 
-    static func score(_ entry: FileSearchEntry, query: [Character], byPath: Bool) -> FileSearchMatch? {
+    static func score(_ entry: FileSearchEntry, query: Query) -> FileSearchMatch? {
         let name = entry.lowercasedName
-        if !byPath {
-            if name == query { return FileSearchMatch(entry: entry, score: 1000, matchedNameIndices: Array(name.indices)) }
-            if name.starts(with: query) { return FileSearchMatch(entry: entry, score: 800, matchedNameIndices: Array(0..<query.count)) }
-            if let start = firstRange(of: query, in: name) {
-                return FileSearchMatch(entry: entry, score: 600 - min(start, 100), matchedNameIndices: Array(start..<(start + query.count)))
-            }
-            if let (indices, bonus) = subsequence(query, in: name) {
-                return FileSearchMatch(entry: entry, score: 300 + bonus - min(indices.last! - indices.first! - query.count + 1, 100), matchedNameIndices: indices)
-            }
-        }
         let path = entry.lowercasedPath
-        // 整条路径对上（从 Agent 输出里粘来的 `Sources/Foo.swift:12`）：排第一，别被同名的长路径挤下去
-        if byPath, path == query { return FileSearchMatch(entry: entry, score: 1000, matchedNameIndices: Array(entry.lowercasedName.indices)) }
+        if query.rooted {
+            if path == query.text { return FileSearchMatch(entry: entry, score: 1000, matchedNameIndices: Array(name.indices)) }
+            guard query.text.last == "/", path.starts(with: query.text) else { return nil }
+            return FileSearchMatch(entry: entry, score: 800, matchedNameIndices: [])
+        }
+        if let exactName = query.exactName {
+            guard name == exactName else { return nil }
+            if !query.byPath || path == query.text {
+                return FileSearchMatch(entry: entry, score: 1000, matchedNameIndices: Array(name.indices))
+            }
+            let start = path.count - query.text.count
+            guard start > 0, path[start - 1] == "/", path[start...].elementsEqual(query.text) else { return nil }
+            return FileSearchMatch(entry: entry, score: 800, matchedNameIndices: Array(name.indices))
+        }
+        if !query.byPath {
+            if let match = nameMatch(entry, query: query.text, fuzzy: !query.hasDot) { return match }
+            guard !query.hasDot else { return nil }
+        } else if path == query.text {
+            return FileSearchMatch(entry: entry, score: 1000, matchedNameIndices: Array(name.indices))
+        }
+        return pathMatch(entry, query: query.text, fuzzy: false)
+    }
+
+    static func scoreSymbol(_ entry: FileSearchEntry, query: [Character]) -> FileSearchMatch? {
+        let fuzzy = !query.contains(".")
+        return nameMatch(entry, query: query, fuzzy: fuzzy) ?? pathMatch(entry, query: query, fuzzy: fuzzy)
+    }
+
+    private static func nameMatch(_ entry: FileSearchEntry, query: [Character], fuzzy: Bool) -> FileSearchMatch? {
+        let name = entry.lowercasedName
+        if name == query { return FileSearchMatch(entry: entry, score: 1000, matchedNameIndices: Array(name.indices)) }
+        if name.starts(with: query) { return FileSearchMatch(entry: entry, score: 800, matchedNameIndices: Array(0..<query.count)) }
+        if let start = firstRange(of: query, in: name) {
+            return FileSearchMatch(entry: entry, score: 600 - min(start, 100), matchedNameIndices: Array(start..<(start + query.count)))
+        }
+        if fuzzy, let (indices, bonus) = subsequence(query, in: name) {
+            return FileSearchMatch(entry: entry, score: 300 + bonus - min(indices.last! - indices.first! - query.count + 1, 100), matchedNameIndices: indices)
+        }
+        return nil
+    }
+
+    private static func pathMatch(_ entry: FileSearchEntry, query: [Character], fuzzy: Bool) -> FileSearchMatch? {
+        let path = entry.lowercasedPath
         if let start = firstRange(of: query, in: path) { return FileSearchMatch(entry: entry, score: 200 - min(path.count - start, 100) / 10, matchedNameIndices: []) }
-        if let (indices, bonus) = subsequence(query, in: path) {
+        if fuzzy, let (indices, bonus) = subsequence(query, in: path) {
             return FileSearchMatch(entry: entry, score: 100 + bonus / 2 - min(indices.last! - indices.first! - query.count + 1, 90), matchedNameIndices: [])
         }
         return nil
