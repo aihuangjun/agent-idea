@@ -94,6 +94,7 @@ public struct AgentIDEARootScene: Scene {
                     .disabled(workbench.active?.blameFile == nil)
             }
         }
+        Settings { WorkspaceChatSettingsView(controller: workbench.chatSettings) }
     }
 
     /// 文件：打开 / 最近项目、保存、从磁盘重新加载、关闭。
@@ -106,6 +107,9 @@ public struct AgentIDEARootScene: Scene {
                     Button(recent.displayPath) { workbench.openProject(recent.url) }
                 }
             }
+            Button("新建 AI 对话") { workbench.newAIChat() }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .disabled(workbench.active == nil)
             Divider()
             Button("保存") { workbench.active?.saveActiveTab() }
                 .keyboardShortcut("s", modifiers: .command)
@@ -204,6 +208,10 @@ public struct AgentIDEARootScene: Scene {
     /// 另开一个就是菜单栏上两个视图菜单（1.7.0 验收时用户报的）。
     @CommandsBuilder private var viewCommands: some Commands {
         CommandGroup(before: .toolbar) {
+            Button("AI 对话") { workbench.toggleAIChat() }
+                .keyboardShortcut("j", modifiers: .command)
+                .disabled(workbench.active == nil)
+            Divider()
             // IDEA 的 View → Tool Windows
             Menu("工具窗口") {
                 Button("项目") { workbench.toggleToolWindow(.project) }

@@ -39,6 +39,21 @@ enum Desktop {
         else { panel.begin(completionHandler: picked) }
     }
 
+    @MainActor static func chooseChatReferences(startingAt directory: URL, completion: @escaping ([URL]) -> Void) {
+        let panel = NSOpenPanel()
+        panel.title = "添加聊天引用"
+        panel.prompt = "添加"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.directoryURL = directory
+        let picked: (NSApplication.ModalResponse) -> Void = { response in
+            if response == .OK { completion(panel.urls) }
+        }
+        if let window = NSApp.keyWindow { panel.beginSheetModal(for: window, completionHandler: picked) }
+        else { panel.begin(completionHandler: picked) }
+    }
+
     /// 在终端里运行一个脚本：生成 `.command` 包装文件交给系统打开，默认由终端执行（见 `TerminalLauncher`）。
     /// 命令由 `ScriptRunner` 定（Python 优先用 uv、shell 按扩展名选解释器）。1.7.2 起这是唯一的运行方式：内置运行窗口已删。
     /// 读的是磁盘上的内容，调用方先 `saveAll`。失败了返回错误文案，由调用方决定显示在哪。

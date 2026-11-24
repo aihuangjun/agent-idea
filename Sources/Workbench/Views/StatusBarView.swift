@@ -56,6 +56,7 @@ struct StatusBarView: View {
                 Button { preferences.resetZoom() } label: { Text("\(Int((preferences.zoom * 100).rounded()))%") }
                     .buttonStyle(.plain).toolTip("点击恢复 100%")
             }
+            WorkspaceChatToggle(workbench: workbench)
             // 外观的快捷入口：只在浅色 / 深色之间来回，图标就是当前实际的那一档
             // （跟随系统仍在菜单栏的「外观」里选——系统的 View 菜单，中文系统叫「显示」；这里显示的是它此刻落到的浅色或深色）
             Button { preferences.theme = AppTheme.toggled(isDark: isDark) } label: {

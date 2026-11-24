@@ -53,6 +53,13 @@ final class WorkbenchModel: ObservableObject {
     @Published private(set) var sessions: [ProjectSession] = []
     @Published private(set) var activeSessionID: String?
     @Published private(set) var recentProjects: [RecentProject] = []
+    @Published var isChatPresented = false
+    @Published private(set) var chatTabs: [WorkspaceChatTab] = []
+    @Published private(set) var activeChatID: UUID?
+    @Published var chatDrawerWidth: CGFloat {
+        didSet { defaults.set(Double(chatDrawerWidth), forKey: "chat.drawer.width") }
+    }
+    private var chatNumbers: [String: Int] = [:]
     @Published var toolWindow: ToolWindow? = .project {
         didSet { defaults.set(toolWindow?.rawValue ?? "", forKey: "toolWindow") }
     }
@@ -74,6 +81,8 @@ final class WorkbenchModel: ObservableObject {
     var canHideToolWindow: Bool { toolWindow != nil }
 
     let preferences: ReadingPreferences
+    let chatSettings: WorkspaceChatSettings
+    private let chatClient: OpenAIWorkspaceChat
     let renderer = ContentRenderer()
     private let git: GitClient?
     private let fileManager = FileManager.default
@@ -91,15 +100,20 @@ final class WorkbenchModel: ObservableObject {
     }
 
     init(git: GitClient? = GitClient.locate(), defaults: UserDefaults = .standard, recentFile: URL = AppPaths.recentProjectsFile,
-         editorHistories: EditorHistoryStore? = nil) {
+         editorHistories: EditorHistoryStore? = nil, chatSettings: WorkspaceChatSettings? = nil,
+         chatClient: OpenAIWorkspaceChat = OpenAIWorkspaceChat()) {
         self.git = git
         self.editorHistories = editorHistories
+        self.chatSettings = chatSettings ?? WorkspaceChatSettings(client: chatClient)
+        self.chatClient = chatClient
         self.defaults = defaults
         self.recentStore = JSONFileStore(url: recentFile)
         self.preferences = ReadingPreferences(defaults: defaults)
 
         let savedWidth = defaults.double(forKey: "toolWindow.width")
         toolWindowWidth = savedWidth > 0 ? CGFloat(savedWidth) : 280
+        let savedChatWidth = defaults.double(forKey: "chat.drawer.width")
+        chatDrawerWidth = savedChatWidth > 0 ? CGFloat(savedChatWidth) : ChatPanelLayout.defaultWidth
         if let saved = defaults.string(forKey: "toolWindow") {
             toolWindow = saved.isEmpty ? nil : ToolWindow(rawValue: saved)
         }
@@ -204,6 +218,79 @@ final class WorkbenchModel: ObservableObject {
         }
     }
 
+    // MARK: - AI 对话
+
+    var activeChat: WorkspaceChatTab? { chatTabs.first { $0.id == activeChatID } }
+
+    func toggleAIChat() {
+        guard active != nil else { return }
+        if chatTabs.isEmpty { newAIChat() } else { isChatPresented.toggle() }
+    }
+
+    func newAIChat() {
+        guard let session = active else { return }
+        makeAIChat(in: session)
+    }
+
+    func selectAIChatWorkspace(_ projectID: String) {
+        guard let current = activeChat, current.projectID != projectID,
+              let session = sessions.first(where: { $0.id == projectID }) else { return }
+        let draftTab = current.chat.turns.isEmpty ? current : nil
+        makeAIChat(in: session, replacing: draftTab)
+    }
+
+    private func makeAIChat(in session: ProjectSession, replacing draftTab: WorkspaceChatTab? = nil) {
+        do {
+            let workspace = try AIWorkspace(root: session.project.root)
+            let chat = WorkspaceChatController(workspace: workspace, settings: chatSettings, client: chatClient) { [weak session] request in
+                guard let session else { throw CancellationError() }
+                return try await session.invokeChatTool(request, workspace: workspace)
+            }
+            chatNumbers[session.id, default: 0] += 1
+            let number = chatNumbers[session.id, default: 1]
+            let tab = WorkspaceChatTab(id: draftTab?.id ?? UUID(), projectID: session.id,
+                                       title: "\(session.project.name) \(number)", chat: chat)
+            if let draftTab, let index = chatTabs.firstIndex(where: { $0.id == draftTab.id }) {
+                chat.copyDraft(from: draftTab.chat)
+                chatTabs[index] = tab
+            } else {
+                chatTabs.append(tab)
+            }
+            activeChatID = tab.id
+            isChatPresented = true
+        } catch { session.showError(error.localizedDescription) }
+    }
+
+    func selectAIChat(_ id: UUID) {
+        guard chatTabs.contains(where: { $0.id == id }) else { return }
+        activeChatID = id
+    }
+
+    func closeAIChat(_ id: UUID) {
+        guard let index = chatTabs.firstIndex(where: { $0.id == id }) else { return }
+        let removed = chatTabs.remove(at: index)
+        removed.chat.stop()
+        if activeChatID == id {
+            activeChatID = (chatTabs.indices.contains(index) ? chatTabs[index] : chatTabs.last)?.id
+        }
+        if chatTabs.isEmpty { isChatPresented = false }
+    }
+
+    func openAIChatFile(_ path: String, in tab: WorkspaceChatTab) {
+        guard let session = sessions.first(where: { $0.id == tab.projectID }),
+              let url = try? tab.chat.workspace.fileURL(for: path) else { return }
+        activate(session.id)
+        session.openFile(url, pinned: true)
+    }
+
+    func aiChatCurrentFile(_ tab: WorkspaceChatTab) -> String? {
+        guard let session = sessions.first(where: { $0.id == tab.projectID }), let activeTab = session.activeTab,
+              let url = session.documentURL(for: activeTab),
+              let path = FileReference.relativePath(of: url.path, root: tab.chat.workspace.root.path),
+              (try? tab.chat.workspace.fileURL(for: path)) != nil else { return nil }
+        return path
+    }
+
     // MARK: - 项目
 
     /// 打开一个目录。已经开着的直接切过去。传进来的是文件的话，打开所在目录并顺手打开那个文件。
@@ -257,6 +344,8 @@ final class WorkbenchModel: ObservableObject {
 
     func closeProject(_ sessionID: String? = nil) {
         guard let id = sessionID ?? activeSessionID, let index = sessions.firstIndex(where: { $0.id == id }) else { return }
+        for tab in chatTabs where tab.projectID == id { closeAIChat(tab.id) }
+        chatNumbers[id] = nil
         let session = sessions.remove(at: index)
         session.tearDown()
         if activeSessionID == id {

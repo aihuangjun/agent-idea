@@ -18,6 +18,10 @@ struct WorkbenchView: View {
             if let session = workbench.active {
                 ProjectContent(session: session)
                     .id(session.id)
+                    .overlay { WorkspaceChatOverlay(workbench: workbench) }
+                    .overlay(alignment: .top) { RecentFilesPopup(session: session, recent: session.recentFiles) }
+                    .overlay(alignment: .top) { ProjectSearchPopup(session: session, search: session.projectSearch) }
+                StatusBarView(session: session)
             } else {
                 WelcomeView(openProject: chooseProject)
                     .modifier(ProjectOpeningDrop())
@@ -98,10 +102,6 @@ private struct ProjectContent: View {
             EditorAreaView(session: session)
                 .modifier(ProjectOpeningDrop())
         }
-        // ⌘E 最近的文件：浮在整个项目主体上，没有标签时也能用
-        .overlay(alignment: .top) { RecentFilesPopup(session: session, recent: session.recentFiles) }
-        .overlay(alignment: .top) { ProjectSearchPopup(session: session, search: session.projectSearch) }
-        StatusBarView(session: session)
     }
 }
 
@@ -259,8 +259,8 @@ private struct ProjectTab: View {
         .padding(.leading, 12)
         .padding(.trailing, 6)
         .frame(height: 28)
-        // 方角、撑满整行高度。选中的用比标签栏**浅**的底色，是凸起来的那种；用内容区的深色会像陷下去。
-        .background(isActive ? Theme.hover : (hovering ? Theme.hover.opacity(0.35) : Theme.panel))
+        // 标签底色只画在这一行，避免 SwiftUI 把色块延伸进上方的系统标题栏。
+        .background(isActive ? Theme.hover : (hovering ? Theme.hover.opacity(0.35) : Theme.panel), ignoresSafeAreaEdges: [])
         .overlay(alignment: .bottom) { Rectangle().fill(isActive ? Theme.accent : .clear).frame(height: 2) }
         .overlay(alignment: .trailing) { Rectangle().fill(Theme.border).frame(width: 1) }
         .contentShape(Rectangle())

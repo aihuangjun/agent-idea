@@ -202,8 +202,8 @@ struct TreeRowInteraction: NSViewRepresentable {
         // MARK: 拖拽来源
 
         func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
-            // 只在应用内移动；拖到访达、别的应用上不给
-            context == .withinApplication ? .move : []
+            // 树仍按 move 接收，聊天按 copy 接收。两种操作都只在应用内有效。
+            context == .withinApplication ? [.move, .copy] : []
         }
 
         func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {

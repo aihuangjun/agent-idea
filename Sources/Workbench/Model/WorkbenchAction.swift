@@ -5,6 +5,7 @@ import Foundation
 enum WorkbenchAction: String, CaseIterable {
     case history, blame, compareFiles, compareClipboard, copyRelative, copyReference, fileStructure, definition, quickDefinition
     case findProject, findFile, replaceFile, recentFiles, recentLocations, lastEdit, goToLine, refresh, save, branches, nextChange
+    case newAIChat
 
     private var metadata: (title: String, location: String, shortcut: String?, aliases: String) {
         switch self {
@@ -28,6 +29,7 @@ enum WorkbenchAction: String, CaseIterable {
         case .save: return ("保存", "文件", "⌘S", "save")
         case .branches: return ("分支…", "Git", nil, "git branches 切换分支")
         case .nextChange: return ("下一处变更", "导航", "F7", "next change diff")
+        case .newAIChat: return ("新建 AI 对话", "文件", "⌥⌘I", "chat gpt assistant 聊天 工作区")
         }
     }
 
@@ -53,7 +55,7 @@ enum WorkbenchAction: String, CaseIterable {
         case .copyRelative: return !pathTargets(in: session, toolWindow: toolWindow).isEmpty
         case .copyReference: return session.activeTab.flatMap { session.referenceURL(for: $0) } != nil
         case .fileStructure, .definition, .quickDefinition: return session.definitionSource != nil
-        case .findProject, .recentFiles, .recentLocations, .refresh: return true
+        case .findProject, .recentFiles, .recentLocations, .refresh, .newAIChat: return true
         case .findFile: return session.activeTab != nil
         case .replaceFile: return session.canReplaceInFile
         case .lastEdit: return session.lastEditLocation != nil
@@ -104,6 +106,7 @@ enum WorkbenchAction: String, CaseIterable {
         case .save: session.saveActiveTab()
         case .branches: session.showBranches()
         case .nextChange: session.navigateChange(.next)
+        case .newAIChat: workbench.newAIChat()
         }
     }
 }

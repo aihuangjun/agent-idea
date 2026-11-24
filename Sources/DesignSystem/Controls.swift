@@ -2,16 +2,18 @@ import AppKit
 import Core
 import SwiftUI
 
-/// 面板之间可拖动的竖向分隔条。拖动改的是左侧面板的宽度。
+/// 面板之间可拖动的竖向分隔条。默认拖动左侧面板的宽度。
 public struct ResizeHandle: View {
     @Binding var width: CGFloat
     let range: ClosedRange<CGFloat>
+    let growsLeftward: Bool
     @State private var isHovering = false
     @State private var startWidth: CGFloat?
 
-    public init(width: Binding<CGFloat>, range: ClosedRange<CGFloat>) {
+    public init(width: Binding<CGFloat>, range: ClosedRange<CGFloat>, growsLeftward: Bool = false) {
         _width = width
         self.range = range
+        self.growsLeftward = growsLeftward
     }
 
     public var body: some View {
@@ -29,7 +31,8 @@ public struct ResizeHandle: View {
                         DragGesture(minimumDistance: 1, coordinateSpace: .global)
                             .onChanged { value in
                                 if startWidth == nil { startWidth = width }
-                                width = min(range.upperBound, max(range.lowerBound, (startWidth ?? width) + value.translation.width))
+                                let delta = growsLeftward ? -value.translation.width : value.translation.width
+                                width = min(range.upperBound, max(range.lowerBound, (startWidth ?? width) + delta))
                             }
                             .onEnded { _ in startWidth = nil }
                     )

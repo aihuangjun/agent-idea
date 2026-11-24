@@ -30,10 +30,11 @@ VERSION="$(cat VERSION 2>/dev/null || echo 0.0.0)"
 BUILD_TIMESTAMP="$(date +%Y%m%d%H%M)"
 BUILD_CHANNEL="${AGENTIDEA_BUILD_CHANNEL:-debug}"
 
-echo "==> swift build -c $CONFIG"
-swift build -c "$CONFIG"
-# 产物目录问 SwiftPM 要：老的 native 后端是 .build/<arch>/<config>，6.4 起默认的 swiftbuild 后端是 .build/out/Products/<Config>
-BUILD_DIR="$(swift build -c "$CONFIG" --show-bin-path)"
+echo "==> swift build --build-system native -c $CONFIG"
+# 和 KBReader 的构建方式一致。SwiftPM 6.4 的 swiftbuild 会把部署目标写进二进制的 SDK 字段，
+# 导致新版 macOS 为相同的 SwiftUI Form 启用旧版控件样式。
+swift build --build-system native -c "$CONFIG"
+BUILD_DIR="$(swift build --build-system native -c "$CONFIG" --show-bin-path)"
 
 echo "==> 组装 $APP"
 rm -rf "$APP"

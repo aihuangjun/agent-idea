@@ -43,6 +43,8 @@ CLT 升到 macOS 27 SDK 之后，SwiftUI 的 `@State` 成了只有 Xcode 带插�
 
 ## 几个容易踩的点
 
+- **AI 对话**用 KBReader 的右侧悬浮抽屉，面板尺寸独立于编辑器，聊天标签由 `WorkbenchModel` 管理。每个 `WorkspaceChatController` 在创建时绑定 `ProjectSession.project.root`，关闭会话或项目时取消请求。`Core/AIWorkspace` 限制目录遍历和文本读写，编辑前核对未保存草稿，编辑后登记文件撤销栈。`OpenAIWorkspaceChat` 使用官方 Responses API，Key 失效或限额时按顺序切换。密钥组保存在 `~/.agentidea/ai-chat.json`（0600），首次配置可只读导入 KBReader 按顺序去重后的第 1 和第 3 把 Key。
+
 - **`Bundle.module` 不能用**：library target 的资源在打包后找不到。走 `WebResources.bundle`，名字 `AgentIDEA_DesignSystem.bundle` 在 build_app.sh、WebResources.swift 两处硬编码，架构测试核对它们一致。
 - **git 命令带 `GIT_OPTIONAL_LOCKS=0`**：否则 `git status` 会写 `.git/index`，被 FSEvents 监听到，再触发一次 status，循环不止。`DirectoryWatcher.isRelevant` 另外把 `.git/` 里除 index/HEAD/refs 之外的噪音都滤掉。
 - **`git diff --no-index` 有差异时退出码是 1**，`GitClient.diff` 接受 0 和 1。

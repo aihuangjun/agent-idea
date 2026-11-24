@@ -101,6 +101,7 @@ private struct EmptyEditorView: View {
                 shortcut("保存", "⌘S")
                 shortcut("从磁盘重新加载", "⌘R")
                 shortcut("打开项目", "⌘O")
+                shortcut("AI 对话", "⌘J")
                 shortcut("关闭标签", "⌘W")
             }
             .font(Theme.smallFont)
