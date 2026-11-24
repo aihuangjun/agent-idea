@@ -335,6 +335,9 @@ private func makeRemoteAndClones(_ git: GitClient, in directory: URL) async thro
     #expect(list.local(named: "master")?.upstream == "origin/master")
     #expect(list.remote == ["origin/master", "origin/dev", "up/stream/x"], "默认分支排最前，origin/HEAD 不算")
     #expect(list.defaultRemoteBranch == "origin/master")
+    #expect(list.checkoutShortcut == "origin/master")
+    let mainIsDefault = GitBranchList(local: list.local, remote: ["origin/main", "origin/master"], defaultRemoteBranch: "origin/main", remotes: ["origin"])
+    #expect(mainIsDefault.checkoutShortcut == "origin/master")
     #expect(list.preferredRemote == "origin")
     #expect(list.localName(for: "up/stream/x") == "x", "远程名里有 / 也按最长前缀去")
     #expect(list.localName(for: "origin/feat/b") == "feat/b")
@@ -344,8 +347,10 @@ private func makeRemoteAndClones(_ git: GitClient, in directory: URL) async thro
     // 远程没告诉我们默认分支（没有 origin/HEAD）：退回 main / master
     let fallback = GitBranchList.parse("refs/remotes/origin/main\u{1f}\u{1f} \nrefs/remotes/origin/x\u{1f}\u{1f} \n", remotes: ["origin"], remoteHead: nil)
     #expect(fallback.defaultRemoteBranch == "origin/main")
+    #expect(fallback.checkoutShortcut == "origin/main")
     let none = GitBranchList.parse("refs/heads/main\u{1f}\u{1f}*\n", remotes: [], remoteHead: nil)
     #expect(none.defaultRemoteBranch == nil && none.preferredRemote == nil && none.suggestedUpstream(for: "main") == nil)
+    #expect(none.checkoutShortcut == nil)
 }
 
 @Test func branchNameValidation() {

@@ -7,7 +7,6 @@ import UniformTypeIdentifiers
 /// 窗口内容：顶栏（项目标签）+ 左侧工具条 + 工具窗口 + 编辑区 + 状态栏。没打开项目时是欢迎页。
 struct WorkbenchView: View {
     @EnvironmentObject private var workbench: WorkbenchModel
-    @State private var isDropTargeted = false
     /// 外壳的颜色由 `NSApp.appearance` + `Theme` 的动态色自动跟着走；WebView 里的正文得我们自己告诉它。
     /// 观察 `colorScheme` 而不是偏好：选「跟随系统」时系统换深浅也要跟上。
     @Environment(\.colorScheme) private var colorScheme
@@ -15,33 +14,18 @@ struct WorkbenchView: View {
     var body: some View {
         VStack(spacing: 0) {
             HeaderBar(openProject: chooseProject)
+                .modifier(ProjectOpeningDrop())
             if let session = workbench.active {
                 ProjectContent(session: session)
                     .id(session.id)
             } else {
                 WelcomeView(openProject: chooseProject)
+                    .modifier(ProjectOpeningDrop())
             }
         }
         .background(Theme.editorBackground)
         .foregroundStyle(Theme.text)
         .background(WindowConfigurator { workbench.active?.showProjectSearch() }.frame(width: 0, height: 0))
-        .overlay {
-            if isDropTargeted {
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(Theme.accent, lineWidth: 2)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent.opacity(0.08)))
-                    .padding(6)
-                    .allowsHitTesting(false)
-            }
-        }
-        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
-            guard let provider = providers.first else { return false }
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                guard let url else { return }
-                Task { @MainActor in workbench.openProject(url) }
-            }
-            return true
-        }
         .onReceive(NotificationCenter.default.publisher(for: .agentIDEAOpenProject)) { _ in chooseProject() }
         .onAppear { workbench.renderer.setTheme(light: colorScheme == .light) }
         .onChange(of: colorScheme) { _, scheme in workbench.renderer.setTheme(light: scheme == .light) }
@@ -59,6 +43,33 @@ struct WorkbenchView: View {
         if let root = workbench.active?.project.root { panel.directoryURL = root.deletingLastPathComponent() }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         workbench.openProject(url)
+    }
+}
+
+/// 打开项目的拖放区避开项目树。树上拒收的拖放也不会交给打开项目的入口。
+private struct ProjectOpeningDrop: ViewModifier {
+    @EnvironmentObject private var workbench: WorkbenchModel
+    @State private var isTargeted = false
+
+    func body(content: Content) -> some View {
+        content
+            .overlay {
+                if isTargeted {
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(Theme.accent, lineWidth: 2)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.accent.opacity(0.08)))
+                        .padding(6)
+                        .allowsHitTesting(false)
+                }
+            }
+            .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
+                guard let provider = providers.first else { return false }
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url else { return }
+                    Task { @MainActor in workbench.openProject(url) }
+                }
+                return true
+            }
     }
 }
 
@@ -85,6 +96,7 @@ private struct ProjectContent: View {
                 ResizeHandle(width: $workbench.toolWindowWidth, range: 180...700)
             }
             EditorAreaView(session: session)
+                .modifier(ProjectOpeningDrop())
         }
         // ⌘E 最近的文件：浮在整个项目主体上，没有标签时也能用
         .overlay(alignment: .top) { RecentFilesPopup(session: session, recent: session.recentFiles) }

@@ -35,6 +35,11 @@ public struct GitBranchList: Equatable, Sendable {
 
     public var current: Local? { local.first(where: \.isCurrent) }
 
+    /// 分支弹窗的快捷入口。仓库有 origin/master 就固定在顶部，否则用实际的远程默认分支。
+    public var checkoutShortcut: String? {
+        remote.contains("origin/master") ? "origin/master" : defaultRemoteBranch
+    }
+
     public func local(named name: String) -> Local? { local.first { $0.name == name } }
 
     /// 新分支、同步时优先用的远程：有 `origin` 就是它，否则第一个。

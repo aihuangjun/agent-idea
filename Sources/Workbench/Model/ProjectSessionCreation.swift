@@ -2,6 +2,47 @@ import Core
 import Foundation
 
 extension ProjectSession {
+    func canImportFiles(_ sources: [URL], into directory: URL) -> Bool {
+        !sources.isEmpty && (try? FileImport.plan(sources, into: directory, fileManager: fileManager)) != nil
+    }
+
+    func importFiles(_ sources: [URL], into directory: URL) {
+        let fileManager = self.fileManager
+        Task { [weak self] in
+            let (copied, failure) = await Task.detached(priority: .userInitiated) { () -> ([URL], String?) in
+                var copied: [URL] = []
+                do {
+                    for item in try FileImport.plan(sources, into: directory, fileManager: fileManager) {
+                        try fileManager.copyItem(at: item.source, to: item.destination)
+                        copied.append(item.destination)
+                    }
+                    return (copied, nil)
+                } catch {
+                    return (copied, error.userFacingDescription)
+                }
+            }.value
+            guard let self else { return }
+            if let first = copied.first {
+                self.refreshTree(directoryContaining: first)
+                self.revealInTree(first)
+                self.projectSearch.invalidate()
+                self.refreshGit()
+                if copied.count == 1 {
+                    self.recordUndo("复制 \(first.lastPathComponent)", .createFile(url: first, trashed: nil))
+                } else {
+                    let operations = copied.map { UndoableOperation(title: "复制 \($0.lastPathComponent)", kind: .createFile(url: $0, trashed: nil)) }
+                    self.recordUndo("复制 \(copied.count) 个文件", .batch(operations))
+                }
+            }
+            if let failure {
+                let progress = copied.isEmpty ? "" : "已复制 \(copied.count) 个文件，"
+                self.showError("\(progress)复制失败：\(failure)")
+            } else if !copied.isEmpty {
+                self.notify("已复制 \(copied.count) 个文件")
+            }
+        }
+    }
+
     /// 两种新建共用名字规则，包括失效符号链接也占名的检查。
     func newItemProblem(in directory: URL, name: String) -> FileRename.Problem? {
         FileRename.validate(name, currentName: "") { entryExists(directory.appendingPathComponent($0).path) }

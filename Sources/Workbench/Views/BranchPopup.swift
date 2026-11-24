@@ -3,7 +3,7 @@ import DesignSystem
 import SwiftUI
 
 /// 分支弹窗（IDEA 的 Git Branches）：状态栏的分支名、Git → 分支… 打开。
-/// 顶上搜索、「新建分支…」（默认从 origin/master 开），下面本地分支、远程分支（默认分支排第一、标「默认」）。
+/// 顶上搜索、「新建分支…」和常用远程分支，下面是可滚动的本地和远程分支列表。
 /// 点一下就签出；右键可以「从这里新建分支…」。
 struct BranchPopup: View {
     @ObservedObject var session: ProjectSession
@@ -17,7 +17,8 @@ struct BranchPopup: View {
                     switch key {
                     case .submit:
                         // 没输入就回车什么都不做：不然一个回车就切到了列表里第一个分支
-                        if !filter.trimmingCharacters(in: .whitespaces).isEmpty, let first = matches.first { first.action() }
+                        if !query.isEmpty, let list = session.branchList,
+                           let first = entries(list).first(where: { !$0.isCurrent && matchesFilter($0) }) { first.action() }
                     case .cancel:
                         session.isBranchPopupShown = false
                     default:
@@ -38,12 +39,18 @@ struct BranchPopup: View {
             Rectangle().fill(Theme.border).frame(height: 1).padding(.vertical, 4)
 
             if let list = session.branchList {
+                let shown = entries(list).filter(matchesFilter)
+                let shortcut = query.isEmpty ? shown.first { $0.isRemote && $0.name == list.checkoutShortcut } : nil
+                if let shortcut {
+                    branchRow(shortcut)
+                    Rectangle().fill(Theme.border).frame(height: 1).padding(.vertical, 4)
+                }
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
-                        section("本地分支", entries(list).filter { !$0.isRemote })
-                        section("远程分支", entries(list).filter(\.isRemote))
-                        if matches.isEmpty {
-                            Text(filter.isEmpty ? "没有分支" : "没有匹配的分支").font(Theme.smallFont).foregroundStyle(Theme.mutedText).padding(10)
+                        section("本地分支", shown.filter { !$0.isRemote })
+                        section("远程分支", shown.filter { $0.isRemote && $0.id != shortcut?.id })
+                        if shown.isEmpty {
+                            Text(query.isEmpty ? "没有分支" : "没有匹配的分支").font(Theme.smallFont).foregroundStyle(Theme.mutedText).padding(10)
                         }
                     }
                 }
@@ -60,24 +67,25 @@ struct BranchPopup: View {
 
     @ViewBuilder
     private func section(_ title: String, _ items: [Entry]) -> some View {
-        let shown = items.filter(matchesFilter)
-        if !shown.isEmpty {
+        if !items.isEmpty {
             Text(title).font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.mutedText)
                 .padding(.horizontal, 12).padding(.top, 6).padding(.bottom, 2)
-            ForEach(shown) { entry in
-                BranchPopupRow(title: entry.name, detail: entry.detail, systemImage: entry.systemImage, isCurrent: entry.isCurrent,
-                               isEnabled: session.canSwitchBranch, action: entry.action)
-                    .contextMenu {
-                        if !entry.isCurrent { Button("签出") { entry.action() } }
-                        Button("从 \(entry.name) 新建分支…") { requestNewBranch(from: entry.name) }
-                        if !entry.isCurrent {
-                            Divider()
-                            // 当前分支比它多改了什么（<分支>...HEAD），在提交历史的比较模式里看；不动工作区，同步、切分支进行中也能用
-                            Button("与当前分支比较") { session.compareWithCurrentBranch(entry.name) }
-                        }
-                    }
-            }
+            ForEach(items) { branchRow($0) }
         }
+    }
+
+    private func branchRow(_ entry: Entry) -> some View {
+        BranchPopupRow(title: entry.name, detail: entry.detail, systemImage: entry.systemImage, isCurrent: entry.isCurrent,
+                       isEnabled: session.canSwitchBranch, action: entry.action)
+            .contextMenu {
+                if !entry.isCurrent { Button("签出") { entry.action() } }
+                Button("从 \(entry.name) 新建分支…") { requestNewBranch(from: entry.name) }
+                if !entry.isCurrent {
+                    Divider()
+                    // 在提交历史里比较 <分支>...HEAD，不动工作区。
+                    Button("与当前分支比较") { session.compareWithCurrentBranch(entry.name) }
+                }
+            }
     }
 
     /// 弹窗里的一行。
@@ -112,13 +120,9 @@ struct BranchPopup: View {
         return local + remote
     }
 
-    private var matches: [Entry] {
-        guard let list = session.branchList else { return [] }
-        return entries(list).filter { !$0.isCurrent && matchesFilter($0) }
-    }
+    private var query: String { filter.trimmingCharacters(in: .whitespaces) }
 
     private func matchesFilter(_ entry: Entry) -> Bool {
-        let query = filter.trimmingCharacters(in: .whitespaces)
         return query.isEmpty || entry.name.localizedCaseInsensitiveContains(query)
     }
 

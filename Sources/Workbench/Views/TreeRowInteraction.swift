@@ -16,6 +16,18 @@ struct TreeRowInteraction: NSViewRepresentable {
     /// AppKit 对没有图像的额外拖拽项会直接不起拖拽（0.9.0 开发中多选拖不动就是这个）。
     static let pasteboardType = NSPasteboard.PasteboardType("local.agentidea.tree-node")
 
+    enum Drop: Equatable {
+        case treeNodes([String])
+        case files([URL])
+
+        var operation: NSDragOperation {
+            switch self {
+            case .treeNodes: return .move
+            case .files: return .copy
+            }
+        }
+    }
+
     /// 拖影长什么样。
     struct DragPreview {
         let title: String
@@ -35,9 +47,9 @@ struct TreeRowInteraction: NSViewRepresentable {
     var dragPaths: () -> [String] = { [] }
     /// 拖影长什么样，按拖起来的个数给（多个时是「N 个项目」）。
     var dragPreview: ((_ count: Int) -> DragPreview)?
-    /// 别的行拖过来：这些来源路径能不能放到这里。nil 表示这一行不收拖放。
-    var dropCheck: (([String]) -> Bool)?
-    var drop: ([String]) -> Void = { _ in }
+    /// nil 表示这一行不收拖放。
+    var dropCheck: ((Drop) -> Bool)?
+    var drop: (Drop) -> Void = { _ in }
     /// 拖着东西经过、且能放：行据此画高亮。
     var onTargetChange: (Bool) -> Void = { _ in }
     /// 拖着东西在这一行上停了一会儿（折叠的目录借此自动展开）。nil 表示这一行没有这回事。
@@ -75,7 +87,7 @@ struct TreeRowInteraction: NSViewRepresentable {
         init(configuration: TreeRowInteraction) {
             self.configuration = configuration
             super.init(frame: .zero)
-            registerForDraggedTypes([TreeRowInteraction.pasteboardType])
+            registerForDraggedTypes([TreeRowInteraction.pasteboardType, .fileURL])
         }
 
         @available(*, unavailable)
@@ -204,25 +216,32 @@ struct TreeRowInteraction: NSViewRepresentable {
 
         // MARK: 拖放目标
 
-        /// 剪贴板上拖着的路径（属性列表数组；单个字符串也认）；别的应用拖来的东西不认。
-        static func paths(on pasteboard: NSPasteboard) -> [String] {
-            (pasteboard.pasteboardItems ?? []).flatMap { item -> [String] in
-                if let list = item.propertyList(forType: TreeRowInteraction.pasteboardType) as? [String] { return list }
-                return item.string(forType: TreeRowInteraction.pasteboardType).map { [$0] } ?? []
+        static func payload(on pasteboard: NSPasteboard) -> Drop? {
+            if pasteboard.types?.contains(TreeRowInteraction.pasteboardType) == true {
+                let paths = (pasteboard.pasteboardItems ?? []).flatMap { item -> [String] in
+                    if let list = item.propertyList(forType: TreeRowInteraction.pasteboardType) as? [String] { return list }
+                    return item.string(forType: TreeRowInteraction.pasteboardType).map { [$0] } ?? []
+                }
+                return paths.isEmpty ? nil : .treeNodes(paths)
             }
+            let files = pasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
+            return files.isEmpty ? nil : .files(files)
         }
 
-        /// 剪贴板上这些东西能不能放到这一行：能就是「移动」，否则光标变成不允许。
-        func dropOperation(for pasteboard: NSPasteboard) -> NSDragOperation {
-            let paths = Self.paths(on: pasteboard)
-            guard !paths.isEmpty, let check = configuration.dropCheck, check(paths) else { return [] }
-            return .move
+        private func acceptedDrop(from pasteboard: NSPasteboard, allowed: NSDragOperation) -> Drop? {
+            guard let payload = Self.payload(on: pasteboard), allowed.contains(payload.operation),
+                  configuration.dropCheck?(payload) == true else { return nil }
+            return payload
+        }
+
+        func dropOperation(for pasteboard: NSPasteboard, allowed: NSDragOperation) -> NSDragOperation {
+            acceptedDrop(from: pasteboard, allowed: allowed)?.operation ?? []
         }
 
         @discardableResult
-        func performDrop(from pasteboard: NSPasteboard) -> Bool {
-            guard dropOperation(for: pasteboard) != [] else { return false }
-            configuration.drop(Self.paths(on: pasteboard))
+        func performDrop(from pasteboard: NSPasteboard, allowed: NSDragOperation) -> Bool {
+            guard let payload = acceptedDrop(from: pasteboard, allowed: allowed) else { return false }
+            configuration.drop(payload)
             return true
         }
 
@@ -237,7 +256,7 @@ struct TreeRowInteraction: NSViewRepresentable {
         override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
             setTargeted(false)
             TreeAutoscroll.shared.stop()
-            return performDrop(from: sender.draggingPasteboard)
+            return performDrop(from: sender.draggingPasteboard, allowed: sender.draggingSourceOperationMask)
         }
 
         /// 拖着东西在不在这一行上（能放才算）。按需起 spring loading 从这里走。
@@ -246,7 +265,7 @@ struct TreeRowInteraction: NSViewRepresentable {
         }
 
         private func track(_ sender: NSDraggingInfo) -> NSDragOperation {
-            let operation = dropOperation(for: sender.draggingPasteboard)
+            let operation = dropOperation(for: sender.draggingPasteboard, allowed: sender.draggingSourceOperationMask)
             setTargeted(operation != [])
             // 自动滚动交给列表级的那一个：行会被滚出视野、被 LazyVStack 回收，挂在行上的定时器跟着停，往上拖时列表就不动了
             if let scrollView = enclosingScrollView { TreeAutoscroll.shared.start(in: scrollView) }

@@ -200,17 +200,26 @@ struct ProjectTreeView: View {
         }
     }
 
-    /// 一行作为拖放目标：拖到目录上进那个目录，拖到文件上进文件所在的目录（IDEA 一样）。
-    /// 松手就搬，不弹确认（访达也不问），状态栏给「撤销」。
+    /// 拖到目录上进那个目录，拖到文件上进文件所在的目录。树内拖动是移动，访达文件拖入是复制。
     private func dropTarget(row: String, into directory: URL) -> TreeDropTarget {
         TreeDropTarget(
-            check: { paths in
-                let nodes = paths.compactMap(session.node(atPath:))
-                return nodes.count == paths.count && session.canMove(nodes, into: directory)
+            check: { payload in
+                switch payload {
+                case .treeNodes(let paths):
+                    let nodes = paths.compactMap(session.node(atPath:))
+                    return nodes.count == paths.count && session.canMove(nodes, into: directory)
+                case .files(let urls):
+                    return session.canImportFiles(urls, into: directory)
+                }
             },
-            drop: { paths in
+            drop: { payload in
                 dropTarget.clear(row: row)
-                session.move(paths.compactMap(session.node(atPath:)), into: directory)
+                switch payload {
+                case .treeNodes(let paths):
+                    session.move(paths.compactMap(session.node(atPath:)), into: directory)
+                case .files(let urls):
+                    session.importFiles(urls, into: directory)
+                }
             },
             targeted: { isTargeted in
                 if isTargeted { dropTarget.enter(row: row, directory: directory.path) } else { dropTarget.clear(row: row) }
@@ -371,8 +380,8 @@ struct DropTargetState: Equatable {
 
 /// 一行作为拖放目标要知道的事：来源能不能放、放了怎么办、拖着经过时告诉树高亮哪个目录。
 struct TreeDropTarget {
-    let check: ([String]) -> Bool
-    let drop: ([String]) -> Void
+    let check: (TreeRowInteraction.Drop) -> Bool
+    let drop: (TreeRowInteraction.Drop) -> Void
     let targeted: (Bool) -> Void
 }
 
@@ -417,7 +426,7 @@ private struct RootRow: View {
             Button("新建文件夹…") { onNewFolder() }
             Divider()
             Button("复制绝对路径") { onCopyPath() }
-            Button("复制文件名") { onCopyName() }
+            Button("复制目录名") { onCopyName() }
         }
     }
 }
@@ -448,7 +457,7 @@ struct TreeRow: View {
     /// 右键「添加到 git」：交给树处理多选与确认。
     var onAddToGit: (FileNode) -> Void = { _ in }
 
-    /// 往这个目录下新建（文件行给的是它所在的目录）。
+    /// 往这个目录下新建。
     var onNewFile: (URL) -> Void = { _ in }
     var onNewFolder: (URL) -> Void = { _ in }
     /// 拖着东西经过时这一行（目录）会接收：画高亮。由树算好传进来（文件行代表的是它所在的目录，高亮的是那个目录的行）。
@@ -578,11 +587,11 @@ private struct TreeContextMenu: View {
     let requestAddToGit: (FileNode) -> Void
 
     var body: some View {
-        // IDEA 的 New：在目录上就建在它下面，在文件上建在它旁边
-        Button("新建文件…") { requestNewFile(node.isDirectory ? node.url : node.url.deletingLastPathComponent()) }
-        Button("新建文件夹…") { requestNewFolder(node.isDirectory ? node.url : node.url.deletingLastPathComponent()) }
-        Divider()
-        if !node.isDirectory {
+        if node.isDirectory {
+            Button("新建文件…") { requestNewFile(node.url) }
+            Button("新建文件夹…") { requestNewFolder(node.url) }
+            Divider()
+        } else {
             Button("打开") { session.openFile(node.url, pinned: true) }
             if copyTargets.count == 2, copyTargets.allSatisfy({ !$0.isDirectory }) {
                 let files = copyTargets.map(\.url)
@@ -614,7 +623,7 @@ private struct TreeContextMenu: View {
         // 相对项目根的路径，粘给 Agent 用（IDEA 的 Copy Reference；目录树里没有行号，所以不叫「复制路径和行号」）
         Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个相对路径" : "复制相对路径") { copyReferences() }
         Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个绝对路径" : "复制绝对路径") { copyAbsolutePaths() }
-        Button(copyTargets.count > 1 ? "复制 \(copyTargets.count) 个文件名" : "复制文件名") { copyFileNames() }
+        Button(copyNameTitle) { copyNames() }
         Button("在访达中显示") { Desktop.revealInFinder(node.url) }
         if !node.isDirectory {
             Button("用默认应用打开") { Desktop.openWithDefaultApp(node.url) }
@@ -631,6 +640,12 @@ private struct TreeContextMenu: View {
         TreeSelection.targets(clicked: node, selection: session.selection, selected: session.selectedNodes)
     }
 
+    private var copyNameTitle: String {
+        let count = copyTargets.count
+        if count > 1 { return "复制 \(count) 个名称" }
+        return node.isDirectory ? "复制目录名" : "复制文件名"
+    }
+
     private func copyReferences() {
         let references = copyTargets.map { session.referencePath(of: $0.url) }
         Desktop.copyToClipboard(references.joined(separator: "\n"))
@@ -643,10 +658,10 @@ private struct TreeContextMenu: View {
         session.notify(targets.count > 1 ? "已复制 \(targets.count) 个绝对路径" : "已复制 \(targets[0].url.path)")
     }
 
-    private func copyFileNames() {
+    private func copyNames() {
         let targets = copyTargets
         Desktop.copyToClipboard(TreeSelection.fileNames(of: targets))
-        session.notify(targets.count > 1 ? "已复制 \(targets.count) 个文件名" : "已复制 \(targets[0].name)")
+        session.notify(targets.count > 1 ? "已复制 \(targets.count) 个名称" : "已复制 \(targets[0].name)")
     }
 }
 

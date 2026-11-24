@@ -15,7 +15,7 @@ import TestSupport
     }
 }
 
-/// 交互层的判定：右键 / ⌃点击放行给 SwiftUI；拖放只认应用内的类型，且要过 `dropCheck`。
+/// 右键 / ⌃点击放行给 SwiftUI；树节点是移动，访达的文件 URL 是复制。
 @Test @MainActor func treeRowInteractionDecidesContextClicksAndDrops() throws {
     func event(_ type: NSEvent.EventType, flags: NSEvent.ModifierFlags = []) -> NSEvent {
         NSEvent.mouseEvent(with: type, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 0)!
@@ -24,11 +24,16 @@ import TestSupport
     #expect(TreeRowInteraction.View.isContextClick(event(.leftMouseDown, flags: .control)))
     #expect(!TreeRowInteraction.View.isContextClick(event(.leftMouseDown)))
 
-    let accepted = Locked<[[String]]>([])
+    let accepted = Locked<[TreeRowInteraction.Drop]>([])
     let targeted = Locked<[Bool]>([])
     let view = TreeRowInteraction.View(configuration: TreeRowInteraction(
         dragPath: "/p/a",
-        dropCheck: { $0.allSatisfy { $0.hasPrefix("/p/ok") } },
+        dropCheck: { payload in
+            switch payload {
+            case .treeNodes(let paths): return paths.allSatisfy { $0.hasPrefix("/p/ok") }
+            case .files: return true
+            }
+        },
         drop: { accepted.value.append($0) },
         onTargetChange: { targeted.value.append($0) }
     ))
@@ -36,38 +41,106 @@ import TestSupport
     defer { pasteboard.releaseGlobally() }
     pasteboard.clearContents()
     pasteboard.setString("/p/ok", forType: TreeRowInteraction.pasteboardType)
-    #expect(view.dropOperation(for: pasteboard) == .move)
-    #expect(view.performDrop(from: pasteboard))
-    #expect(accepted.value == [["/p/ok"]])
+    #expect(view.dropOperation(for: pasteboard, allowed: .move) == .move)
+    #expect(view.performDrop(from: pasteboard, allowed: .move))
+    #expect(accepted.value == [.treeNodes(["/p/ok"])])
 
     // 多选拖过来：一个剪贴板项里放路径数组，一起交给 drop
     pasteboard.clearContents()
     let multiple = NSPasteboardItem()
     multiple.setPropertyList(["/p/ok1", "/p/ok2"], forType: TreeRowInteraction.pasteboardType)
     pasteboard.writeObjects([multiple])
-    #expect(TreeRowInteraction.View.paths(on: pasteboard) == ["/p/ok1", "/p/ok2"])
-    #expect(view.performDrop(from: pasteboard))
-    #expect(accepted.value.last == ["/p/ok1", "/p/ok2"])
+    #expect(view.performDrop(from: pasteboard, allowed: .move))
+    #expect(accepted.value.last == .treeNodes(["/p/ok1", "/p/ok2"]))
 
     pasteboard.clearContents()
     pasteboard.setString("/p/no", forType: TreeRowInteraction.pasteboardType)
-    #expect(view.dropOperation(for: pasteboard) == [])
-    #expect(!view.performDrop(from: pasteboard))
+    #expect(view.dropOperation(for: pasteboard, allowed: .move) == [])
+    #expect(!view.performDrop(from: pasteboard, allowed: .move))
     pasteboard.clearContents()
     pasteboard.setString("/p/ok", forType: .string)
-    #expect(view.dropOperation(for: pasteboard) == [], "别的应用拖来的文字不收")
+    #expect(view.dropOperation(for: pasteboard, allowed: .every) == [], "别的应用拖来的文字不收")
     #expect(accepted.value.count == 2)
+
+    pasteboard.clearContents()
+    let files = [URL(fileURLWithPath: "/finder/图 片.png"), URL(fileURLWithPath: "/finder/notes.txt")]
+    pasteboard.writeObjects(files.map { $0 as NSURL })
+    #expect(view.registeredDraggedTypes.contains(.fileURL))
+    #expect(view.dropOperation(for: pasteboard, allowed: [.copy, .move]) == .copy)
+    #expect(!view.performDrop(from: pasteboard, allowed: .move))
+    #expect(view.performDrop(from: pasteboard, allowed: .copy))
+    #expect(accepted.value.last == .files(files))
 
     // 不收拖放的行（没有 dropCheck）
     let plain = TreeRowInteraction.View(configuration: TreeRowInteraction())
     pasteboard.clearContents()
     pasteboard.setString("/p/ok", forType: TreeRowInteraction.pasteboardType)
-    #expect(plain.dropOperation(for: pasteboard) == [])
+    #expect(plain.dropOperation(for: pasteboard, allowed: .move) == [])
 
     // 拖影：图标 + 名字，宽度随名字变
     let short = TreeRowInteraction.View.image(for: .init(title: "a", systemImage: "doc", tint: .white, leadingInset: 0))
     let long = TreeRowInteraction.View.image(for: .init(title: "a-much-longer-file-name.swift", systemImage: "doc", tint: .white, leadingInset: 0))
     #expect(short.size.height == 22 && long.size.width > short.size.width + 100)
+}
+
+@Test @MainActor func finderFileDropCopiesOnlySelectedFileIntoTreeDirectory() async throws {
+    try await withTemporaryDirectory { directory in
+        let project = directory.appendingPathComponent("project", isDirectory: true)
+        let finder = directory.appendingPathComponent("finder", isDirectory: true)
+        let target = project.appendingPathComponent("target", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: finder, withIntermediateDirectories: true)
+        let source = finder.appendingPathComponent("选中 #.txt")
+        try "selected".write(to: source, atomically: true, encoding: .utf8)
+        try "other".write(to: finder.appendingPathComponent("other.txt"), atomically: true, encoding: .utf8)
+
+        let workbench = WorkbenchModel(git: nil, defaults: UserDefaults(suiteName: "agentidea-tests-\(UUID().uuidString)")!,
+                                      recentFile: directory.appendingPathComponent("recents.json"))
+        workbench.openProject(project)
+        let session = try #require(workbench.active)
+        let hosting = NSHostingView(rootView: WorkbenchView().environmentObject(workbench)
+            .environmentObject(workbench.preferences).environmentObject(Updater()))
+        let size = CGSize(width: 900, height: 500)
+        hosting.frame = CGRect(origin: .zero, size: size)
+        let window = NSWindow(contentRect: CGRect(x: -20000, y: -20000, width: size.width, height: size.height),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = hosting
+        window.orderBack(nil)
+        defer { window.orderOut(nil) }
+
+        @MainActor func targetRow(in view: NSView) -> TreeRowInteraction.View? {
+            if let row = view as? TreeRowInteraction.View, row.configuration.dragPath == target.path { return row }
+            return view.subviews.lazy.compactMap { targetRow(in: $0) }.first
+        }
+        let layoutDeadline = Date().addingTimeInterval(10)
+        while targetRow(in: hosting) == nil, Date() < layoutDeadline {
+            hosting.layoutSubtreeIfNeeded()
+            spin(0.01)
+            await Task.yield()
+        }
+        let row = try #require(targetRow(in: hosting))
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("agentidea-tests-\(UUID().uuidString)"))
+        defer { pasteboard.releaseGlobally() }
+        pasteboard.clearContents()
+        pasteboard.writeObjects([finder as NSURL])
+        #expect(!row.performDrop(from: pasteboard, allowed: .copy), "整个 Finder 目录不应被导入")
+        pasteboard.clearContents()
+        pasteboard.writeObjects([source as NSURL])
+        #expect(row.performDrop(from: pasteboard, allowed: .copy))
+
+        let copied = target.appendingPathComponent(source.lastPathComponent)
+        let copyDeadline = Date().addingTimeInterval(10)
+        while session.selectedPath != copied.path, Date() < copyDeadline {
+            spin(0.01)
+            await Task.yield()
+        }
+        #expect(session.selectedPath == copied.path)
+        #expect(try String(contentsOf: copied, encoding: .utf8) == "selected")
+        #expect(try String(contentsOf: source, encoding: .utf8) == "selected")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: target.path) == [source.lastPathComponent])
+        #expect(workbench.sessions.count == 1 && session.tabs.isEmpty)
+        #expect(!row.performDrop(from: pasteboard, allowed: .copy), "不会覆盖同名文件")
+    }
 }
 
 /// 拖着东西在折叠目录上停够 0.6s 才展开，中途离开就不展开。拖拽期间 AppKit 的事件循环跑在 eventTracking 模式，
